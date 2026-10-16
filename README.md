@@ -118,7 +118,7 @@ Python 3.12 is recommended. Prebuilt SDK wheels do not require Rust.
 > state you can afford to change, and do not expose the local demo server to untrusted networks.
 
 ```bash
-git clone <this-repo> OpenGCUA
+git clone https://github.com/Tongyi-MAI/OpenGCUA.git
 cd OpenGCUA
 
 uv venv --python 3.12
