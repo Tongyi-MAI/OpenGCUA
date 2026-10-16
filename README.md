@@ -8,6 +8,7 @@
 
 [![Website](https://img.shields.io/badge/Website-Project_Homepage-2563EB?style=flat-square&labelColor=0D1117)](https://tongyi-mai.github.io/OpenGCUA/)
 [![Paper](https://img.shields.io/badge/Paper-Tech_Report-B31B1B?style=flat-square&logo=arxiv&logoColor=white&labelColor=0D1117)](https://arxiv.org/abs/2610.22200)
+[![Trajectories](https://img.shields.io/badge/Trajectories-Explore-6B52DF?style=flat-square&labelColor=0D1117)](https://tongyi-mai.github.io/OpenGCUA/trajectories.html)
 [![macOS Harness](https://img.shields.io/badge/macOS_Harness-14%2B-7C5CFF?style=flat-square&logo=apple&logoColor=white&labelColor=0D1117)](#quick-start)
 [![License](https://img.shields.io/badge/License-Apache_2.0-22D3EE?style=flat-square&labelColor=0D1117)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join_us-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=0D1117)](#community)

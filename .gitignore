@@ -13,6 +13,7 @@ packages/harness/configs/web_storage_state.json
 build/
 /dist/
 /site/dist/
+/site/.local/
 /packages/sdk/dist/
 target/
 *.so
