@@ -181,29 +181,6 @@ problem, use the [error-indexed troubleshooting guide](QUICKSTART.md#troubleshoo
 installation and wheel builds, see the [SDK guide](packages/sdk/README.md#install). The standalone
 [native macOS app](packages/macos/README.md) is a separate distribution path with its runtime bundled.
 
-### Run modes
-
-The `our harness` (`mac_agent`) path supports three execution modes:
-
-| Mode | Browser | Native apps such as Excel and Word | Intended use |
-|---|---|---|---|
-| **Balanced** (default) | Visible, dedicated browser | Background AX/window-scoped operations first; foreground input only as a fallback | Normal interactive work |
-| **Background** | Headless, dedicated browser | Avoid activation, frontmost windows, desktop clicks, and real keyboard/mouse input; prefer file APIs, AX, and window-scoped observation | Work alongside the user with minimal disruption |
-| **Demo** | Visible browser | Activate target windows and prefer visible, real keyboard/mouse actions with short pacing delays | Recording and live demonstrations |
-
-Background mode is a best-effort low-interference policy, not a separate desktop, VM, or hard
-OS sandbox. Apps may still show a window or take focus when launched, and some controls—especially
-Office ribbons, dialogs, web views, and multi-window keyboard flows—may require foreground input.
-When a task cannot be completed safely in the background, the agent should ask before temporarily
-switching to a foreground action. For document-heavy tasks it prefers direct file libraries such as
-`openpyxl` and `python-docx` when they can produce the requested result without driving the UI.
-
-Enable Background mode from the demo hub toolbar before starting a new session, with the CLI flag
-`--background-mode`, or with `"background_mode": true` in the gitignored
-`packages/harness/configs/local.json`. Background and Demo modes are mutually exclusive and are read when a
-new agent process starts, so changing either switch does not affect an already-running session.
-These modes apply to `mac_agent` only: the `gui-only (pyautogui)` baseline always drives the real
-foreground desktop and cannot run invisibly in the background.
 
 ## Native macOS app
 
