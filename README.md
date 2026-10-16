@@ -6,9 +6,10 @@
 
 ### GPT-6 made computer use the frontier. We make it open.
 
-<!-- TODO(release): point "Paper" to the arXiv page and add the hosted trajectory dataset link. -->
-[![Paper](https://img.shields.io/badge/Paper-Tech_Report-B31B1B?style=flat-square&logo=arxiv&logoColor=white&labelColor=0D1117)](#citation)
-[![macOS](https://img.shields.io/badge/macOS-14%2B-7C5CFF?style=flat-square&logo=apple&logoColor=white&labelColor=0D1117)](#quick-start)
+[![Website](https://img.shields.io/badge/Website-Project_Homepage-2563EB?style=flat-square&labelColor=0D1117)](https://tongyi-mai.github.io/OpenGCUA/)
+[![Paper](https://img.shields.io/badge/Paper-Tech_Report-B31B1B?style=flat-square&logo=arxiv&logoColor=white&labelColor=0D1117)](https://arxiv.org/abs/2610.22200)
+[![Trajectories](https://img.shields.io/badge/Trajectories-Explore-6B52DF?style=flat-square&labelColor=0D1117)](https://tongyi-mai.github.io/OpenGCUA/trajectories.html)
+[![macOS Harness](https://img.shields.io/badge/macOS_Harness-14%2B-7C5CFF?style=flat-square&logo=apple&logoColor=white&labelColor=0D1117)](#quick-start)
 [![License](https://img.shields.io/badge/License-Apache_2.0-22D3EE?style=flat-square&labelColor=0D1117)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join_us-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=0D1117)](#community)
 [![WeChat](https://img.shields.io/badge/WeChat-Group-07C160?style=flat-square&logo=wechat&logoColor=white&labelColor=0D1117)](#community)
@@ -50,7 +51,7 @@ trajectories, efficiency optimization, and evaluation.
 ## 🔥 News
 
 <!-- Add new entries at the top, newest first. Keep version numbers in GitHub Releases, not here. -->
-- **[2026-10]** 🚀 The OpenGCUA research preview is out, with the [tech report](#citation), the
+- **[2026-10]** 🚀 The OpenGCUA research preview is out, with the [tech report](https://arxiv.org/abs/2610.22200), the
   [OSWorld integration example](packages/harness/examples/osworld/), the [macOS real-device harness](packages/harness/), the
   [Cross-Device SDK](packages/sdk/), and evaluation trajectories of 8 frontier models.
 
@@ -75,7 +76,7 @@ harness.
 
 With our real-device harness held fixed, on four macOS tasks Qwen3.8-Max used 19.4 times the reasoning tokens
 of GPT-6 Astra and still completed fewer tasks. The case studies trace this gap to model behavior, which is what
-our next release, the GCUA model, works on. The [paper](#citation) has the full setup, ablations, and case
+our next release, the GCUA model, works on. The [paper](https://arxiv.org/abs/2610.22200) has the full setup, ablations, and case
 studies.
 
 <a name="demos"></a>
@@ -112,10 +113,6 @@ This is the shortest path from a clean clone to an interactive agent. It require
 [uv](https://docs.astral.sh/uv/), Python 3.11–3.14, Rust/Cargo 1.89+, and Xcode Command Line Tools.
 Python 3.12 is recommended. Prebuilt SDK wheels do not require Rust.
 
-> **Safety warning:** the harness executes Python and Bash written by the model on your Mac.
-> This is not a security sandbox. Use a test account or machine whose files and application
-> state you can afford to change, and do not expose the local demo server to untrusted networks.
-
 ```bash
 git clone https://github.com/Tongyi-MAI/OpenGCUA.git
 cd OpenGCUA
@@ -126,6 +123,10 @@ uv pip install -e ./packages/sdk -e ./packages/harness/runtime
 
 # Install the native driver app. Its daemon is included in the app bundle.
 .venv/bin/mu setup macos
+.venv/bin/mu doctor macos
+
+.venv/bin/mu setup browser --engine chromium
+.venv/bin/mu doctor browser --engine chromium 
 
 # Create a private local configuration from the shipped defaults.
 cp packages/harness/configs/macos_demo.json packages/harness/configs/local.json
@@ -184,29 +185,6 @@ problem, use the [error-indexed troubleshooting guide](QUICKSTART.md#troubleshoo
 installation and wheel builds, see the [SDK guide](packages/sdk/README.md#install). The standalone
 [native macOS app](packages/macos/README.md) is a separate distribution path with its runtime bundled.
 
-### Run modes
-
-The `our harness` (`mac_agent`) path supports three execution modes:
-
-| Mode | Browser | Native apps such as Excel and Word | Intended use |
-|---|---|---|---|
-| **Balanced** (default) | Visible, dedicated browser | Background AX/window-scoped operations first; foreground input only as a fallback | Normal interactive work |
-| **Background** | Headless, dedicated browser | Avoid activation, frontmost windows, desktop clicks, and real keyboard/mouse input; prefer file APIs, AX, and window-scoped observation | Work alongside the user with minimal disruption |
-| **Demo** | Visible browser | Activate target windows and prefer visible, real keyboard/mouse actions with short pacing delays | Recording and live demonstrations |
-
-Background mode is a best-effort low-interference policy, not a separate desktop, VM, or hard
-OS sandbox. Apps may still show a window or take focus when launched, and some controls—especially
-Office ribbons, dialogs, web views, and multi-window keyboard flows—may require foreground input.
-When a task cannot be completed safely in the background, the agent should ask before temporarily
-switching to a foreground action. For document-heavy tasks it prefers direct file libraries such as
-`openpyxl` and `python-docx` when they can produce the requested result without driving the UI.
-
-Enable Background mode from the demo hub toolbar before starting a new session, with the CLI flag
-`--background-mode`, or with `"background_mode": true` in the gitignored
-`packages/harness/configs/local.json`. Background and Demo modes are mutually exclusive and are read when a
-new agent process starts, so changing either switch does not affect an already-running session.
-These modes apply to `mac_agent` only: the `gui-only (pyautogui)` baseline always drives the real
-foreground desktop and cannot run invisibly in the background.
 
 ## Native macOS app
 
@@ -367,13 +345,18 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 📄 Citation
 
-<!-- TODO(release): replace with the arXiv entry. -->
 ```bibtex
 @misc{opengcua2026,
-  title  = {OpenGCUA Research Preview: Toward a Fully Open Model,
-            Harness, and SDK for Generalist Computer Use},
-  author = {{MAI-UI Team}},
-  year   = {2026}
+  title         = {{OpenGCUA}: Toward a Fully Open Stack for Generalist Computer Use},
+  author        = {Hanzhang Zhou and Long Li and Quyu Kong and Lei Wang and
+                   Panrong Tong and Long Chen and Tianyu Xia and Gongjie Zhang and
+                   Xu Zhang and Chen Liu and Jianan Zhang and Chenglin Cai and
+                   Zhengwen Zeng and Steven Hoi and Yue Wang},
+  year          = {2026},
+  eprint        = {2610.22200},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CV},
+  url           = {https://arxiv.org/abs/2610.22200}
 }
 ```
 
