@@ -6,9 +6,9 @@
 
 ### GPT-6 made computer use the frontier. We make it open.
 
-<!-- TODO(release): point "Paper" to the arXiv page and add the hosted trajectory dataset link. -->
-[![Paper](https://img.shields.io/badge/Paper-Tech_Report-B31B1B?style=flat-square&logo=arxiv&logoColor=white&labelColor=0D1117)](#citation)
-[![macOS](https://img.shields.io/badge/macOS-14%2B-7C5CFF?style=flat-square&logo=apple&logoColor=white&labelColor=0D1117)](#quick-start)
+[![Website](https://img.shields.io/badge/Website-Project_Homepage-2563EB?style=flat-square&labelColor=0D1117)](https://tongyi-mai.github.io/OpenGCUA/)
+[![Paper](https://img.shields.io/badge/Paper-Tech_Report-B31B1B?style=flat-square&logo=arxiv&logoColor=white&labelColor=0D1117)](https://arxiv.org/abs/2610.22200)
+[![macOS Harness](https://img.shields.io/badge/macOS_Harness-14%2B-7C5CFF?style=flat-square&logo=apple&logoColor=white&labelColor=0D1117)](#quick-start)
 [![License](https://img.shields.io/badge/License-Apache_2.0-22D3EE?style=flat-square&labelColor=0D1117)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join_us-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=0D1117)](#community)
 [![WeChat](https://img.shields.io/badge/WeChat-Group-07C160?style=flat-square&logo=wechat&logoColor=white&labelColor=0D1117)](#community)
@@ -50,7 +50,7 @@ trajectories, efficiency optimization, and evaluation.
 ## 🔥 News
 
 <!-- Add new entries at the top, newest first. Keep version numbers in GitHub Releases, not here. -->
-- **[2026-10]** 🚀 The OpenGCUA research preview is out, with the [tech report](#citation), the
+- **[2026-10]** 🚀 The OpenGCUA research preview is out, with the [tech report](https://arxiv.org/abs/2610.22200), the
   [OSWorld integration example](packages/harness/examples/osworld/), the [macOS real-device harness](packages/harness/), the
   [Cross-Device SDK](packages/sdk/), and evaluation trajectories of 8 frontier models.
 
@@ -75,7 +75,7 @@ harness.
 
 With our real-device harness held fixed, on four macOS tasks Qwen3.8-Max used 19.4 times the reasoning tokens
 of GPT-6 Astra and still completed fewer tasks. The case studies trace this gap to model behavior, which is what
-our next release, the GCUA model, works on. The [paper](#citation) has the full setup, ablations, and case
+our next release, the GCUA model, works on. The [paper](https://arxiv.org/abs/2610.22200) has the full setup, ablations, and case
 studies.
 
 <a name="demos"></a>
@@ -367,13 +367,18 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 📄 Citation
 
-<!-- TODO(release): replace with the arXiv entry. -->
 ```bibtex
 @misc{opengcua2026,
-  title  = {OpenGCUA Research Preview: Toward a Fully Open Model,
-            Harness, and SDK for Generalist Computer Use},
-  author = {{MAI-UI Team}},
-  year   = {2026}
+  title         = {{OpenGCUA}: Toward a Fully Open Stack for Generalist Computer Use},
+  author        = {Hanzhang Zhou and Long Li and Quyu Kong and Lei Wang and
+                   Panrong Tong and Long Chen and Tianyu Xia and Gongjie Zhang and
+                   Xu Zhang and Chen Liu and Jianan Zhang and Chenglin Cai and
+                   Zhengwen Zeng and Steven Hoi and Yue Wang},
+  year          = {2026},
+  eprint        = {2610.22200},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CV},
+  url           = {https://arxiv.org/abs/2610.22200}
 }
 ```
 
