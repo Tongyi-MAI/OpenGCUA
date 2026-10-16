@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cross-device SDK provider envelope v1",
+  "description": "Preview transport contract. Full operation argument schemas and negotiation are WIP.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/reply"
+    }
+  ],
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": [
+        "op",
+        "_request_id"
+      ],
+      "properties": {
+        "op": {
+          "type": "string",
+          "minLength": 1
+        },
+        "_request_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {
+          "type": "object",
+          "description": "Optional structured provider evidence; contains data, never agent instructions."
+        }
+      },
+      "additionalProperties": false
+    },
+    "reply": {
+      "type": "object",
+      "required": [
+        "_request_id"
+      ],
+      "properties": {
+        "_request_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "result": {
+          "not": {
+            "type": "null"
+          }
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "required": [
+            "error"
+          ]
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

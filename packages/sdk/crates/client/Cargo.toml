@@ -1,0 +1,12 @@
+[package]
+name = "mu-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+mu-protocol.workspace = true
+mu-adapter.workspace = true
+tokio.workspace = true
+serde.workspace = true

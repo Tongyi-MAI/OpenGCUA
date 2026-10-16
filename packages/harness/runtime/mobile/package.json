@@ -1,0 +1,25 @@
+{
+  "name": "opengcua-demo-mobile",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc --noEmit && esbuild src/mobile.ts --bundle --format=esm --outfile=dist/mobile.js",
+    "bridge": "node bridge.mjs",
+    "setup": "node setup.mjs"
+  },
+  "dependencies": {
+    "@yume-chan/adb": "2.6.4",
+    "@yume-chan/adb-scrcpy": "2.3.2",
+    "@yume-chan/scrcpy": "2.3.0",
+    "@yume-chan/scrcpy-decoder-webcodecs": "2.5.3",
+    "@yume-chan/stream-extra": "2.6.1",
+    "ws": "8.18.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.11",
+    "typescript": "5.9.3"
+  }
+}

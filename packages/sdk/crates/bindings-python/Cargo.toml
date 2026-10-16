@@ -1,0 +1,25 @@
+[package]
+name = "mu-bindings-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+mu-core.workspace = true
+mu-runtime.workspace = true
+mu-protocol.workspace = true
+mu-client.workspace = true
+pyo3 = { version = "0.26", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.26", features = ["tokio-runtime"] }
+serde_json.workspace = true
+tokio.workspace = true
+
+mu-adapter.workspace = true
+mu-adapter-macos.workspace = true
+
+mu-host.workspace = true
+base64 = "0.22"

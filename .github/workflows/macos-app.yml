@@ -1,0 +1,86 @@
+name: Native macOS app
+
+on:
+  pull_request:
+    paths: ["packages/macos/**", "packages/harness/runtime/**", "packages/sdk/**", ".github/workflows/macos-app.yml"]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      source-ref:
+        description: Exact source commit to build
+        type: string
+        default: ""
+      app-version:
+        description: Numeric macOS app version for a release
+        type: string
+        default: ""
+      build-number:
+        description: macOS bundle build number
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source-ref }}
+          persist-credentials: false
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - uses: astral-sh/setup-uv@v6
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - name: Build standalone Apple Silicon app
+        env:
+          APP_VERSION: ${{ inputs.app-version }}
+          BUILD_NUMBER: ${{ inputs.build-number || '1' }}
+        run: |
+          args=(--identity - --build-number "$BUILD_NUMBER")
+          if [[ -n "$APP_VERSION" ]]; then args+=(--app-version "$APP_VERSION"); fi
+          uv run --no-project --python 3.12 python packages/macos/scripts/build.py "${args[@]}"
+      - name: Test signing identity selection
+        run: python3 packages/macos/tests/test_signing.py
+      - name: Test native task lifecycle and SDK integration
+        run: |
+          sdk_wheel="$(python3 -c 'from pathlib import Path; wheels = list(Path("packages/macos/build/wheels").glob("qwen_intelligence_sdk-*-cp312-*-macosx*.whl")); assert len(wheels) == 1, wheels; print(wheels[0].resolve())')"
+          uv run --no-project --python 3.12 --with ./packages/harness/runtime --with "$sdk_wheel" --with pytest pytest packages/harness/runtime/tests/test_native_host.py packages/harness/runtime/tests/test_sdk_runtime.py -q
+      - name: Test voice transcript and settings contracts
+        run: |
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/AudioInputDevices.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/RealtimeTranscript.swift packages/macos/tests/VoiceContracts.swift -o /tmp/generalist-voice-contracts
+          /tmp/generalist-voice-contracts
+      - name: Test voice task routing
+        run: |
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/AudioInputDevices.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/SpeechInput.swift packages/macos/Sources/QwenSpeechInput.swift packages/macos/Sources/AppModel.swift packages/macos/tests/VoiceRouterContracts.swift -o /tmp/generalist-voice-router-contracts
+          /tmp/generalist-voice-router-contracts
+      - name: Test configuration file reload and credential isolation
+        run: |
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/FirstLaunch.swift packages/macos/tests/ConfigContracts.swift -o /tmp/generalist-config-contracts
+          /tmp/generalist-config-contracts
+      - name: Test task input shortcuts and input method safety
+        run: |
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/TaskInputShortcut.swift packages/macos/tests/TaskInputContracts.swift -o /tmp/generalist-task-input-contracts
+          /tmp/generalist-task-input-contracts
+      - name: Test settings draft and credential destinations
+        run: |
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/SettingsEditor.swift packages/macos/tests/SettingsEditorContracts.swift -o /tmp/generalist-settings-editor-contracts
+          /tmp/generalist-settings-editor-contracts
+      - name: Test menu popover desktop transitions
+        run: |
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/MenuPopoverBehavior.swift packages/macos/tests/PopoverContracts.swift -o /tmp/generalist-popover-contracts
+          /tmp/generalist-popover-contracts
+      - name: Verify relocated runtime without a web server
+        run: uv run --no-project --python 3.12 python packages/macos/tests/test_bundle.py
+      - name: Archive local development build
+        run: bash packages/macos/scripts/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenGCUA-macOS-arm64-development
+          path: |
+            packages/macos/build/OpenGCUA-macOS-arm64.dmg
+            packages/macos/build/OpenGCUA-macOS-arm64.dmg.sha256
+          if-no-files-found: error

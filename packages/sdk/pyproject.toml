@@ -1,0 +1,49 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "qwen-intelligence-sdk"
+version = "0.1.0"
+description = "Qwen-Intelligence SDK: one programming vocabulary across computer, browser and mobile (preview)."
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+license = "Apache-2.0"
+license-files = ["LICENSE", "python/mai_ui/THIRD_PARTY_NOTICES.md", "python/mai_ui/licenses/*.txt"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.scripts]
+mu = "mai_ui.cli:main"
+
+[tool.maturin]
+manifest-path = "crates/bindings-python/Cargo.toml"
+python-source = "python"
+python-packages = ["mai_ui", "qwen_intelligence"]
+module-name = "mai_ui._native"
+locked = true
+# Keep the linker output intact; stripping can invalidate Mach-O LINKEDIT alignment.
+strip = false
+include = [
+  { path = "adapters/linux/mai_ui_linux/*.py", format = "sdist" },
+  { path = "adapters/linux/requirements.lock", format = "sdist" },
+  { path = "api/contract/*.json", format = "sdist" },
+  { path = "adapters/browser-playwright/package*.json", format = "sdist" },
+  { path = "adapters/browser-playwright/dist/*.js", format = "sdist" },
+  { path = "adapters/browser-playwright/src/*.ts", format = "sdist" },
+  { path = "adapters/browser-playwright/tsconfig.json", format = "sdist" },
+  { path = "adapters/android/agent/**/*.java", format = "sdist" },
+  { path = "adapters/android/fixture/**/*.java", format = "sdist" },
+  { path = "adapters/android/launcher/*.c", format = "sdist" },
+  { path = "scripts/*.py", format = "sdist" },
+  { path = "tests/*.py", format = "sdist" },
+]
+exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.egg-info/**"]

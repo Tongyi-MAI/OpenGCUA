@@ -1,0 +1,88 @@
+name: Project website
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/site.yml"]
+  pull_request:
+    paths: ["site/**", ".github/workflows/site.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Check build and branch publication
+        run: python -m unittest discover -s site/tests -v
+      - name: Build static pages
+        run: python site/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: project-site
+          path: site/dist
+          include-hidden-files: true
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: project-site
+          path: ${{ runner.temp }}/project-site
+      - name: Publish to site branch
+        env:
+          SITE_BUILD: ${{ runner.temp }}/project-site
+        run: bash site/publish.sh "$SITE_BUILD"
+      - name: Request GitHub Pages build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+
+          base = os.environ['GITHUB_API_URL'] + '/repos/' + os.environ['GITHUB_REPOSITORY'] + '/pages'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                     'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json',
+                     'X-GitHub-Api-Version': '2022-11-28'}
+          try:
+              with urlopen(Request(base, headers=headers), timeout=30) as response:
+                  settings = json.load(response)
+          except HTTPError as error:
+              if error.code != 404:
+                  raise
+              print('::notice::Site branch published. Configure Pages to deploy site / (root), then rerun this workflow.')
+              raise SystemExit(0)
+          source = settings.get('source', {})
+          if settings.get('build_type') == 'workflow' or source.get('branch') != 'site' or source.get('path') != '/':
+              raise SystemExit('Configure Pages to Deploy from a branch: site / (root).')
+          with urlopen(Request(base + '/builds', data=b'{}', headers=headers, method='POST'), timeout=30) as response:
+              result = json.load(response)
+          print('Pages build requested: ' + result['status'])
+          PY

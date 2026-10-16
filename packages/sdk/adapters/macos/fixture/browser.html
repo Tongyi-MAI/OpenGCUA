@@ -1,0 +1,13 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>MAI Chromium Fixture</title>
+<style>body{font:20px system-ui;margin:40px}button,input{font:inherit;margin:12px;padding:8px}#rows{height:240px;overflow:auto;border:1px solid #bbb;padding:10px}</style>
+<h1>MAI Chromium Fixture</h1><button id="increment">Increment browser counter</button><p id="counter" role="status">Browser counter: 0</p>
+<label>Browser editor <input id="editor" aria-label="Browser editor" value="initial"></label><div id="rows" tabindex="0"></div>
+<script>
+let count=0;
+const rects=()=>Object.fromEntries(['increment','editor','rows'].map(id=>[id,document.getElementById(id).getBoundingClientRect().toJSON()]));
+const report=()=>fetch('/state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ready:true,count,text:editor.value,scroll_y:rows.scrollTop,rects:rects()})});
+increment.onclick=()=>{counter.textContent='Browser counter: '+(++count);report()};
+editor.oninput=report;rows.onscroll=report;
+rows.innerHTML=Array.from({length:50},(_,i)=>'<p>Browser row '+i+'</p>').join('');
+setInterval(report,500);report();
+</script></html>

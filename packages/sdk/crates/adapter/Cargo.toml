@@ -1,0 +1,15 @@
+[package]
+name = "mu-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mu-protocol.workspace = true
+serde_json.workspace = true
+
+base64 = "0.22"
+
+tokio.workspace = true
+tempfile = "3"
+libc = "0.2"

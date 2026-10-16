@@ -1,0 +1,14 @@
+[package]
+name = "mu-adapter-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mu-broker"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+mu-protocol.workspace = true
+sha2 = "0.10"

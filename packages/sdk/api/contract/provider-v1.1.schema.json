@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Embedded provider v1.1 additions",
+  "description": "JSON-lines messages. Requests and replies use _request_id; unsolicited events have event instead. Cancellation is independently dispatched, never queued behind the operation it cancels.",
+  "oneOf": [
+    {"type":"object","required":["event","resource_id","data"],"properties":{"event":{"type":"string"},"resource_id":{"type":["string","null"]},"data":{}},"additionalProperties":false},
+    {"type":"object","required":["op","_request_id","operation_id"],"properties":{"op":{"const":"cancel"},"_request_id":{"type":"integer"},"operation_id":{"type":"string"}},"additionalProperties":true},
+    {"type":"object","required":["op","operation","_request_id","tab_id","id"],"properties":{"op":{"const":"browser"},"operation":{"const":"artifact_read"},"_request_id":{"type":"integer"},"tab_id":{"type":"string"},"id":{"type":"string"},"offset":{"type":"integer","minimum":0},"max_bytes":{"type":"integer","minimum":1,"maximum":1048576}},"additionalProperties":true}
+  ]
+}

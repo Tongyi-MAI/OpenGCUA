@@ -1,0 +1,977 @@
+from __future__ import annotations
+
+import asyncio
+import subprocess
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+import code_runtime
+import demo_hud
+import llm_entry
+import mac_agent
+import model_stream
+from sdk_backend import SdkDesktop, SdkRpcServer
+
+
+def test_checked_subprocess_failure_sets_cell_status_and_shows_child_stderr(capsys):
+    namespace = {"subprocess": subprocess, "sys": sys}
+    result = code_runtime._execute(
+        "subprocess.run([sys.executable, '-c', "
+        "'import sys; sys.stderr.write(str(7 * 7)); sys.exit(7)'], "
+        "capture_output=True, text=True, check=True)",
+        namespace,
+    )
+    captured = capsys.readouterr()
+    assert result["exit_code"] == 1
+    assert result["ok"] is False
+    assert "child stderr (diagnostic data): '49'" in captured.err
+    assert "exit status 7" in captured.err
+
+
+def test_checked_subprocess_error_limits_child_stderr():
+    try:
+        raise subprocess.CalledProcessError(3, ["child"], stderr="x" * 10000)
+    except subprocess.CalledProcessError as exc:
+        rendered = code_runtime._format_exception(exc)
+    assert "child stderr (diagnostic data):" in rendered
+    assert "[truncated]" in rendered
+    assert len(rendered) < 3000
+
+
+class FakeHttpResponse:
+    def __init__(self, data, *, content_type="application/json"):
+        self.status_code = 200
+        self._data = data
+        self.text = ""
+        self.headers = {"content-type": content_type}
+
+    async def aread(self):
+        return b""
+
+    def json(self):
+        return self._data
+
+
+class FakeHttpClient:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    async def post(self, url, *, json, headers):
+        self.calls.append((url, json, headers))
+        return self.response
+
+
+class FakeAnthropicStream:
+    status_code = 200
+    text = ""
+    headers = {"content-type": "text/event-stream"}
+
+    async def aiter_lines(self):
+        events = [
+            ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 7}}}),
+            ("content_block_start", {"type": "content_block_start", "content_block": {"type": "thinking", "thinking": ""}}),
+            ("content_block_delta", {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "plan"}}),
+            ("content_block_start", {"type": "content_block_start", "content_block": {"type": "text", "text": ""}}),
+            ("content_block_delta", {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "OK"}}),
+            ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}}),
+            ("message_stop", {"type": "message_stop"}),
+        ]
+        import json as _json
+        for name, data in events:
+            yield f"event: {name}"
+            yield "data: " + _json.dumps(data)
+            yield ""
+
+
+class FakeApps:
+    def __init__(self) -> None:
+        self.timeouts = []
+
+    async def list(self, *, timeout_ms=5000):
+        self.timeouts.append(timeout_ms)
+        return object()
+
+
+class FakeDevice:
+    def __init__(self) -> None:
+        self.ui = object()
+        self.apps = FakeApps()
+
+
+class FakeSession:
+    def __init__(self, output) -> None:
+        self.output = output
+        self.coordinate_space = "pixels"
+        self.closed = False
+        self.reset_count = 0
+        self.device = FakeDevice()
+
+    async def __aenter__(self):
+        return self
+
+    async def register(self, resource, *, name):
+        rid = resource.id if hasattr(resource, "id") else resource.get("id")
+        assert rid == "mac-resource"
+        assert name == "mac"
+        return self.device
+
+    async def close(self, *, timeout_ms=5000):
+        self.closed = True
+        return object()
+
+    async def _request(self, device, message):
+        return {"ok": True, "echo": message}
+
+    def begin_turn(self):
+        pass
+
+    def end_turn(self):
+        pass
+
+    def reset_output_context(self):
+        self.reset_count += 1
+
+
+class FakeRuntime:
+    instances: list["FakeRuntime"] = []
+
+    def __init__(self) -> None:
+        self.sessions: list[FakeSession] = []
+        self.closed = False
+        self.added = []
+        self.reconnected: list[tuple] = []
+        self.__class__.instances.append(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def add_macos(self, *, name):
+        self.added.append(name)
+        return {"id": "mac-resource"}
+
+    async def reconnect(self, resource_id, *, timeout_ms=8000, force=False):
+        self.reconnected.append((resource_id, force))
+        return types.SimpleNamespace(id="mac-resource")
+
+    def session(self, *, output):
+        session = FakeSession(output)
+        self.sessions.append(session)
+        return session
+
+    async def close(self, *, timeout_ms=5000):
+        self.closed = True
+
+
+def install_fake_sdk(monkeypatch):
+    module = types.ModuleType("mai_ui")
+    module.Runtime = FakeRuntime
+    monkeypatch.setitem(sys.modules, "mai_ui", module)
+    FakeRuntime.instances.clear()
+
+
+def cleanup_runtime_globals():
+    code_runtime._MAI_SESSION = None
+    code_runtime._SDK_RUNTIME = None
+    code_runtime._SDK_DEVICE = None
+    code_runtime._SDK_RESOURCE = None
+
+
+def test_rebind_window_finds_non_chrome_window_from_device_inventory():
+    rebound = object()
+
+    class DeviceWindows:
+        async def list(self, *, timeout_ms):
+            assert timeout_ms == 15000
+            return types.SimpleNamespace(windows=(
+                types.SimpleNamespace(
+                    id="window:4242:9", app_id="app:preview", title="trip.pdf"
+                ),
+            ))
+
+        async def get(self, window_id, *, timeout_ms):
+            assert window_id == "window:4242:9"
+            assert timeout_ms == 15000
+            return rebound
+
+    class Apps:
+        async def get(self, app, *, timeout_ms):
+            raise AssertionError(f"default rebind must not query a specific app: {app}")
+
+    code_runtime._SDK_DEVICE = types.SimpleNamespace(
+        windows=DeviceWindows(), apps=Apps()
+    )
+    try:
+        assert asyncio.run(code_runtime.rebind_window("4242")) is rebound
+    finally:
+        cleanup_runtime_globals()
+
+
+@pytest.mark.parametrize("reference", ["window:4242:1", 4242])
+def test_rebind_window_accepts_provider_id_or_native_number(reference):
+    rebound = object()
+
+    class Windows:
+        async def list(self, *, timeout_ms):
+            return types.SimpleNamespace(windows=[types.SimpleNamespace(id="window:4242:9")], complete=True)
+
+        async def get(self, window_id, *, timeout_ms):
+            assert window_id == "window:4242:9"
+            return rebound
+
+    code_runtime._SDK_DEVICE = types.SimpleNamespace(windows=Windows())
+    try:
+        assert asyncio.run(code_runtime.rebind_window(reference)) is rebound
+    finally:
+        cleanup_runtime_globals()
+
+
+def test_rebind_window_accepts_old_window_object_not_attachment_id():
+    rebound = object()
+
+    class Windows:
+        async def list(self, *, timeout_ms):
+            return types.SimpleNamespace(windows=[types.SimpleNamespace(id="window:4242:9")], complete=True)
+
+        async def get(self, window_id, *, timeout_ms):
+            assert window_id == "window:4242:9"
+            return rebound
+
+    code_runtime._SDK_DEVICE = types.SimpleNamespace(windows=Windows())
+    old_window = types.SimpleNamespace(id="64835-18", window_id="window:4242:1")
+    try:
+        assert asyncio.run(code_runtime.rebind_window(old_window)) is rebound
+        with pytest.raises(ValueError, match="attachment"):
+            asyncio.run(code_runtime.rebind_window(old_window.id))
+    finally:
+        cleanup_runtime_globals()
+
+
+def test_error_playbook_uses_failed_tool_codes_not_stdout_mentions():
+    assert mac_agent.error_playbook([]) == ""
+    assert mac_agent.error_playbook([{
+        "tool": "mai_ui.action.point_click", "ok": True,
+        "result": {"message": "DEVICE_OFFLINE"},
+    }]) == ""
+    result = mac_agent.error_playbook([{
+        "tool": "mai_ui.action.point_click", "ok": False,
+        "error_code": "DEVICE_OFFLINE", "error": "DEVICE_OFFLINE",
+    }])
+    assert "SDK endpoint" in result
+    assert "rebind_window(旧win)" in result
+
+
+def test_error_playbook_routes_browser_failures_without_macos_window_advice():
+    browser_offline = mac_agent.error_playbook([{
+        "tool": "mai_ui.browser.new_tab", "ok": False,
+        "arguments": {"platform": "browser"},
+        "error_code": "DEVICE_OFFLINE", "error": "broker unavailable",
+    }])
+    assert "SDK endpoint" in browser_offline
+    assert "rebind_window" not in browser_offline
+
+    browser_unsupported = mac_agent.error_playbook([{
+        "tool": "mai_ui.browser.new_tab", "ok": False,
+        "arguments": {"platform": "browser"},
+        "error_code": "UNSUPPORTED_CAPABILITY", "error": "Playwright missing",
+    }])
+    assert "window.capabilities()" not in browser_unsupported
+    assert "mu setup browser" in browser_unsupported
+
+    mac_unsupported = mac_agent.error_playbook([{
+        "tool": "mai_ui.action.set_text", "ok": False,
+        "arguments": {"platform": "macos"},
+        "error_code": "UNSUPPORTED_CAPABILITY", "error": "not supported",
+    }])
+    assert "window.capabilities()" in mac_unsupported
+
+    phone_offline = mac_agent.error_playbook([{
+        "tool": "mai_ui.action.point_click", "ok": False,
+        "arguments": {"platform": "android"},
+        "error_code": "DEVICE_OFFLINE", "error": "ADB unavailable",
+    }])
+    assert "rebind_window" not in phone_offline
+
+
+def test_context_prompt_never_combines_background_and_demo_modes(monkeypatch):
+    monkeypatch.setenv("MAC_AGENT_BACKGROUND", "1")
+    monkeypatch.setenv("MAC_AGENT_DEMO", "1")
+    assert mac_agent.active_prompt_mode() == "demo"
+    context = mac_agent.ContextManager(
+        task="test", coordinate_range=1000, img_keep_n=1, img_interval=1,
+        history_turns=1, micro_compaction=False, micro_trigger_steps=1,
+        micro_keep_turns=1, micro_interval=1, todo_diff_snapshot=False,
+        max_image_dimension=1000, jpeg_quality=80,
+    )
+    assert "演示/前台模式（已开启" in context.system_prompt
+    assert "后台工作模式（已开启" not in context.system_prompt
+
+
+def test_legacy_prompt_does_not_receive_sdk_mode_instructions(monkeypatch):
+    monkeypatch.delenv("MAC_AGENT_BACKGROUND", raising=False)
+    monkeypatch.setenv("MAC_AGENT_DEMO", "1")
+    options = dict(
+        task="test", coordinate_range=1000, img_keep_n=1, img_interval=1,
+        history_turns=1, micro_compaction=False, micro_trigger_steps=1,
+        micro_keep_turns=1, micro_interval=1, todo_diff_snapshot=False,
+        max_image_dimension=1000, jpeg_quality=80, ui_api="legacy-cua",
+    )
+    context = mac_agent.ContextManager(**options)
+    assert "delivery=\"foreground\"" not in context.system_prompt
+    assert "演示/前台模式（已开启" in context.system_prompt
+
+    monkeypatch.delenv("MAC_AGENT_DEMO", raising=False)
+    monkeypatch.setenv("MAC_AGENT_BACKGROUND", "1")
+    with pytest.raises(ValueError, match="legacy-cua.*background"):
+        mac_agent.ContextManager(**options)
+
+
+def test_web_creation_uses_timeout_accepted_by_sdk_host(monkeypatch, tmp_path):
+    calls = []
+    expected_web = object()
+
+    async def add_factory(_runtime):
+        pass
+
+    class Browsers:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            return expected_web
+
+    monkeypatch.setattr(code_runtime, "_add_web_factory", add_factory)
+    monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
+    session = types.SimpleNamespace(browsers=Browsers())
+    assert asyncio.run(code_runtime._create_web_resource(object(), session)) is expected_web
+    assert calls == [{
+        "name": "web", "provider": "web", "storage_state": None,
+        "timeout_ms": 30000,
+    }]
+
+
+def test_required_native_web_does_not_fall_back_to_incompatible_shim(monkeypatch, tmp_path):
+    async def add_factory(_runtime):
+        pass
+
+    class Browsers:
+        async def create(self, **_kwargs):
+            raise ValueError("browser endpoint failed")
+
+    monkeypatch.setenv("MAC_AGENT_REQUIRE_NATIVE_WEB", "1")
+    monkeypatch.setattr(code_runtime, "_add_web_factory", add_factory)
+    monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
+    session = types.SimpleNamespace(browsers=Browsers())
+    with pytest.raises(RuntimeError, match="native SDK browser unavailable"):
+        asyncio.run(code_runtime._create_web_resource(object(), session))
+
+
+def test_web_fallback_skips_repeated_native_start_during_sdk_reset(monkeypatch, tmp_path):
+    attempts = []
+    shim_starts = []
+    shim = types.SimpleNamespace(resource_id="browser:web-shim")
+
+    class Browsers:
+        async def create(self, **_kwargs):
+            attempts.append(1)
+            raise RuntimeError("browser worker exited")
+
+    async def add_factory(_runtime):
+        pass
+
+    async def create_shim(**_kwargs):
+        shim_starts.append(1)
+        return shim
+
+    monkeypatch.setattr(code_runtime, "_add_web_factory", add_factory)
+    monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
+    monkeypatch.setitem(sys.modules, "web_shim", types.SimpleNamespace(create_web=create_shim))
+    monkeypatch.setattr(code_runtime, "_start_keepalive", lambda: None)
+    code_runtime._SDK_NATIVE_WEB_FAILURE = None
+    code_runtime._SDK_REVIVE_PENDING = False
+    session = types.SimpleNamespace(browsers=Browsers())
+    try:
+        assert asyncio.run(code_runtime._create_web_resource(object(), session)) is shim
+        assert asyncio.run(code_runtime._create_web_resource(object(), session)) is shim
+        assert len(attempts) == 1
+        assert code_runtime._SDK_REVIVE_PENDING is False
+
+        cleanup_runtime_globals()
+        runtime = FakeRuntime()
+        runtime.session = lambda *, output: FakeSession(output)
+        code_runtime._SDK_RUNTIME = runtime
+        code_runtime._SDK_RESOURCE = types.SimpleNamespace(id="mac-resource")
+        code_runtime._MAI_SESSION = None
+        code_runtime._SDK_WEB = shim
+        code_runtime._EXEC_NAMESPACE = None
+        asyncio.run(code_runtime._reset_sdk_session())
+        assert code_runtime._SDK_WEB is shim
+        assert len(attempts) == 1
+        assert len(shim_starts) == 2  # initial call and retry above; reset reuses the live shim
+    finally:
+        cleanup_runtime_globals()
+        code_runtime._SDK_WEB = None
+        code_runtime._SDK_NATIVE_WEB_FAILURE = None
+
+
+def test_web_recreation_uses_timeout_accepted_by_sdk_host(monkeypatch, tmp_path):
+    calls = []
+
+    class Browsers:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            return object()
+
+    original_session = FakeRuntime.session
+
+    def session_with_browser(runtime, *, output):
+        session = original_session(runtime, output=output)
+        session.browsers = Browsers()
+        return session
+
+    async def add_factory(_runtime):
+        pass
+
+    monkeypatch.setattr(FakeRuntime, "session", session_with_browser)
+    monkeypatch.setattr(code_runtime, "_add_web_factory", add_factory)
+    monkeypatch.setattr(code_runtime, "_start_keepalive", lambda: None)
+    monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
+    cleanup_runtime_globals()
+    code_runtime._SDK_WEB = None
+    code_runtime._EXEC_NAMESPACE = None
+    code_runtime._SDK_RUNTIME = FakeRuntime()
+    code_runtime._SDK_RESOURCE = types.SimpleNamespace(id="mac-resource")
+    try:
+        asyncio.run(code_runtime._reset_sdk_session())
+        assert calls == [{
+            "name": "web", "provider": "web", "storage_state": None,
+            "timeout_ms": 30000,
+        }]
+    finally:
+        cleanup_runtime_globals()
+        code_runtime._SDK_WEB = None
+
+
+def test_sdk_worker_opens_and_resets_real_sdk_shape(monkeypatch):
+    install_fake_sdk(monkeypatch)
+    cleanup_runtime_globals()
+
+    runtime, resource, session, device = asyncio.run(code_runtime._open_sdk_session())
+    assert isinstance(runtime, FakeRuntime)
+    assert resource == {"id": "mac-resource"}
+    assert session.coordinate_space == "normalized_1000"
+    assert device is session.device
+    assert device.apps.timeouts == [30000]
+
+    code_runtime._SDK_RUNTIME = runtime
+    code_runtime._SDK_RESOURCE = resource
+    code_runtime._MAI_SESSION = session
+    code_runtime._SDK_DEVICE = device
+    new_session, new_device = asyncio.run(code_runtime._reset_sdk_session())
+    assert session.closed is True
+    assert new_session is runtime.sessions[-1] and new_session is not session
+    assert new_session.coordinate_space == "normalized_1000"
+    assert new_device is new_session.device
+    assert new_device.apps.timeouts == [30000]
+    # auto_reconnect must be enabled so a DEVICE_OFFLINE fence rebuilds transparently.
+    assert session.auto_reconnect is True and new_session.auto_reconnect is True
+
+    asyncio.run(code_runtime._close_sdk_session(close_runtime=True))
+    assert new_session.closed is True and runtime.closed is True
+    cleanup_runtime_globals()
+
+
+def test_reset_sdk_session_rebuilds_offline_endpoint(monkeypatch):
+    # A DEVICE_OFFLINE fence is latched on the Rust endpoint; reset must reconnect it,
+    # not merely open a new Session over the same (still-offline) endpoint.
+    install_fake_sdk(monkeypatch)
+    cleanup_runtime_globals()
+    runtime = FakeRuntime()
+    code_runtime._SDK_RUNTIME = runtime
+    code_runtime._SDK_RESOURCE = types.SimpleNamespace(id="mac-resource")
+    code_runtime._MAI_SESSION = None
+    new_session, new_device = asyncio.run(code_runtime._reset_sdk_session())
+    assert runtime.reconnected == [("mac-resource", True)]
+    assert new_session.auto_reconnect is True
+    assert new_device is new_session.device
+    cleanup_runtime_globals()
+
+
+def test_bootstrap_injects_actual_sdk_handles(monkeypatch):
+    install_fake_sdk(monkeypatch)
+    cleanup_runtime_globals()
+    loop = asyncio.new_event_loop()
+    try:
+        namespace = code_runtime._bootstrap(loop)
+        assert namespace["mu"] is code_runtime._MAI_SESSION
+        assert namespace["device"] is code_runtime._SDK_DEVICE
+        assert namespace["ui"] is code_runtime._SDK_DEVICE.ui
+        assert "cua" not in namespace and "pyautogui" not in namespace and "emit" not in namespace
+        loop.run_until_complete(code_runtime._close_sdk_session(close_runtime=True))
+    finally:
+        loop.close()
+        cleanup_runtime_globals()
+
+
+def test_device_offline_marks_pending_revive_without_swallowing_error(monkeypatch):
+    from mai_ui import MuError
+
+    events = []
+    monkeypatch.setattr(code_runtime, "_emit", events.append)
+    code_runtime._CONFIG = {"ui_api": "mai-ui"}
+    code_runtime._REQUEST_CONTEXT.request_id = "r1"
+    code_runtime._SDK_REVIVE_PENDING = False
+    token = code_runtime._ACTIVE_REQUEST.set({"active": True, "request_id": "r1"})
+
+    class OfflineSession(FakeSession):
+        async def _request(self, device, message):
+            raise MuError("DEVICE_OFFLINE", "endpoint fenced")
+
+    try:
+        session = OfflineSession(events.append)
+        code_runtime._instrument_sdk_session(session)
+        with pytest.raises(MuError):
+            asyncio.run(session._request(session.device, {"op": "observe"}))
+        assert code_runtime._SDK_REVIVE_PENDING is True
+        assert "endpoint_offline_before=" in events[-1]["error"]
+        assert "last_gui_success_age_seconds=" in events[-1]["error"]
+    finally:
+        code_runtime._ACTIVE_REQUEST.reset(token)
+        del code_runtime._REQUEST_CONTEXT.request_id
+        code_runtime._SDK_REVIVE_PENDING = False
+
+
+def test_sdk_request_instrumentation_emits_tool_audit(monkeypatch):
+    events = []
+    monkeypatch.setattr(code_runtime, "_emit", events.append)
+    code_runtime._CONFIG = {"ui_api": "mai-ui"}
+    code_runtime._REQUEST_CONTEXT.request_id = "r1"
+    token = code_runtime._ACTIVE_REQUEST.set({"active": True, "request_id": "r1"})
+    try:
+        session = FakeSession(events.append)
+        code_runtime._instrument_sdk_session(session)
+        result = asyncio.run(session._request(session.device, {"op": "action", "action": "click"}))
+    finally:
+        code_runtime._ACTIVE_REQUEST.reset(token)
+        del code_runtime._REQUEST_CONTEXT.request_id
+    assert result["ok"] is True
+    assert events[-1]["type"] == "tool_call"
+    assert events[-1]["tool"] == "mai_ui.action.click"
+    assert events[-1]["ok"] is True
+
+
+def test_sdk_output_translates_text_and_image(monkeypatch, tmp_path):
+    import io
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (10, 20), "navy").save(buffer, format="PNG")
+    image_bytes = buffer.getvalue()
+    events = []
+    monkeypatch.setattr(code_runtime, "_emit", events.append)
+    code_runtime._CONFIG = {"ui_api": "mai-ui", "work_dir": str(tmp_path)}
+    code_runtime._REQUEST_CONTEXT.request_id = "r1"
+    token = code_runtime._ACTIVE_REQUEST.set({"active": True, "request_id": "r1"})
+    try:
+        code_runtime._sdk_output({"type": "text", "text": "AX view"})
+        code_runtime._sdk_output({
+            "type": "image", "data": image_bytes, "mime_type": "image/png",
+            "image_id": "image-1", "width": 10, "height": 20,
+            "coordinate_space": "normalized_1000", "caption": "window",
+        })
+    finally:
+        code_runtime._ACTIVE_REQUEST.reset(token)
+        del code_runtime._REQUEST_CONTEXT.request_id
+
+    assert events[0]["type"] == "display" and events[0]["text"] == "AX view"
+    assert events[1]["type"] == "screenshot"
+    assert Path(events[1]["path"]).read_bytes() == image_bytes
+    assert events[1]["visual_ref"] == "image-1"
+    assert events[1]["coordinate_space"] == "normalized_1000"
+
+
+def test_idle_worker_tick_does_not_accumulate_execution_tasks():
+    loop = asyncio.new_event_loop()
+    before = set(code_runtime._EXECUTION_TASKS)
+    try:
+        loop.set_task_factory(code_runtime._task_factory)
+        for _ in range(10):
+            code_runtime._drive_worker_loop_once(loop)
+        assert code_runtime._EXECUTION_TASKS == before
+    finally:
+        loop.close()
+
+
+def test_sync_client_close_cancels_owned_loop_tasks(monkeypatch):
+    class FakeClient:
+        def __init__(self):
+            self.closed = False
+            self.cancelled = False
+            self.background = None
+
+        async def _background(self):
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                self.cancelled = True
+
+        async def __aenter__(self):
+            self.background = asyncio.create_task(self._background())
+            return self
+
+        async def __aexit__(self, *_exc):
+            self.closed = True
+
+    fake = FakeClient()
+    monkeypatch.setattr(llm_entry, "build_model_client", lambda *_a, **_k: fake)
+    client = llm_entry.SyncClient({})
+    client.close()
+    client.close()  # idempotent shutdown is important for nested cleanup paths
+    assert fake.closed is True
+    assert fake.cancelled is True
+    assert fake.background.done() is True
+
+
+def test_demo_hud_renders_sdk_audit_calls():
+    observe = demo_hud._cua_action_view({
+        "tool": "mai_ui.observe", "arguments": {"tree": True, "window_id": "w1"},
+        "ok": True, "result": {"elapsed_seconds": 1.25},
+    }, 1)
+    click = demo_hud._cua_action_view({
+        "tool": "mai_ui.action.click", "arguments": {"node_id": "n1", "window_id": "w1"},
+        "ok": True, "result": {"elapsed_seconds": 0.4},
+    }, 2)
+    assert (observe["title"], observe["elapsed"]) == ("AX observe", 1.25)
+    assert click["title"] == "SDK click" and click["icon"] == "♿"
+
+
+def test_degenerate_screenshot_is_detected_and_below_model_minimum():
+    # A 2px capture makes qwen reject the whole request with HTTP 400 and poisons
+    # every retry; the harness must catch it before it reaches the model.
+    import io as _io
+
+    from PIL import Image
+
+    def png(w, h):
+        buf = _io.BytesIO()
+        Image.new("RGB", (w, h), (255, 255, 255)).save(buf, format="PNG")
+        return buf.getvalue()
+
+    assert mac_agent.image_pixel_size(png(2, 2)) == (2, 2)
+    assert mac_agent.image_pixel_size(png(120, 60)) == (120, 60)
+    assert mac_agent.image_pixel_size(b"not an image") == (0, 0)
+    # 2px is degenerate, a normal window capture is not.
+    assert 2 < mac_agent.MIN_MODEL_IMAGE_DIM <= 60
+
+
+def test_agent_defaults_to_sdk_backend_and_canonical_coordinates(tmp_path):
+    args = mac_agent.build_parser().parse_args(["task"])
+    assert args.driver_mode == "sdk"
+    assert 'space="normalized_1000"' in mac_agent.MAI_UI_SYSTEM_PROMPT
+    assert 'space="normalized")' not in mac_agent.MAI_UI_SYSTEM_PROMPT
+    # ax.text 分页续读与截图绑定的 vision.click(node) 已在新 SDK 实现。
+    assert "ax.text.search" in mac_agent.MAI_UI_SYSTEM_PROMPT
+    assert "ui.vision.click(node,image=image)" in mac_agent.MAI_UI_SYSTEM_PROMPT
+    assert "绝不代答、破解" in mac_agent.MAI_UI_SYSTEM_PROMPT
+    assert "先自解" not in mac_agent.MAI_UI_SYSTEM_PROMPT
+    # DEVICE_OFFLINE / 多窗键盘歧义 的处置规则已迁到 ERROR_PLAYBOOK（出错时随反馈懒注入），
+    # 断言口径改为“存在于静态 prompt 或懒注入手册中”。
+    delivered = mac_agent.MAI_UI_SYSTEM_PROMPT + "\n" + "\n".join(mac_agent.ERROR_PLAYBOOK.values())
+    assert "DEVICE_OFFLINE 表示 SDK endpoint 已被隔离" in delivered
+    # 键盘歧义对齐新 SDK：错误码是 INPUT_REFUSED，same_pid_keyboard_ambiguity 只是 native_code。
+    assert "same_pid_keyboard_ambiguity" in delivered
+    assert "timeout_ms<=5000" in mac_agent.MAI_UI_SYSTEM_PROMPT
+    # 旧 cua driver 词汇与错误默认值不得残留。
+    prompt = mac_agent.MAI_UI_SYSTEM_PROMPT
+    assert "completed/unverified" not in prompt
+    assert "before mutation dispatch" not in prompt
+    assert "默认 timeout_ms=30000" not in prompt
+    assert "各方法默认值不同" in prompt
+    assert "CANCELLED_BEFORE_DISPATCH" in delivered
+    # 纯问答/问候当轮 terminate，不得只 print 续轮（四桶重组曾丢失该句致问候任务空转 5 步）。
+    assert "只需回答问题/问候时，直接 terminate" in prompt
+    # SDK 窗口 id 末尾序号 ≠ osascript window N，必须显式警告以防模型混用。
+    assert "window:269273:3" in prompt and "绝不可互换" in prompt
+    # osascript 与 SDK 是两套地址空间的心智模型 + 分工铁律。
+    assert "两套互不相通的地址空间" in prompt and "绝不可互换" in prompt
+    # 并发鲁棒纪律：对象引用建窗、bundle id 解析、复用句柄、不用 osascript 序号导航。
+    assert "set w to make new window" in prompt
+    assert "com.google.Chrome" in prompt and "APP_INVENTORY_INCOMPLETE" in prompt
+    assert "绝不用 window N" in prompt and "复用 win/ui" in prompt
+    # Web 副作用不可因后续异常而重放；控制句柄也不能直接 emit。
+    assert "App/Window/Tab/Browser/Locator/Inventory" in prompt
+    assert "代码块不是事务" in prompt and "不从头重放整段" in prompt
+    assert "一次 new_tab" in prompt and "不额外截图" in prompt
+    assert "绝不 await time.sleep" in prompt
+    assert "new_tab/reset_web 是不可回滚、非幂等" in prompt
+    assert "new_tab(url, action_id=new_tab_id)" in prompt
+    assert "mu.action_status(new_tab_id)" in prompt
+    assert "web.browser.list_tabs()" in prompt
+    assert "单纯截图超时" in prompt
+    # DEVICE_OFFLINE 后用 CGWindowID 确定性重绑。
+    assert "rebind_window" in prompt
+    # AX 树是扁平 nodes + parent_id，无 children/depth（防模型臆造层级属性）。
+    assert "没有 children/depth 属性" in prompt
+    # 禁用 osascript execute javascript（Chrome 默认关闭且无法程序化开启）。
+    assert "不通过 osascript execute javascript" in prompt
+    # 点击三级降级阶梯：元素 AX ＞ vision 坐标 ＞ 前台真实 GUI（保底）；ok≠生效需重观察；同级不反复重试。
+    assert "逐级降级" in prompt and "不在同一级反复重试" in prompt
+    assert "不证明业务成功" in prompt
+
+    desktop = SdkDesktop(session_id="test")
+    assert desktop.driver_mode == "sdk" and desktop.generation == 0
+    desktop.invalidate_references()
+    assert desktop.generation == 1
+    server = SdkRpcServer(desktop, tmp_path / "unused.sock")
+    asyncio.run(server.start())
+    asyncio.run(server.close())
+    asyncio.run(desktop.close())
+    assert server.calls == []
+
+
+def test_macos_prompt_does_not_treat_ax_value_as_foreground_typing():
+    prompt = mac_agent.MAI_UI_SYSTEM_PROMPT
+    assert 'ui.ax.set_text(node,value,delivery="foreground"' not in prompt
+    assert "AXValue 替换" in prompt and "它是后台写入" in prompt
+    assert 'ui.input.text(value,delivery="foreground"' in prompt
+    assert "editable=True 只按 AX role 推断" in prompt
+
+
+def test_macos_prompt_bounds_temporary_pip_install():
+    prompt = mac_agent.MAI_UI_SYSTEM_PROMPT
+    assert "安装依赖前先检查" in prompt
+    assert "importlib.util.find_spec" in prompt
+    assert "shutil.which" in prompt
+    assert prompt.index("安装依赖前先检查") < prompt.index("确需临时 pip install")
+    assert "pip install" in prompt
+    assert "timeout=60" in prompt
+    assert "不要用无超时的 pip install" in prompt
+
+
+def test_macos_prompt_uses_only_advertised_window_actions():
+    prompt = mac_agent.MAI_UI_SYSTEM_PROMPT
+    assert "AXMinimized=true/false" not in prompt
+    assert "ax scroll 到底" not in prompt
+    assert "ax scroll" not in "\n".join(mac_agent.ERROR_PLAYBOOK.values())
+    assert "窗内 hover 不可用" in prompt
+    assert "win.id 是会话附件 ID" in prompt
+    assert "win = await app.windows.get(id)" in prompt
+    assert "ui.vision.click(node,image=image" in prompt
+
+
+def test_desktop_capture_timeout_kills_and_reaps_child(monkeypatch):
+    class HungCapture:
+        returncode = None
+
+        def __init__(self):
+            self.communicate_calls = 0
+            self.killed = False
+
+        async def communicate(self):
+            self.communicate_calls += 1
+            return b"", b""
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+    process = HungCapture()
+
+    async def fake_spawn(*_args, **_kwargs):
+        return process
+
+    async def fake_wait_for(awaitable, *, timeout):
+        assert timeout == 10.0
+        awaitable.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+    with pytest.raises(RuntimeError, match="Screen Recording permission"):
+        asyncio.run(SdkDesktop(session_id="timeout", call_timeout=0.1).observe())
+    assert process.killed is True
+    assert process.communicate_calls == 1
+
+
+def test_reset_web_closes_old_resource_and_refreshes_namespace(monkeypatch):
+    class OldWeb:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self, *, timeout_ms):
+            assert timeout_ms == 5000
+            self.closed = True
+
+    old = OldWeb()
+    new = object()
+    namespace = {"web": old}
+    monkeypatch.setattr(code_runtime, "_SDK_RUNTIME", object())
+    monkeypatch.setattr(code_runtime, "_MAI_SESSION", object())
+    monkeypatch.setattr(code_runtime, "_SDK_WEB", old)
+    monkeypatch.setattr(code_runtime, "_EXEC_NAMESPACE", namespace)
+
+    async def no_save():
+        return None
+
+    async def create(_runtime, _session, visible=False):
+        assert visible is True
+        return new
+
+    monkeypatch.setattr(code_runtime, "_save_web_state", no_save)
+    monkeypatch.setattr(code_runtime, "_create_web_resource", create)
+    assert asyncio.run(code_runtime.reset_web(visible=True)) is new
+    assert old.closed is True and code_runtime._SDK_WEB is new
+    assert namespace["web"] is new
+
+
+def test_strict_protocol_code_first_then_fence_and_no_prose_fallback():
+    from model_stream import parse_code_action, CodeParseError
+
+    # 真机样本：think/intent 闭合错配 + 无 intent 登记 + 完整 code 块 → 必须解析出代码
+    raw = (
+        "<think>Get Levels 5,6,7 dice data</intent>\n<code>\n"
+        "script = r'''\nimport openpyxl\n'''\n"
+        "open('/tmp/l567.py','w').write(script)\n</code>"
+    )
+    action = parse_code_action(raw)
+    assert "openpyxl" in action.code and not action.code.startswith("ask_user")
+    # 围栏兜底（仅当无 code 标签时）
+    fenced = "plan\n```python\nprint(1)\n```"
+    assert parse_code_action(fenced).code.strip() == "print(1)"
+    # 纯散文不再 salvage 成 ask_user：协议违规走重试
+    for bad in ("我需要确认签名地点填哪里？", "", "half <code> print("):
+        try:
+            parse_code_action(bad)
+            raise AssertionError(f"expected CodeParseError for {bad!r}")
+        except CodeParseError:
+            pass
+
+
+def test_parse_salvages_stray_tags_text_and_unterminated_code():
+    from model_stream import parse_code_action
+    # 块外散文 + 多余 </code> + 空 intent/code 块：都应 salvage，不整段丢弃
+    out = ("<intent>do it</intent>\nSome stray prose\n<code>\nprint(1)\n</code>\n"
+           "</code>\n<intent></intent><code></code>\ntrailing words")
+    action = parse_code_action(out)
+    assert action.code.strip() == "print(1)"
+    # 未闭合的 code 块按已有内容 salvage
+    a2 = parse_code_action("<intent>x</intent><code>print(2)")
+    assert "print(2)" in a2.code
+    # 多段 code 仍按序保留
+    a3 = parse_code_action("<intent>a</intent><code>x=1</code><intent>b</intent><code>print(x)</code>")
+    assert len(a3.ordered_blocks) == 2
+
+
+def test_parse_salvages_foreign_protocol_trailer_after_valid_python():
+    from model_stream import parse_code_action
+
+    raw = (
+        "<intent>prepare</intent><code>\n"
+        "result = await bash('echo ok')\n"
+        "print(result)\n"
+        "</parameter>\n</function>"
+    )
+    action = parse_code_action(raw)
+    assert action.code == "result = await bash('echo ok')\nprint(result)"
+
+
+def test_anthropic_message_conversion_and_nonstream_response():
+    system, messages = model_stream.anthropic_messages([
+        {"role": "system", "content": "system rules"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64,YWJj",
+            }},
+        ]},
+    ])
+    assert system == "system rules"
+    assert messages == [{"role": "user", "content": [
+        {"type": "text", "text": "look"},
+        {"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": "YWJj",
+        }},
+    ]}]
+
+    response = FakeHttpResponse({
+        "content": [{"type": "thinking", "thinking": "plan", "signature": "sig"},
+                    {"type": "text", "text": "OK"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 7, "output_tokens": 2},
+    })
+    http = FakeHttpClient(response)
+    client = model_stream.ModelClient(
+        protocol="anthropic", base_url="https://api.anthropic.com/v1",
+        api_key="secret", model_name="claude-test", timeout=10, retries=0,
+        stream=False,
+    )
+    client.client = http
+    content, reasoning, usage = asyncio.run(client.complete(
+        [{"role": "system", "content": "rules"},
+         {"role": "user", "content": "hello"}], max_tokens=32,
+    ))
+    assert (content, reasoning) == ("OK", "plan")
+    assert usage == {
+        "prompt_tokens": 7,
+        "completion_tokens": 2,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "completion_tokens_details": {"reasoning_tokens": 0},
+    }
+    url, payload, headers = http.calls[0]
+    assert url == "https://api.anthropic.com/v1/messages"
+    assert payload["system"] == "rules" and payload["max_tokens"] == 32
+    assert all(message["role"] != "system" for message in payload["messages"])
+    assert headers["x-api-key"] == "secret"
+    assert "Authorization" not in headers
+
+
+def test_anthropic_stream_response():
+    client = model_stream.ModelClient(
+        protocol="anthropic", base_url="https://api.anthropic.com/v1",
+        api_key="secret", model_name="claude-test", timeout=10, retries=0,
+    )
+    preview = model_stream._TextPreview()
+    content, reasoning, usage, finish = asyncio.run(
+        client._anthropic_sse_result(FakeAnthropicStream(), preview)
+    )
+    assert (content, reasoning, finish) == ("OK", "plan", "stop")
+    assert usage == {
+        "prompt_tokens": 7,
+        "completion_tokens": 2,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "completion_tokens_details": {"reasoning_tokens": 0},
+    }
+
+
+def test_llm_protocol_config_and_endpoint():
+    client = model_stream.ModelClient(
+        protocol="anthropic", base_url="https://host/protocol/anthropic/v1",
+        api_key="", model_name="claude-test", timeout=10, retries=0,
+    )
+    assert client.endpoint() == "https://host/protocol/anthropic/v1/messages"
+    with pytest.raises(ValueError, match="protocol"):
+        model_stream.ModelClient(
+            protocol="other", base_url="https://host/v1", api_key="",
+            model_name="x", timeout=10, retries=0,
+        )
+
+
+def test_hub_inline_js_parses_with_node():
+    """Regression: a Python-style ternary once slipped into the hub's inline JS and
+    killed every handler at parse time (buttons appeared dead)."""
+    import re as _re
+    import shutil
+    import subprocess
+    import tempfile
+    node = shutil.which("node")
+    if not node:
+        return
+    import demo_hub
+    scripts = _re.findall(r"<script>(.*?)</script>", demo_hub.HUB_HTML, _re.S)
+    assert scripts, "hub html has no inline script"
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
+        fh.write(scripts[-1])
+        path = fh.name
+    r = subprocess.run([node, "--check", path], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[:800]

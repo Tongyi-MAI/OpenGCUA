@@ -1,0 +1,36 @@
+{
+  "api_version": "0.2",
+  "adapter_protocol_major": 1,
+  "language": "python",
+  "platform": "android",
+  "names": "snake_case",
+  "defaults": {
+    "coordinate_space": "pixels",
+    "capture_timeout_ms": 1500,
+    "input_timeout_ms": 3000,
+    "text_timeout_ms": 5000,
+    "stabilize_timeout_ms": 5000,
+    "android_stabilize_delay_ms": 2000,
+    "process_timeout_ms": 30000,
+    "access": "control",
+    "file_overwrite": false,
+    "scroll_unit": "viewport",
+    "scroll_amount": 1,
+    "viewport_fraction": 0.8,
+    "max_file_bytes": 1048576
+  },
+  "subsets": {
+    "ui": ["wait_for_stabilize"],
+    "session": ["discover", "register", "device", "devices", "unregister", "events", "emit", "action_status", "cancel", "close"],
+    "ui.ax": ["observe", "click", "set_text", "select_text", "scroll", "perform"],
+    "ui.vision": ["observe", "click", "long_press", "swipe", "drag", "scroll"],
+    "ui.input": ["text", "press_key"],
+    "apps": ["list", "get", "launch"],
+    "displays": ["list", "get"],
+    "files": ["path", "list", "stat", "read", "write", "mkdir", "remove", "move"],
+    "shell": ["run"],
+    "processes": ["run"],
+    "android": ["press"]
+  },
+  "wip": ["javascript", "runtime_service", "browser", "macos", "ios", "windows", "linux", "android_virtual_displays", "isolated_app_vision", "multi_window_ax", "clipboard", "process_streaming", "pinch", "generated_bindings"]
+}

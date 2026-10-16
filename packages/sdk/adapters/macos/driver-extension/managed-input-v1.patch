@@ -1,0 +1,568 @@
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
+index 2625ee2..abe8f4c 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
+@@ -272,6 +272,7 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
+     "drag",
+     "scroll",
+     "move_cursor",
++    "managed_input",
+     "mouse_button_down",
+     "mouse_button_up",
+     "mouse_drag",
+@@ -880,6 +881,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
+         | "drag"
+         | "scroll"
+         | "move_cursor"
++        | "managed_input"
+         | "mouse_button_down"
+         | "mouse_button_up"
+         | "mouse_drag"
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/capture_scope.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/capture_scope.rs
+index 3711b19..dbab09f 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/capture_scope.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/capture_scope.rs
+@@ -179,6 +179,7 @@ fn is_scoped_action(tool_name: &str) -> bool {
+ }
+ 
+ fn tool_scope(tool_name: &str, args: &Value) -> ToolScope {
++    if tool_name == "managed_input" { return ToolScope::Desktop; }
+     if matches!(
+         tool_name,
+         "get_desktop_state" | "get_screen_size" | "get_cursor_position"
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/keyboard.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/keyboard.rs
+index 2b9baf8..c54438d 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/input/keyboard.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/keyboard.rs
+@@ -645,7 +645,7 @@ fn modifier_flags(modifiers: &[&str]) -> CGEventFlags {
+     flags
+ }
+ 
+-pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
++pub(crate) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
+     let code = match key.to_lowercase().as_str() {
+         "return" | "enter" => 36,
+         "tab" => 48,
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/managed_input.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/managed_input.rs
+new file mode 100644
+index 0000000..b888781
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/managed_input.rs
+@@ -0,0 +1,497 @@
++//! Managed foreground input. One owner retains a scope until all inputs release.
++//! SDK release packaging must validate this tool with a signed AppKit fixture.
++use async_trait::async_trait;
++use core_graphics::{
++    event::{
++        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
++        ScrollEventUnit,
++    },
++    event_source::{CGEventSource, CGEventSourceStateID},
++    geometry::CGPoint,
++};
++use cua_driver_core::{
++    protocol::ToolResult,
++    session::{register_scoped_fallible_session_end_hook, SessionEndHookRegistration},
++    tool::{Tool, ToolDef},
++};
++use serde_json::{json, Value};
++use std::{
++    collections::{BTreeSet, HashMap},
++    sync::{Arc, Mutex, OnceLock},
++    time::{Duration, Instant},
++};
++
++#[derive(Default)]
++struct Held {
++    keys: BTreeSet<u16>,
++    buttons: BTreeSet<u8>,
++    x: f64,
++    y: f64,
++    scope: String,
++    fenced: bool,
++    click_count: i64,
++    wheel_residual: [f64; 2],
++    wheel_unit: String,
++}
++fn source() -> anyhow::Result<CGEventSource> {
++    CGEventSource::new(CGEventSourceStateID::Private)
++        .map_err(|_| anyhow::anyhow!("event source failed"))
++}
++impl Held {
++    fn flags(&self) -> CGEventFlags {
++        let mut flags = CGEventFlags::CGEventFlagNull;
++        for (key, flag) in [
++            (56, CGEventFlags::CGEventFlagShift),
++            (60, CGEventFlags::CGEventFlagShift),
++            (59, CGEventFlags::CGEventFlagControl),
++            (62, CGEventFlags::CGEventFlagControl),
++            (55, CGEventFlags::CGEventFlagCommand),
++            (54, CGEventFlags::CGEventFlagCommand),
++            (58, CGEventFlags::CGEventFlagAlternate),
++            (61, CGEventFlags::CGEventFlagAlternate),
++        ] {
++            if self.keys.contains(&key) {
++                flags |= flag;
++            }
++        }
++        flags
++    }
++    fn key(&mut self, key: u16, down: bool) -> anyhow::Result<()> {
++        let event = CGEvent::new_keyboard_event(source()?, key, down)
++            .map_err(|_| anyhow::anyhow!("key event failed"))?;
++        if down {
++            self.keys.insert(key);
++        } else {
++            self.keys.remove(&key);
++        }
++        event.set_flags(self.flags());
++        event.post(CGEventTapLocation::HID);
++        Ok(())
++    }
++    fn pointer(&mut self, x: f64, y: f64, button: Option<(u8, bool)>) -> anyhow::Result<()> {
++        let id = button
++            .map(|b| b.0)
++            .or_else(|| self.buttons.first().copied())
++            .unwrap_or(0);
++        let (mouse, down, up, drag) = match id {
++            0 => (
++                CGMouseButton::Left,
++                CGEventType::LeftMouseDown,
++                CGEventType::LeftMouseUp,
++                CGEventType::LeftMouseDragged,
++            ),
++            1 => (
++                CGMouseButton::Right,
++                CGEventType::RightMouseDown,
++                CGEventType::RightMouseUp,
++                CGEventType::RightMouseDragged,
++            ),
++            _ => (
++                CGMouseButton::Center,
++                CGEventType::OtherMouseDown,
++                CGEventType::OtherMouseUp,
++                CGEventType::OtherMouseDragged,
++            ),
++        };
++        let kind = match button {
++            Some((_, true)) => down,
++            Some((_, false)) => up,
++            None if !self.buttons.is_empty() => drag,
++            None => CGEventType::MouseMoved,
++        };
++        let event = CGEvent::new_mouse_event(source()?, kind, CGPoint::new(x, y), mouse)
++            .map_err(|_| anyhow::anyhow!("pointer event failed"))?;
++        event.set_flags(self.flags());
++        event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, self.click_count.max(1));
++        event.post(CGEventTapLocation::HID);
++        self.x = x;
++        self.y = y;
++        if let Some((id, down)) = button {
++            if down {
++                self.buttons.insert(id);
++            } else {
++                self.buttons.remove(&id);
++            }
++        }
++        Ok(())
++    }
++    fn release(&mut self) -> anyhow::Result<()> {
++        self.wheel_residual = [0., 0.];
++        let mut failure = None;
++        for key in self.keys.clone() {
++            if let Err(e) = self.key(key, false) {
++                failure = Some(e);
++            }
++        }
++        for button in self.buttons.clone() {
++            if let Err(e) = self.pointer(self.x, self.y, Some((button, false))) {
++                failure = Some(e);
++            }
++        }
++        if let Some(e) = failure {
++            self.fenced = true;
++            Err(e)
++        } else {
++            Ok(())
++        }
++    }
++}
++#[derive(Default)]
++struct Inputs {
++    sessions: HashMap<String, Held>,
++}
++impl Drop for Inputs {
++    fn drop(&mut self) {
++        for state in self.sessions.values_mut() {
++            let _ = state.release();
++        }
++    }
++}
++pub struct ManagedInputTool {
++    inputs: Arc<Mutex<Inputs>>,
++    _cleanup: SessionEndHookRegistration,
++}
++impl ManagedInputTool {
++    pub fn new() -> Self {
++        let inputs = Arc::new(Mutex::new(Inputs::default()));
++        let weak = Arc::downgrade(&inputs);
++        let cleanup = register_scoped_fallible_session_end_hook("managed_input", move |session| {
++            if let Some(inputs) = weak.upgrade() {
++                let mut inputs = inputs.lock().map_err(|e| e.to_string())?;
++                if let Some(state) = inputs.sessions.get_mut(session) {
++                    state.release().map_err(|e| e.to_string())?;
++                }
++                inputs.sessions.remove(session);
++            }
++            Ok(())
++        });
++        Self {
++            inputs,
++            _cleanup: cleanup,
++        }
++    }
++}
++fn finite(q: &Value, key: &str) -> anyhow::Result<f64> {
++    q[key]
++        .as_f64()
++        .filter(|v| v.is_finite())
++        .ok_or_else(|| anyhow::anyhow!("invalid {key}"))
++}
++fn run(inputs: &mut Inputs, q: Value) -> anyhow::Result<()> {
++    let session = q["session"].as_str().unwrap_or("default");
++    let op = q["action"].as_str().unwrap_or("");
++    if op == "release_all" {
++        if let Some(s) = inputs.sessions.get_mut(session) {
++            s.release()
++                .map_err(|e| anyhow::anyhow!("ACTION_OUTCOME_UNKNOWN: {e}"))?;
++        }
++        return Ok(());
++    }
++    if op == "key_up" || op == "button_up" {
++        if let Some(state) = inputs.sessions.get_mut(session) {
++            let result = if op == "key_up" {
++                let key =
++                    crate::input::keyboard::key_name_to_code(q["key"].as_str().unwrap_or(""))?;
++                if state.keys.contains(&key) {
++                    state.key(key, false)
++                } else {
++                    Ok(())
++                }
++            } else {
++                let button = match q["button"].as_str().unwrap_or("primary") {
++                    "primary" => 0,
++                    "secondary" => 1,
++                    "middle" => 2,
++                    _ => anyhow::bail!("invalid button"),
++                };
++                if state.buttons.contains(&button) {
++                    state.pointer(state.x, state.y, Some((button, false)))
++                } else {
++                    Ok(())
++                }
++            };
++            if let Err(error) = result {
++                state.fenced = true;
++                anyhow::bail!("ACTION_OUTCOME_UNKNOWN: {error}");
++            }
++        }
++        return Ok(());
++    }
++    anyhow::ensure!(
++        [
++            "key_down",
++            "key_up",
++            "button_down",
++            "button_up",
++            "move",
++            "wheel",
++            "drag",
++            "press_key",
++            "input_text",
++            "point_click"
++        ]
++        .contains(&op),
++        "unsupported action"
++    );
++    if !["key_up", "button_up"].contains(&op) {
++        if let Some(pid) = q["expected_pid"].as_i64() {
++            anyhow::ensure!(
++                crate::apps::frontmost_pid() == Some(pid as i32),
++                "target is not foreground"
++            );
++        }
++    }
++    let scope = q["input_scope"]
++        .as_str()
++        .ok_or_else(|| anyhow::anyhow!("input scope required"))?;
++    anyhow::ensure!(
++        !inputs
++            .sessions
++            .iter()
++            .any(|(id, s)| id != session && (!s.keys.is_empty() || !s.buttons.is_empty())),
++        "input owned by another session"
++    );
++    let s = inputs.sessions.entry(session.into()).or_default();
++    anyhow::ensure!(!s.fenced, "session fenced");
++    anyhow::ensure!(
++        s.scope == scope || (s.keys.is_empty() && s.buttons.is_empty()),
++        "release inputs before changing scope"
++    );
++    if s.scope != scope {
++        s.wheel_residual = [0., 0.];
++    }
++    s.scope = scope.into();
++    let timeout = q["timeout_ms"]
++        .as_u64()
++        .filter(|n| *n > 100 && *n <= 60000)
++        .ok_or_else(|| anyhow::anyhow!("invalid deadline"))?;
++    let deadline = Instant::now() + Duration::from_millis(timeout - 100);
++    let moving = ["button_down", "move", "wheel", "drag", "point_click"].contains(&op);
++    let (x, y) = if moving {
++        (finite(&q, "screen_x")?, finite(&q, "screen_y")?)
++    } else {
++        (s.x, s.y)
++    };
++    let button = match q["button"].as_str().unwrap_or("primary") {
++        "primary" => 0,
++        "secondary" => 1,
++        "middle" => 2,
++        _ => anyhow::bail!("invalid button"),
++    };
++    let key = if ["key_down", "key_up", "press_key"].contains(&op) {
++        Some(crate::input::keyboard::key_name_to_code(
++            q["key"]
++                .as_str()
++                .ok_or_else(|| anyhow::anyhow!("invalid key"))?,
++        )?)
++    } else {
++        None
++    };
++    let modifiers: Vec<u16> = q["modifiers"]
++        .as_array()
++        .map(|a| {
++            a.iter()
++                .map(|m| crate::input::keyboard::key_name_to_code(m.as_str().unwrap_or("")))
++                .collect()
++        })
++        .transpose()?
++        .unwrap_or_default();
++    let count = q["count"].as_u64().unwrap_or(1);
++    anyhow::ensure!((1..=3).contains(&count), "invalid count");
++    let text = if op == "input_text" {
++        Some(
++            q["text"]
++                .as_str()
++                .filter(|s| s.len() <= 65536)
++                .ok_or_else(|| anyhow::anyhow!("invalid text"))?,
++        )
++    } else {
++        None
++    };
++    if moving {
++        let (w, h, _) = super::get_screen_size::main_screen_size()
++            .ok_or_else(|| anyhow::anyhow!("display unavailable"))?;
++        anyhow::ensure!(
++            x >= 0. && y >= 0. && x < (w as f64) && y < (h as f64),
++            "point outside primary display"
++        );
++    }
++    let steps = q["steps"].as_u64().unwrap_or(1);
++    anyhow::ensure!((1..=1000).contains(&steps), "invalid steps");
++    let duration = q["duration_ms"].as_u64().unwrap_or(500);
++    let hold = q["hold_ms"].as_u64().unwrap_or(0);
++    let end = if op == "drag" {
++        anyhow::ensure!(
++            (50..=5000).contains(&duration) && hold <= 5000 && hold + duration + 100 < timeout,
++            "gesture exceeds budget"
++        );
++        {
++            let ex = finite(&q, "end_screen_x")?;
++            let ey = finite(&q, "end_screen_y")?;
++            let (w, h, _) = super::get_screen_size::main_screen_size()
++                .ok_or_else(|| anyhow::anyhow!("display unavailable"))?;
++            anyhow::ensure!(
++                ex >= 0. && ey >= 0. && ex < (w as f64) && ey < (h as f64),
++                "end outside primary display"
++            );
++            Some((ex, ey))
++        }
++    } else {
++        None
++    };
++    let wheel = if op == "wheel" {
++        anyhow::ensure!(
++            ["pixels", "lines"].contains(&q["unit"].as_str().unwrap_or("")),
++            "unsupported wheel unit"
++        );
++        let dx = finite(&q, "delta_x")?;
++        let dy = finite(&q, "delta_y")?;
++        anyhow::ensure!(
++            dx.abs() <= 100000.
++                && dy.abs() <= 100000.
++                && (q["unit"] == "pixels" || (dx.fract() == 0. && dy.fract() == 0.)),
++            "wheel deltas must be bounded; lines require integers"
++        );
++        Some((dx, dy))
++    } else {
++        None
++    };
++    anyhow::ensure!(
++        !["drag", "point_click"].contains(&op) || !s.buttons.contains(&button),
++        "button already held"
++    );
++    anyhow::ensure!(
++        op != "press_key" || !s.keys.contains(&key.unwrap()),
++        "key already held"
++    );
++    if op == "move" && s.buttons.is_empty() {
++        let pos = CGEvent::new(source()?)
++            .map_err(|_| anyhow::anyhow!("cursor position unavailable"))?
++            .location();
++        s.x = pos.x;
++        s.y = pos.y;
++    }
++    let old_keys = s.keys.clone();
++    let old_buttons = s.buttons.clone();
++    let result = (|| -> anyhow::Result<()> {
++        match op {
++            "key_down" => s.key(key.unwrap(), true)?,
++            "key_up" => s.key(key.unwrap(), false)?,
++            "button_down" => s.pointer(x, y, Some((button, true)))?,
++            "button_up" => s.pointer(x, y, Some((button, false)))?,
++            "move" => {
++                let (sx, sy) = (s.x, s.y);
++                for i in 1..=steps {
++                    anyhow::ensure!(Instant::now() < deadline, "deadline exceeded");
++                    let f = i as f64 / steps as f64;
++                    s.pointer(sx + (x - sx) * f, sy + (y - sy) * f, None)?;
++                }
++            }
++            "drag" => {
++                s.pointer(x, y, Some((button, true)))?;
++                std::thread::sleep(Duration::from_millis(hold));
++                let start = Instant::now();
++                let (ex, ey) = end.unwrap();
++                loop {
++                    anyhow::ensure!(Instant::now() < deadline, "deadline exceeded");
++                    let f = (start.elapsed().as_secs_f64() / (duration as f64 / 1000.)).min(1.);
++                    s.pointer(x + (ex - x) * f, y + (ey - y) * f, None)?;
++                    if f == 1. {
++                        break;
++                    }
++                    std::thread::sleep(Duration::from_millis(8));
++                }
++                s.pointer(ex, ey, Some((button, false)))?;
++            }
++            "point_click" => {
++                for i in 1..=count {
++                    s.click_count = i as i64;
++                    s.pointer(x, y, Some((button, true)))?;
++                    s.pointer(x, y, Some((button, false)))?;
++                }
++                s.click_count = 1;
++            }
++            "press_key" => {
++                for modifier in &modifiers {
++                    if !s.keys.contains(modifier) {
++                        s.key(*modifier, true)?;
++                    }
++                }
++                s.key(key.unwrap(), true)?;
++                s.key(key.unwrap(), false)?;
++            }
++            "input_text" => {
++                for ch in text.unwrap().chars() {
++                    anyhow::ensure!(Instant::now() < deadline, "deadline exceeded");
++                    for down in [true, false] {
++                        let event = CGEvent::new_keyboard_event(source()?, 0, down)
++                            .map_err(|_| anyhow::anyhow!("text event failed"))?;
++                        event.set_string(&ch.to_string());
++                        event.set_flags(s.flags());
++                        event.post(CGEventTapLocation::HID);
++                    }
++                }
++            }
++            "wheel" => {
++                s.pointer(x, y, None)?;
++                let (dx, dy) = wheel.unwrap();
++                if s.wheel_unit != q["unit"].as_str().unwrap() {
++                    s.wheel_residual = [0., 0.];
++                    s.wheel_unit = q["unit"].as_str().unwrap().into();
++                }
++                s.wheel_residual[0] += dx;
++                s.wheel_residual[1] += dy;
++                let (dx, dy) = (s.wheel_residual[0] as i32, s.wheel_residual[1] as i32);
++                s.wheel_residual[0] -= dx as f64;
++                s.wheel_residual[1] -= dy as f64;
++                let unit = if q["unit"] == "pixels" {
++                    ScrollEventUnit::PIXEL
++                } else {
++                    ScrollEventUnit::LINE
++                };
++                let event = CGEvent::new_scroll_event(source()?, unit, 2, -dy, -dx, 0)
++                    .map_err(|_| anyhow::anyhow!("scroll event failed"))?;
++                event.set_flags(s.flags());
++                event.post(CGEventTapLocation::HID);
++            }
++            _ => unreachable!(),
++        }
++        Ok(())
++    })();
++    if result.is_err() {
++        let _ = s.release();
++        s.fenced = true;
++    } else if !["key_down", "key_up", "button_down", "button_up"].contains(&op) {
++        for key in s.keys.clone().difference(&old_keys) {
++            s.key(*key, false)?;
++        }
++        for button in s.buttons.clone().difference(&old_buttons) {
++            s.pointer(s.x, s.y, Some((*button, false)))?;
++        }
++    }
++    result.map_err(|e| anyhow::anyhow!("ACTION_OUTCOME_UNKNOWN: {e}"))
++}
++#[async_trait]
++impl Tool for ManagedInputTool {
++    fn def(&self) -> &ToolDef {
++        static DEF: OnceLock<ToolDef> = OnceLock::new();
++        DEF.get_or_init(||ToolDef{name:"managed_input".into(),description:"SDK managed foreground input v1. Uses trusted screen coordinates; cleanup is session-owned.".into(),input_schema:json!({"type":"object","x-mai-ui-input-version":1,"properties":{"session":{"type":"string"},"scope":{"const":"desktop"},"action":{"type":"string"},"input_scope":{"type":"string"},"screen_x":{"type":"number"},"screen_y":{"type":"number"},"end_screen_x":{"type":"number"},"end_screen_y":{"type":"number"},"expected_pid":{"type":"integer"},"count":{"type":"integer"},"modifiers":{"type":"array","items":{"type":"string"}},"key":{"type":"string"},"text":{"type":"string"},"button":{"type":"string"},"steps":{"type":"integer"},"hold_ms":{"type":["integer","null"]},"duration_ms":{"type":"integer"},"timeout_ms":{"type":"integer"},"delta_x":{"type":"number"},"delta_y":{"type":"number"},"unit":{"type":"string"}},"required":["action","scope"],"additionalProperties":false}),read_only:false,destructive:false,idempotent:false,open_world:false})
++    }
++    async fn invoke(&self, args: Value) -> ToolResult {
++        if args["scope"] != "desktop" {
++            return ToolResult::error("managed_input requires desktop authorization");
++        }
++        let inputs = self.inputs.clone();
++        match tokio::task::spawn_blocking(move || run(&mut inputs.lock().unwrap(), args)).await {
++            Ok(Ok(())) => ToolResult::text("Input posted").with_structured(
++                json!({"execution":"completed","effect":"unknown","managed_input_version":1}),
++            ),
++            Ok(Err(error)) => {
++                let uncertain = error.to_string().contains("ACTION_OUTCOME_UNKNOWN");
++                ToolResult::error(error.to_string()).with_structured(json!({"code":if uncertain {"ACTION_OUTCOME_UNKNOWN"}else{"INVALID_ARGUMENT"},"effect":if uncertain {"unknown"}else{"refused"}}))
++            }
++            Err(error) => ToolResult::error(error.to_string())
++                .with_structured(json!({"code":"ACTION_OUTCOME_UNKNOWN","effect":"unknown"})),
++        }
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+index 68287e0..4598074 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+@@ -32,6 +32,7 @@ mod get_desktop_state;
+ pub(crate) mod get_screen_size;
+ mod health_report;
+ mod move_cursor;
++mod managed_input;
+ mod page;
+ pub(crate) mod px_frame;
+ mod set_config;
+@@ -886,6 +887,7 @@ pub fn register_all(
+         registry.retain_session_revive_hook(revive_registration);
+     }
+ 
++    registry.register(Box::new(managed_input::ManagedInputTool::new()));
+     registry.register(Box::new(list_apps::ListAppsTool));
+     registry.register(Box::new(list_windows::ListWindowsTool));
+     registry.register(Box::new(get_window_state::GetWindowStateTool::new(

@@ -1,0 +1,2845 @@
+{
+  "api_version": "0.3",
+  "provider_protocol_major": 1,
+  "runtime": "embedded",
+  "playwright": "1.63.0",
+  "classes": {
+    "Runtime": {
+      "module": "runtime",
+      "methods": [
+        {
+          "name": "add_android",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "serial",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "keyword": true
+            }
+          ],
+          "returns": "ResourceInfo"
+        },
+        {
+          "name": "add_macos",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "name",
+              "type": "string",
+              "keyword": true
+            }
+          ],
+          "returns": "ResourceInfo"
+        },
+        {
+          "name": "add_linux",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "name",
+              "type": "string",
+              "keyword": true
+            },
+            {
+              "name": "display",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "xauthority",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "python",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ResourceInfo"
+        },
+        {
+          "name": "add_browser_factory",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "name",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "engine",
+              "type": "string",
+              "keyword": true
+            },
+            {
+              "name": "headless",
+              "type": "boolean",
+              "keyword": true,
+              "default": true
+            },
+            {
+              "name": "viewport",
+              "type": "Viewport",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "device_scale_factor",
+              "type": "number",
+              "keyword": true,
+              "default": 1
+            },
+            {
+              "name": "channel",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "proxy",
+              "type": "JsonValue",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "locale",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "user_agent",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "service_workers",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "session",
+          "async": false,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "output",
+              "type": "OutputSink",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "Session"
+        },
+        {
+          "name": "close",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "add_adapter",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "adapter",
+              "type": "Adapter",
+              "keyword": false
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "keyword": true
+            },
+            {
+              "name": "resource_id",
+              "type": "string",
+              "keyword": true
+            }
+          ],
+          "returns": "ResourceInfo"
+        },
+        {
+          "name": "remove",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "resource",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "void"
+        }
+      ]
+    },
+    "Session": {
+      "module": "runtime",
+      "methods": [
+        {
+          "name": "discover",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "kind",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "query",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "Inventory"
+        },
+        {
+          "name": "register",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "resource",
+              "type": "string | ResourceInfo | Device",
+              "keyword": false
+            },
+            {
+              "name": "name",
+              "type": "string",
+              "keyword": true
+            },
+            {
+              "name": "access",
+              "type": "string",
+              "keyword": true,
+              "default": "control"
+            }
+          ],
+          "returns": "Device"
+        },
+        {
+          "name": "device",
+          "async": false,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "name_or_attachment_id",
+              "type": "string",
+              "keyword": false
+            }
+          ],
+          "returns": "Device"
+        },
+        {
+          "name": "devices",
+          "async": true,
+          "iterator": false,
+          "parameters": [],
+          "returns": "DeviceInventory"
+        },
+        {
+          "name": "unregister",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "name_or_attachment_id",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "DetachReceipt"
+        },
+        {
+          "name": "events",
+          "async": true,
+          "iterator": true,
+          "parameters": [
+            {
+              "name": "after",
+              "type": "number",
+              "keyword": true,
+              "default": 0
+            }
+          ],
+          "returns": "SessionEvent"
+        },
+        {
+          "name": "action_status",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": false
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "cancel",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": false
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "begin_turn",
+          "async": false,
+          "iterator": false,
+          "parameters": [],
+          "returns": "void"
+        },
+        {
+          "name": "end_turn",
+          "async": false,
+          "iterator": false,
+          "parameters": [],
+          "returns": "void"
+        },
+        {
+          "name": "reset_output_context",
+          "async": false,
+          "iterator": false,
+          "parameters": [],
+          "returns": "void"
+        },
+        {
+          "name": "emit",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "value",
+              "type": "unknown",
+              "keyword": false
+            },
+            {
+              "name": "full",
+              "type": "boolean",
+              "keyword": true,
+              "default": false
+            },
+            {
+              "name": "caption",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "void"
+        },
+        {
+          "name": "help",
+          "async": false,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "topic",
+              "type": "string",
+              "keyword": false,
+              "default": "core"
+            }
+          ],
+          "returns": "string"
+        },
+        {
+          "name": "close",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "StopReceipt"
+        }
+      ]
+    },
+    "Device": {
+      "module": "resources",
+      "methods": [
+        {
+          "name": "destroy",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "capabilities",
+          "async": true,
+          "iterator": false,
+          "parameters": [],
+          "returns": "CapabilitySet"
+        }
+      ]
+    },
+    "App": {
+      "module": "resources",
+      "methods": [
+        {
+          "name": "activate",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ],
+      "extends": "Device"
+    },
+    "Apps": {
+      "module": "resources",
+      "methods": [
+        {
+          "name": "list",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "AppInventory"
+        },
+        {
+          "name": "get",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "id_or_name",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "App"
+        },
+        {
+          "name": "launch",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "id_or_name",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "App"
+        }
+      ]
+    },
+    "Displays": {
+      "module": "resources",
+      "methods": [
+        {
+          "name": "list",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 1500
+            }
+          ],
+          "returns": "JsonValue[]"
+        },
+        {
+          "name": "get",
+          "async": false,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "display_id",
+              "type": "string",
+              "keyword": false
+            }
+          ],
+          "returns": "Display"
+        }
+      ]
+    },
+    "Android": {
+      "module": "resources",
+      "methods": [
+        {
+          "name": "press",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "button",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 3000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ]
+    },
+    "Windows": {
+      "module": "resources",
+      "methods": [
+        {
+          "name": "list",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "WindowInventory"
+        },
+        {
+          "name": "get",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "id",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "Window"
+        }
+      ]
+    },
+    "Macos": {
+      "module": "resources",
+      "methods": [
+        {
+          "name": "set_frame",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "x",
+              "type": "number",
+              "keyword": true
+            },
+            {
+              "name": "y",
+              "type": "number",
+              "keyword": true
+            },
+            {
+              "name": "width",
+              "type": "number",
+              "keyword": true
+            },
+            {
+              "name": "height",
+              "type": "number",
+              "keyword": true
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "invoke_menu",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "path",
+              "type": "string[]",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ]
+    },
+    "AX": {
+      "module": "ui",
+      "methods": [
+        {
+          "name": "observe",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "max_nodes",
+              "type": "number",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "max_depth",
+              "type": "number",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "AXObservation"
+        },
+        {
+          "name": "click",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "target",
+              "type": "AXTarget",
+              "keyword": false
+            },
+            {
+              "name": "button",
+              "type": "string",
+              "keyword": true,
+              "default": "primary"
+            },
+            {
+              "name": "count",
+              "type": "number",
+              "keyword": true,
+              "default": 1
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "set_text",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "target",
+              "type": "AXTarget",
+              "keyword": false
+            },
+            {
+              "name": "text",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "select_text",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "target",
+              "type": "AXTarget",
+              "keyword": false
+            },
+            {
+              "name": "start",
+              "type": "number",
+              "keyword": false
+            },
+            {
+              "name": "end",
+              "type": "number",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "perform",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "target",
+              "type": "AXTarget",
+              "keyword": false
+            },
+            {
+              "name": "action",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "args",
+              "type": "JsonValue",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "scroll",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "target",
+              "type": "AXTarget",
+              "keyword": false
+            },
+            {
+              "name": "direction",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "amount",
+              "type": "number",
+              "keyword": true,
+              "default": 1
+            },
+            {
+              "name": "unit",
+              "type": "string",
+              "keyword": true,
+              "default": "viewport"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ]
+    },
+    "Vision": {
+      "module": "ui",
+      "methods": [
+        {
+          "name": "observe",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "VisionObservation"
+        },
+        {
+          "name": "click",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "x",
+              "type": "number | PointRef",
+              "keyword": false
+            },
+            {
+              "name": "y",
+              "type": "number",
+              "keyword": false,
+              "default": null
+            },
+            {
+              "name": "image",
+              "type": "Image | string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "button",
+              "type": "string",
+              "keyword": true,
+              "default": "primary"
+            },
+            {
+              "name": "count",
+              "type": "number",
+              "keyword": true,
+              "default": 1
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "swipe",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "start",
+              "type": "PointRef",
+              "keyword": false
+            },
+            {
+              "name": "end",
+              "type": "PointRef",
+              "keyword": false
+            },
+            {
+              "name": "duration_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 500
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "long_press",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "x",
+              "type": "number | PointRef",
+              "keyword": false
+            },
+            {
+              "name": "y",
+              "type": "number",
+              "keyword": false,
+              "default": null
+            },
+            {
+              "name": "image",
+              "type": "Image | string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "duration_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 800
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "scroll",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "direction",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "x",
+              "type": "number | PointRef",
+              "keyword": true
+            },
+            {
+              "name": "y",
+              "type": "number",
+              "keyword": true
+            },
+            {
+              "name": "image",
+              "type": "Image | string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "amount",
+              "type": "number",
+              "keyword": true,
+              "default": 1
+            },
+            {
+              "name": "unit",
+              "type": "string",
+              "keyword": true,
+              "default": "viewport"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "move",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "x",
+              "type": "number | PointRef",
+              "keyword": false
+            },
+            {
+              "name": "y",
+              "type": "number",
+              "keyword": false,
+              "default": null
+            },
+            {
+              "name": "image",
+              "type": "Image | string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "steps",
+              "type": "number",
+              "keyword": true,
+              "default": 1
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "drag",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "start",
+              "type": "PointRef",
+              "keyword": false
+            },
+            {
+              "name": "end",
+              "type": "PointRef",
+              "keyword": false
+            },
+            {
+              "name": "hold_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": 0
+            },
+            {
+              "name": "duration_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 400
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt",
+          "overloads": [
+            [
+              {
+                "name": "start",
+                "type": "number",
+                "keyword": false
+              },
+              {
+                "name": "end",
+                "type": "number",
+                "keyword": false
+              },
+              {
+                "name": "x_end",
+                "type": "number",
+                "keyword": false
+              },
+              {
+                "name": "y_end",
+                "type": "number",
+                "keyword": false
+              },
+              {
+                "name": "image",
+                "type": "Image | string | null",
+                "keyword": true,
+                "default": null
+              },
+              {
+                "name": "hold_ms",
+                "type": "number | null",
+                "keyword": true,
+                "default": 0
+              },
+              {
+                "name": "duration_ms",
+                "type": "number",
+                "keyword": true,
+                "default": 400
+              },
+              {
+                "name": "timeout_ms",
+                "type": "number",
+                "keyword": true,
+                "default": 5000
+              },
+              {
+                "name": "action_id",
+                "type": "string",
+                "keyword": true,
+                "default": null
+              },
+              {
+                "name": "delivery",
+                "type": "string",
+                "keyword": true,
+                "default": "auto"
+              }
+            ]
+          ]
+        },
+        {
+          "name": "button_down",
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "x",
+              "type": "number | PointRef",
+              "keyword": false
+            },
+            {
+              "name": "y",
+              "type": "number",
+              "keyword": false,
+              "default": null
+            },
+            {
+              "name": "image",
+              "type": "Image | string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "button",
+              "type": "string",
+              "keyword": true,
+              "default": "primary"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt",
+          "async": true
+        },
+        {
+          "name": "button_up",
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "button",
+              "type": "string",
+              "keyword": false,
+              "default": "primary"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt",
+          "async": true
+        },
+        {
+          "name": "wheel",
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "delta_x",
+              "type": "number",
+              "keyword": false
+            },
+            {
+              "name": "delta_y",
+              "type": "number",
+              "keyword": false
+            },
+            {
+              "name": "unit",
+              "type": "string",
+              "keyword": true
+            },
+            {
+              "name": "x",
+              "type": "number",
+              "keyword": true
+            },
+            {
+              "name": "y",
+              "type": "number",
+              "keyword": true
+            },
+            {
+              "name": "image",
+              "type": "Image | string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt",
+          "async": true
+        }
+      ]
+    },
+    "Input": {
+      "module": "ui",
+      "methods": [
+        {
+          "name": "text",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "text",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "target",
+              "type": "AXTarget",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "press_key",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "key",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "modifiers",
+              "type": "string[]",
+              "keyword": true,
+              "default": []
+            },
+            {
+              "name": "target",
+              "type": "AXTarget | PointRef | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "key_down",
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "key",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt",
+          "async": true
+        },
+        {
+          "name": "key_up",
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "key",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt",
+          "async": true
+        },
+        {
+          "name": "release_all",
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number | null",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "delivery",
+              "type": "string",
+              "keyword": true,
+              "default": "auto"
+            }
+          ],
+          "returns": "ActionReceipt",
+          "async": true
+        }
+      ]
+    },
+    "UI": {
+      "module": "ui",
+      "methods": [
+        {
+          "name": "wait_for_stabilize",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "void"
+        }
+      ]
+    },
+    "Image": {
+      "module": "observations",
+      "methods": [
+        {
+          "name": "read",
+          "async": true,
+          "iterator": false,
+          "parameters": [],
+          "returns": "bytes"
+        },
+        {
+          "name": "point",
+          "async": false,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "x",
+              "type": "number",
+              "keyword": false
+            },
+            {
+              "name": "y",
+              "type": "number",
+              "keyword": false
+            },
+            {
+              "name": "space",
+              "type": "string",
+              "keyword": true,
+              "default": "pixels"
+            },
+            {
+              "name": "max_age_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 120000
+            }
+          ],
+          "returns": "PointRef"
+        }
+      ]
+    },
+    "Shell": {
+      "module": "services",
+      "methods": [
+        {
+          "name": "run",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "script",
+              "type": "string | string[] | ShellScript",
+              "keyword": false
+            },
+            {
+              "name": "cwd",
+              "type": "JsonValue",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "env",
+              "type": "JsonValue",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "stdin",
+              "type": "JsonValue",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 30000
+            },
+            {
+              "name": "check",
+              "type": "boolean",
+              "keyword": true,
+              "default": false
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "max_output_bytes",
+              "type": "number",
+              "keyword": true,
+              "default": 1048576
+            }
+          ],
+          "returns": "ShellResult"
+        }
+      ]
+    },
+    "Processes": {
+      "module": "services",
+      "methods": [
+        {
+          "name": "run",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "argv",
+              "type": "string[]",
+              "keyword": false
+            },
+            {
+              "name": "cwd",
+              "type": "JsonValue",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "env",
+              "type": "JsonValue",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "stdin",
+              "type": "JsonValue",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 30000
+            },
+            {
+              "name": "check",
+              "type": "boolean",
+              "keyword": true,
+              "default": false
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "max_output_bytes",
+              "type": "number",
+              "keyword": true,
+              "default": 1048576
+            }
+          ],
+          "returns": "ShellResult"
+        },
+        {
+          "name": "spawn",
+          "async": true,
+          "iterator": false,
+          "parameters": [],
+          "returns": "ActionReceipt"
+        }
+      ]
+    },
+    "Files": {
+      "module": "services",
+      "methods": [
+        {
+          "name": "path",
+          "async": false,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "path",
+              "type": "string | FileRef",
+              "keyword": false
+            }
+          ],
+          "returns": "FileRef"
+        },
+        {
+          "name": "read",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "path",
+              "type": "string | FileRef",
+              "keyword": false
+            },
+            {
+              "name": "max_bytes",
+              "type": "number",
+              "keyword": true,
+              "default": 1048576
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "bytes"
+        },
+        {
+          "name": "write",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "path",
+              "type": "string | FileRef",
+              "keyword": false
+            },
+            {
+              "name": "data",
+              "type": "bytes",
+              "keyword": false
+            },
+            {
+              "name": "overwrite",
+              "type": "boolean",
+              "keyword": true,
+              "default": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "stat",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "path",
+              "type": "string | FileRef",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "JsonValue"
+        },
+        {
+          "name": "list",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "path",
+              "type": "string | FileRef",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "JsonValue"
+        },
+        {
+          "name": "mkdir",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "path",
+              "type": "string | FileRef",
+              "keyword": false
+            },
+            {
+              "name": "parents",
+              "type": "boolean",
+              "keyword": true,
+              "default": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "remove",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "path",
+              "type": "string | FileRef",
+              "keyword": false
+            },
+            {
+              "name": "recursive",
+              "type": "boolean",
+              "keyword": true,
+              "default": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "move",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "source",
+              "type": "string | FileRef",
+              "keyword": false
+            },
+            {
+              "name": "destination",
+              "type": "string | FileRef",
+              "keyword": false
+            },
+            {
+              "name": "overwrite",
+              "type": "boolean",
+              "keyword": true,
+              "default": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ]
+    },
+    "Transfers": {
+      "module": "services",
+      "methods": [
+        {
+          "name": "copy",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "source",
+              "type": "FileRef",
+              "keyword": false
+            },
+            {
+              "name": "destination",
+              "type": "FileRef",
+              "keyword": false
+            },
+            {
+              "name": "overwrite",
+              "type": "boolean",
+              "keyword": true,
+              "default": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 10000
+            },
+            {
+              "name": "action_id",
+              "keyword": true,
+              "type": "string",
+              "default": null
+            }
+          ],
+          "returns": "JsonValue"
+        }
+      ]
+    },
+    "Clipboard": {
+      "module": "services",
+      "methods": [
+        {
+          "name": "read",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "formats",
+              "type": "string[]",
+              "keyword": false,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "JsonValue"
+        },
+        {
+          "name": "write",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "content",
+              "type": "JsonValue",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ]
+    },
+    "BrowserFactories": {
+      "module": "browser",
+      "methods": [
+        {
+          "name": "create",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "name",
+              "type": "string",
+              "keyword": true
+            },
+            {
+              "name": "provider",
+              "type": "string",
+              "keyword": true
+            },
+            {
+              "name": "lifetime",
+              "type": "string",
+              "keyword": true,
+              "default": "session"
+            },
+            {
+              "name": "storage_state",
+              "type": "JsonValue",
+              "keyword": true,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 30000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "BrowserContextDevice"
+        }
+      ]
+    },
+    "Browser": {
+      "module": "browser",
+      "methods": [
+        {
+          "name": "list_tabs",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "TabInventory"
+        },
+        {
+          "name": "get_tab",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "id",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "Tab"
+        },
+        {
+          "name": "new_tab",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "url",
+              "type": "string",
+              "keyword": false,
+              "default": "about:blank"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 30000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "Tab"
+        },
+        {
+          "name": "storage_state",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "JsonValue"
+        }
+      ]
+    },
+    "Tab": {
+      "module": "browser",
+      "methods": [
+        {
+          "name": "goto",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "url",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "wait_until",
+              "type": "string",
+              "keyword": true,
+              "default": "domcontentloaded"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 30000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "go_back",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "wait_until",
+              "type": "string",
+              "keyword": true,
+              "default": "domcontentloaded"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 30000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "go_forward",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "wait_until",
+              "type": "string",
+              "keyword": true,
+              "default": "domcontentloaded"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 30000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "reload",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "wait_until",
+              "type": "string",
+              "keyword": true,
+              "default": "domcontentloaded"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 30000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "close",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "evaluate",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "source",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "arg",
+              "type": "JsonValue",
+              "keyword": false,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "JsonValue"
+        },
+        {
+          "name": "upload",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "target",
+              "type": "AXTarget",
+              "keyword": false
+            },
+            {
+              "name": "files",
+              "type": "UploadFile[]",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ],
+      "extends": "Device"
+    },
+    "Cookies": {
+      "module": "browser",
+      "methods": [
+        {
+          "name": "read",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "urls",
+              "type": "string[]",
+              "keyword": false,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "JsonValue[]"
+        },
+        {
+          "name": "set",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "cookies",
+              "type": "JsonValue[]",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "clear",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "filter",
+              "type": "JsonValue",
+              "keyword": false,
+              "default": null
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ]
+    },
+    "Network": {
+      "module": "browser",
+      "methods": [
+        {
+          "name": "set_rules",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "rules",
+              "type": "JsonValue[]",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ]
+    },
+    "Dialogs": {
+      "module": "browser",
+      "methods": [
+        {
+          "name": "set_rules",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "rules",
+              "type": "JsonValue[]",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ]
+    },
+    "Storage": {
+      "module": "browser",
+      "methods": [
+        {
+          "name": "read",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "key",
+              "type": "string | null",
+              "keyword": false,
+              "default": null
+            },
+            {
+              "name": "area",
+              "type": "string",
+              "keyword": true,
+              "default": "local"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "JsonValue"
+        },
+        {
+          "name": "set",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "key",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "value",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "area",
+              "type": "string",
+              "keyword": true,
+              "default": "local"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "remove",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "key",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "area",
+              "type": "string",
+              "keyword": true,
+              "default": "local"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        },
+        {
+          "name": "clear",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "area",
+              "type": "string",
+              "keyword": true,
+              "default": "local"
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            },
+            {
+              "name": "action_id",
+              "type": "string",
+              "keyword": true,
+              "default": null
+            }
+          ],
+          "returns": "ActionReceipt"
+        }
+      ]
+    },
+    "Downloads": {
+      "module": "browser",
+      "methods": [
+        {
+          "name": "list",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "JsonValue[]"
+        },
+        {
+          "name": "get",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "id",
+              "type": "string",
+              "keyword": false
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "Download"
+        }
+      ]
+    },
+    "Download": {
+      "module": "browser",
+      "methods": [
+        {
+          "name": "read",
+          "async": true,
+          "iterator": false,
+          "parameters": [
+            {
+              "name": "offset",
+              "type": "number",
+              "keyword": true,
+              "default": 0
+            },
+            {
+              "name": "max_bytes",
+              "type": "number",
+              "keyword": true,
+              "default": 1048576
+            },
+            {
+              "name": "timeout_ms",
+              "type": "number",
+              "keyword": true,
+              "default": 5000
+            }
+          ],
+          "returns": "DownloadRead"
+        }
+      ]
+    },
+    "Window": {
+      "methods": [],
+      "extends": "App"
+    },
+    "Display": {
+      "methods": [],
+      "extends": "Device"
+    },
+    "AXObservation": {
+      "methods": []
+    }
+  },
+  "capabilities": {
+    "ui.wait_for_stabilize": "ui.wait_for_stabilize",
+    "ui.ax.observe": "ui.observe.tree",
+    "ui.vision.observe": "ui.observe.screenshot",
+    "ui.ax.click": "ui.click.primary",
+    "ui.ax.perform": "ui.perform",
+    "ui.ax.set_text": "ui.set_text",
+    "ui.ax.select_text": "ui.select_text",
+    "ui.ax.scroll.native_steps": "ui.scroll.steps",
+    "ui.input.text": "ui.input_text",
+    "ui.ax.scroll.viewport": "ui.scroll.viewport",
+    "ui.input.press_key": "ui.press_key",
+    "ui.vision.click": "ui.click.coordinates",
+    "ui.vision.swipe": "ui.scroll.coordinates",
+    "ui.vision.scroll": "ui.scroll.coordinates",
+    "ui.vision.long_press": "ui.long_press",
+    "android.press": "android.press",
+    "apps.list": "device.list_apps",
+    "apps.launch": "app.launch",
+    "displays.list": "device.list_displays",
+    "shell.run": "shell.run",
+    "processes.run": "shell.run",
+    "files.read": "files.read",
+    "files.write": "files.write",
+    "files.stat": "files.stat",
+    "files.list": "files.list",
+    "files.mkdir": "files.mkdir",
+    "files.remove": "files.remove",
+    "files.move": "files.move",
+    "windows.list": "device.list_windows",
+    "ui.vision.move": "ui.move",
+    "ui.vision.drag": "ui.drag",
+    "clipboard.read": "clipboard.read",
+    "clipboard.write": "clipboard.write",
+    "macos.set_frame": "macos.set_frame",
+    "macos.invoke_menu": "macos.invoke_menu",
+    "ui.input.key_down": "ui.key_state",
+    "ui.input.key_up": "ui.key_state",
+    "ui.input.release_all": "ui.release_all",
+    "ui.vision.button_down": "ui.button_state",
+    "ui.vision.button_up": "ui.button_state",
+    "ui.vision.wheel": "ui.wheel"
+  },
+  "defaults": {
+    "headless": true,
+    "viewport": {
+      "width": 1280,
+      "height": 720
+    },
+    "device_scale_factor": 1,
+    "lifetime": "session",
+    "wait_until": "domcontentloaded"
+  }
+}

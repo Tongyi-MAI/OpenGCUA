@@ -1,0 +1,4 @@
+# Adapter-only runtime dependencies. AT-SPI/PyGObject come from Ubuntu packages.
+python-xlib==0.33
+six==1.17.0
+Pillow==11.3.0

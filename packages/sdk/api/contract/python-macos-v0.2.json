@@ -1,0 +1,58 @@
+{
+  "api_version": "0.2",
+  "adapter_protocol_major": 1,
+  "language": "python",
+  "platform": "macos",
+  "provider": "macos.cua",
+  "driver_version": "0.28.1",
+  "names": "snake_case",
+  "defaults": {
+    "coordinate_space": "pixels",
+    "ax_capture_timeout_ms": 20000,
+    "vision_capture_timeout_ms": 10000,
+    "activation_timeout_ms": 20000,
+    "input_delivery": "background",
+    "access": "control",
+    "file_overwrite": false,
+    "max_file_bytes": 1048576,
+    "max_process_output_bytes_per_stream": 1048576
+  },
+  "subsets": {
+    "session": ["discover", "register", "device", "devices", "unregister", "events", "emit", "action_status", "cancel", "close"],
+    "ui.ax": ["observe", "click", "set_text", "perform"],
+    "ui.vision": ["observe", "click", "move", "scroll", "drag"],
+    "ui.input": ["text", "press_key"],
+    "apps": ["list", "get", "launch"],
+    "app": ["activate"],
+    "windows": ["list", "get"],
+    "window": ["activate"],
+    "displays": ["list", "get"],
+    "files": ["path", "list", "stat", "read", "write", "mkdir", "remove", "move"],
+    "shell": ["run"],
+    "processes": ["run"],
+    "clipboard": ["read", "write"],
+    "macos": ["set_frame", "invoke_menu"]
+  },
+  "policies": {
+    "ax_activation": "cua_activation",
+    "ax_identity": "snapshot",
+    "ax_snapshot_retention_per_process": 8,
+    "ax_native_coverage": "partial",
+    "ax_refresh": "full_returned_projection",
+    "vision_only_preserves_ax_history": true,
+    "automatic_foreground_escalation": false,
+    "uncertain_mutation_replay": false,
+    "same_endpoint_execution": "serialized"
+  },
+  "limits": {
+    "desktop_ax": "bind_app_or_window",
+    "display": "primary",
+    "window_pointer_move": "unsupported_overlay_is_not_real_pointer",
+    "drag_delivery": "foreground",
+    "scroll_units": ["lines"],
+    "scroll_amount": [1, 50],
+    "host_services_scope": "whole_mac",
+    "clipboard_formats": ["text/plain"]
+  },
+  "wip": ["javascript", "remote_mac", "virtual_machine", "additional_displays", "strict_native_ax_invocation", "native_lifetime_ax_diffs", "clipboard_full_format_restore", "paste_and_restore", "process_streaming", "viewport_scroll", "touch_swipe"]
+}

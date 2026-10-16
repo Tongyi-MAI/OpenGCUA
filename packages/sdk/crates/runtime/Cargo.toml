@@ -1,0 +1,14 @@
+[package]
+name = "mu-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+mu-core.workspace = true
+mu-protocol.workspace = true
+mu-adapter.workspace = true
+tokio.workspace = true
+base64 = "0.22"

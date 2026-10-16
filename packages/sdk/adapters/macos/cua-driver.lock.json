@@ -1,0 +1,14 @@
+{
+  "dependency": "trycua/cua-driver",
+  "version": "0.28.1",
+  "modified": false,
+  "protocol": "2025-06-18",
+  "archive": {
+    "platform": "darwin-universal",
+    "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.1/cua-driver-rs-0.28.1-darwin-universal.tar.gz",
+    "sha256": "52fdabd1947c9b252d881a257d3169372ed1a2d4ea90cdcce7dd624e8360d133"
+  },
+  "application": "/Applications/CuaDriver.app",
+  "signature": {"identifier": "com.trycua.driver", "team_id": "YCK386LBJ7"},
+  "source_commit": "d8028a7943087ee258dc1b4d19dc12a7cd27669c"
+}

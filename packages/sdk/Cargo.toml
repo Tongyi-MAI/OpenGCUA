@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/core", "crates/runtime", "crates/protocol", "crates/client", "crates/adapter", "crates/bindings-python", "crates/cli", "adapters/android/host", "adapters/macos", "crates/host"]
+resolver = "2"
+
+# Avoid Cargo's implicit debug-symbol stripping: affected Apple toolchains can
+# produce a LINKEDIT string table rejected by macOS 27's dynamic loader.
+# https://github.com/rust-lang/rust/issues/157750
+[profile.release]
+strip = "none"
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.89"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "io-util"] }
+mu-core = { path = "crates/core" }
+mu-runtime = { path = "crates/runtime" }
+mu-protocol = { path = "crates/protocol" }
+mu-client = { path = "crates/client" }
+mu-adapter = { path = "crates/adapter" }
+mu-adapter-macos = { path = "adapters/macos" }
+
+mu-host = { path = "crates/host" }
