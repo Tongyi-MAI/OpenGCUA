@@ -123,6 +123,10 @@ uv pip install -e ./packages/sdk -e ./packages/harness/runtime
 
 # Install the native driver app. Its daemon is included in the app bundle.
 .venv/bin/mu setup macos
+.venv/bin/mu doctor macos
+
+.venv/bin/mu setup browser --engine chromium
+.venv/bin/mu doctor browser --engine chromium 
 
 # Create a private local configuration from the shipped defaults.
 cp packages/harness/configs/macos_demo.json packages/harness/configs/local.json
