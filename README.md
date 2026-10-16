@@ -113,10 +113,6 @@ This is the shortest path from a clean clone to an interactive agent. It require
 [uv](https://docs.astral.sh/uv/), Python 3.11–3.14, Rust/Cargo 1.89+, and Xcode Command Line Tools.
 Python 3.12 is recommended. Prebuilt SDK wheels do not require Rust.
 
-> **Safety warning:** the harness executes Python and Bash written by the model on your Mac.
-> This is not a security sandbox. Use a test account or machine whose files and application
-> state you can afford to change, and do not expose the local demo server to untrusted networks.
-
 ```bash
 git clone https://github.com/Tongyi-MAI/OpenGCUA.git
 cd OpenGCUA
