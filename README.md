@@ -322,7 +322,7 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 <table align="center">
 <tr>
-<td align="center" width="50%"><b>WeChat group</b><br><br><img src="https://img.shields.io/badge/QR_code-coming_soon-07C160?style=for-the-badge&logo=wechat&logoColor=white" alt="WeChat QR code coming soon"></td>
+<td align="center" width="50%"><b>WeChat group</b><br><br><img src="site/assets/readme/wechat-assistant-qr.png" alt="WeChat assistant QR code" width="240"></td>
 <td align="center" width="50%"><b>Discord</b><br><br><img src="https://img.shields.io/badge/Invite-coming_soon-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord invite coming soon"></td>
 </tr>
 </table>
