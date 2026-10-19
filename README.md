@@ -83,28 +83,26 @@ studies.
 
 ## 🎬 Demos
 
-<!-- DEMO VIDEOS: replace each placeholder <img> below with its video. Drag the video file into any issue or
-     pull-request comment box on GitHub (no need to post the comment), copy the
-     https://github.com/user-attachments/assets/... URL it produces, and paste that URL on its own line in place
-     of the <img> line. GitHub renders it as a video player. Videos can be up to 10 MB on a free GitHub plan and
-     100 MB on a paid plan, and .mp4 with H.264 plays in the most browsers. In each caption, state the playback
-     speed (for example, 4×) and the model behind each agent. -->
+Click a screenshot to watch the video.
 
-**One visa form, three agents.** Codex, OpenGCUA, and a GUI-only agent fill in the same visa application on a
-real Mac.
+**One visa form, four workflows.** OpenGCUA, OpenGCUA (prefer GUI), GUI + batch, and Codex work on the
+same visa application on a real Mac. Playback speeds vary; use the in-video clocks for elapsed task time.
 
-<!-- Demo 1: put the three runs side by side in one video, started together, with a clock in each pane. When the
-     runs are final, add each agent's time and number of steps to the caption above. -->
-![Demo 1, video coming soon: Codex, OpenGCUA, and a GUI-only agent fill in the same visa application form on a real Mac.](site/assets/readme/demo-visa-form.svg)
+[![Side-by-side video of four workflows filling in the same visa form.](site/assets/readme/demo-four-workflows.jpg)](https://tongyi-mai.github.io/OpenGCUA-blog/demos/four-workflows.mp4)
 
-**Computer use and browser use.** OpenGCUA completes tasks in desktop apps and in the browser on a real Mac.
+[▶ Watch the comparison · 1:50](https://tongyi-mai.github.io/OpenGCUA-blog/demos/four-workflows.mp4)
 
-![Demo 2, video coming soon: OpenGCUA completes tasks in desktop apps and in the browser on a real Mac.](site/assets/readme/demo-computer-browser.svg)
+**Hotel research.** OpenGCUA researches and compares hotel options across desktop apps and the browser.
 
-**One task across a phone and a computer.** With the Cross-Device SDK, OpenGCUA works on a phone and a Mac to
-complete one task.
+[![OpenGCUA researching hotel room options in a desktop browser.](site/assets/readme/demo-hotel-research.jpg)](https://tongyi-mai.github.io/OpenGCUA-blog/demos/hotel-research.mp4)
 
-![Demo 3, video coming soon: with the Cross-Device SDK, OpenGCUA works on a phone and a Mac to complete one task.](site/assets/readme/demo-cross-device.svg)
+[▶ Watch hotel research · 3:33](https://tongyi-mai.github.io/OpenGCUA-blog/demos/hotel-research.mp4)
+
+**GUI click sequence.** A short excerpt of GUI actions during the visa-form workflow.
+
+[![OpenGCUA performing GUI actions on a visa form in macOS Preview.](site/assets/readme/demo-click-sequence.jpg)](https://tongyi-mai.github.io/OpenGCUA-blog/demos/click-sequence.mp4)
+
+[▶ Watch the click sequence · 0:25](https://tongyi-mai.github.io/OpenGCUA-blog/demos/click-sequence.mp4)
 
 <a name="quick-start"></a>
 ## 🚀 Quick Start (macOS source harness)
@@ -324,7 +322,7 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 <table align="center">
 <tr>
-<td align="center" width="50%"><b>WeChat group</b><br><br><img src="https://img.shields.io/badge/QR_code-coming_soon-07C160?style=for-the-badge&logo=wechat&logoColor=white" alt="WeChat QR code coming soon"></td>
+<td align="center" width="50%"><b>WeChat group</b><br><br><img src="site/assets/readme/wechat-assistant-qr.png" alt="WeChat assistant QR code" width="240"></td>
 <td align="center" width="50%"><b>Discord</b><br><br><img src="https://img.shields.io/badge/Invite-coming_soon-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord invite coming soon"></td>
 </tr>
 </table>
