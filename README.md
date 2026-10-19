@@ -322,10 +322,13 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 <table align="center">
 <tr>
-<td align="center" width="50%"><b>WeChat group</b><br><br><img src="site/assets/readme/wechat-assistant-qr.png" alt="WeChat assistant QR code" width="240"></td>
-<td align="center" width="50%"><b>Discord</b><br><br><img src="https://img.shields.io/badge/Invite-coming_soon-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord invite coming soon"></td>
+<td align="center" width="40%"><b>WeChat group</b><br><br><img src="site/assets/readme/wechat.png" alt="OpenGCUA WeChat group QR code" width="180"></td>
+<td align="center" width="40%"><b>WeChat assistant</b><br><br><img src="site/assets/readme/wechat-assistant-qr.png" alt="OpenGCUA WeChat assistant QR code" width="180"></td>
+<td align="center" width="20%"><b>Discord</b><br><br><img src="https://img.shields.io/badge/Invite-coming_soon-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord invite coming soon"></td>
 </tr>
 </table>
+
+If the WeChat group QR code has expired, scan the WeChat assistant QR code to contact us.
 
 <a name="contact"></a>
 
