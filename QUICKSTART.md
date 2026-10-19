@@ -74,6 +74,9 @@ python -c "import mai_ui; from mai_ui import Runtime; import qwen_intelligence; 
 # If `mu doctor macos` cannot find it, open CuaDriver from /Applications once.
 ```
 
+If a different CuaDriver version is already installed, stop running agent sessions and use
+`.venv/bin/mu setup macos --replace` to install this checkout's pinned version.
+
 Then grant macOS permissions to **CuaDriver.app** (required, else `PERMISSION_DENIED`):
 **System Settings → Privacy & Security → Accessibility** and **→ Screen Recording** → enable
 CuaDriver. Then verify:
@@ -361,6 +364,7 @@ Start with the exact error text; similarly named failures can have different own
 
 | Error or symptom | What it means | What to do |
 |---|---|---|
+| `VERSION_MISMATCH` from `mu setup macos` or `mu doctor macos` | The installed CuaDriver.app differs from this checkout's pinned version. Setup preserves an existing installation by default. | Stop any running agent sessions, then run `.venv/bin/mu setup macos --replace` and `.venv/bin/mu doctor macos`. Recheck macOS permissions if the replacement is not ready. |
 | `PERMISSION_DENIED ... tool_invocation_failed` on capture, window listing, or input | macOS denied Accessibility or Screen Recording to the process responsible for this call. The responsible process can change after switching terminals, interpreters, or driver processes. | Enable **CuaDriver.app** under both Privacy & Security permission pages, quit and reopen it, and run `.venv/bin/mu doctor macos`. If the failure remains, grant the launching terminal/IDE when macOS offers it or use the previously granted interpreter. |
 | `DEVICE_OFFLINE` from a failed Mac GUI call | The Mac SDK endpoint or its connection became unavailable. This code alone does not identify whether the driver exited, restarted, or was fenced earlier. | Send the next turn and let the host rebuild the endpoint. Treat earlier window/UI handles as invalid. If it repeats, inspect the failed call's diagnostic fields (`endpoint_offline_before`, `last_gui_success_age_seconds`, `keepalive_error`) and the preceding native error. |
 | Browser startup reports `Browser worker is missing its Playwright dependency; run mu setup browser` followed by `local playwright shim active` | The optional Node-based SDK browser worker lacks its npm dependency; the local browser fallback succeeded. This does **not** mean the Mac GUI endpoint is offline. Older builds may instead print `ERR_MODULE_NOT_FOUND: Cannot find package 'playwright'`. | Browser-only work can continue through the fallback. To enable the native SDK browser, run `.venv/bin/mu setup browser --engine chromium` and restart the harness. |

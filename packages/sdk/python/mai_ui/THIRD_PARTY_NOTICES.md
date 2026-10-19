@@ -1,10 +1,10 @@
 # Third-party notices
 
-## Cua Driver 0.28.1
+## Cua Driver 0.36.0
 
 Cua Driver is downloaded separately, without modifications.
-Source: https://github.com/trycua/cua/tree/cua-driver-rs-v0.28.1
-License source: https://github.com/trycua/cua/blob/cua-driver-rs-v0.28.1/LICENSE.md
+Source: https://github.com/trycua/cua/tree/cua-driver-rs-v0.36.0
+License source: https://github.com/trycua/cua/blob/cua-driver-rs-v0.36.0/LICENSE.md
 
 MIT License
 

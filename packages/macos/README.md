@@ -153,7 +153,7 @@ OpenGCUA.app (SwiftUI + AppKit)
   └─ bundled Python → native_host.py (private NDJSON stdin/stdout)
        ├─ mac_agent.run_agent → configured model provider
        ├─ persistent code worker → bundled mai_ui Rust SDK
-       └─ signed CuaDriver 0.28.1 → private socket → local macOS
+       └─ signed CuaDriver 0.36.0 → private socket → local macOS
 ```
 
 The SDK validates CuaDriver's pinned version and upstream signing identity. The

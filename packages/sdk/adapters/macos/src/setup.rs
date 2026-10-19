@@ -3,11 +3,11 @@ use mu_protocol::Error;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{io::Read, path::Path, process::Command};
-pub const VERSION: &str = "0.28.1";
+pub const VERSION: &str = "0.36.0";
 pub const APP: &str = "/Applications/CuaDriver.app";
 pub const BINARY: &str = "/Applications/CuaDriver.app/Contents/MacOS/cua-driver";
-pub const ARCHIVE_SHA256: &str = "52fdabd1947c9b252d881a257d3169372ed1a2d4ea90cdcce7dd624e8360d133";
-pub const URL:&str="https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.1/cua-driver-rs-0.28.1-darwin-universal.tar.gz";
+pub const ARCHIVE_SHA256: &str = "2a83cf9c3a2fa7ae27f3fe62e426aeca5acf76511bb14dd64d10ccb2de6aecae";
+pub const URL:&str="https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.36.0/cua-driver-rs-0.36.0-darwin-universal.tar.gz";
 pub fn command(program: &str, args: &[&str]) -> Result<String, Error> {
     let r = Command::new(program)
         .args(args)
@@ -124,7 +124,7 @@ pub fn install(replace: bool, archive: Option<&str>) -> Result<Value, Error> {
     )?;
     let src = stage
         .path()
-        .join("cua-driver-rs-0.28.1-darwin-universal/CuaDriver.app");
+        .join(format!("cua-driver-rs-{VERSION}-darwin-universal/CuaDriver.app"));
     verify_signature(&src)?;
     let backup = Path::new("/Applications/.mai-ui-CuaDriver-backup.app");
     if backup.exists() {

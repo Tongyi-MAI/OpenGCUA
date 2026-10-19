@@ -19,7 +19,7 @@ for line in sys.stdin:
         result = dict(
             protocolVersion="2025-06-18",
             capabilities={"tools": {}},
-            serverInfo={"name": "fixture", "version": "0.28.1"},
+            serverInfo={"name": "fixture", "version": "0.36.0"},
         )
     elif q["method"] == "tools/call":
         name = q["params"]["name"]

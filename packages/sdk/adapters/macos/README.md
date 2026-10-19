@@ -1,6 +1,6 @@
 # macOS provider
 
-Rust provider for the local Mac, using **unmodified Cua Driver 0.28.1** over a
+Rust provider for the local Mac, using **unmodified Cua Driver 0.36.0** over a
 persistent MCP stdio connection to its signed app daemon. Python adds lifecycle
 and public handles; native operations and host services stay in Rust.
 

@@ -2095,7 +2095,7 @@ def _sdk_audit_result(operation: str, result: Any, elapsed: float) -> Any:
 def _repair_transparent_observation(result: Any) -> Any:
     """Replace a broken SDK window frame with an exact macOS window capture.
 
-    CuaDriver 0.28.1 can return an all-transparent PNG for a valid Chrome window.
+    Older CuaDriver releases can return an all-transparent PNG for a valid Chrome window.
     The SDK window ID embeds the native CGWindowID, so ``screencapture -l`` can
     capture the *same* window without changing the observation's target or token.
     Keep the original pixel dimensions because the SDK's coordinate basis was
