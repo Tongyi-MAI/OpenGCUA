@@ -117,6 +117,8 @@ It hides only while a foreground pointer target or drag path intersects the
 current icon or expanded card, and returns immediately after that operation.
 Hover expansion is suspended during pointer operations. Automatic hiding keeps
 voice connected. Use the menu bar to open the chat and pause or stop a running task.
+Keeping a conversation alive does not re-show the separate Cua agent cursor;
+the cursor still appears normally for actual native operations.
 
 The floating panel includes text input, a microphone, and Send (⌘Return).
 During a task, messages join the next planning round; a new message received

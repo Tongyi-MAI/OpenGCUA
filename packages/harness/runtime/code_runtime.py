@@ -2456,8 +2456,8 @@ async def _save_web_state() -> None:
         pass
 
 
-def _start_keepalive(loop: asyncio.AbstractEventLoop | None = None) -> None:
-    """Every 90s keep the native lease alive on the persistent worker loop."""
+def _start_keepalive(loop: asyncio.AbstractEventLoop | None = None, *, interval: float = 90) -> None:
+    """Keep the native lease alive without a visible inventory/cursor action."""
     global _SDK_KEEPALIVE
     if _SDK_KEEPALIVE is not None:
         _SDK_KEEPALIVE.cancel()
@@ -2465,12 +2465,13 @@ def _start_keepalive(loop: asyncio.AbstractEventLoop | None = None) -> None:
     async def _beat() -> None:
         global _SDK_LAST_KEEPALIVE_ERROR
         while True:
-            await asyncio.sleep(90)
+            await asyncio.sleep(interval)
             session, device = _MAI_SESSION, _SDK_DEVICE
             if session is None or device is None:
                 continue
             try:
-                await device.apps.list(timeout_ms=5000)
+                await asyncio.wait_for(device._backend._request(
+                    {"op": "keepalive", "timeout_ms": 5000}), timeout=5)
                 _SDK_LAST_KEEPALIVE_ERROR = None
             except Exception as exc:  # noqa: BLE001 - keepalive failure is diagnostic
                 _SDK_LAST_KEEPALIVE_ERROR = str(exc)

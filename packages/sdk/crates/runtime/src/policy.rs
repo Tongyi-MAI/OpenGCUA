@@ -6,7 +6,7 @@ use serde_json::Value;
 pub fn capability(q: &Value) -> Result<Option<String>, Error> {
     let action = q["action"].as_str().unwrap_or("");
     let c = match q["op"].as_str().unwrap_or("") {
-        "describe" => return Ok(None),
+        "describe" | "keepalive" => return Ok(None),
         "observe" => {
             if q["tree"] == true {
                 "ui.observe.tree"
@@ -81,9 +81,12 @@ pub fn validate(
         || q["window_id"].is_string()
         || q["display_id"].is_string()
         || q["tab_id"].is_string();
+    if q["op"] == "keepalive" && (platform != "macos" || resource != endpoint) {
+        return Err(err("UNSUPPORTED_CAPABILITY"));
+    }
     let whole = matches!(
         q["op"].as_str(),
-        Some("shell" | "file" | "clipboard" | "list_apps" | "displays")
+        Some("shell" | "file" | "clipboard" | "list_apps" | "displays" | "keepalive")
     ) || matches!(q["action"].as_str(), Some("system" | "clipboard_write"));
     if sub && whole {
         return Err(err("UNSUPPORTED_CAPABILITY"));

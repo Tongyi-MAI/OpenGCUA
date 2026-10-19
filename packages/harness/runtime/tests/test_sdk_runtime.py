@@ -607,6 +607,94 @@ def test_idle_worker_tick_does_not_accumulate_execution_tasks():
         loop.close()
 
 
+def test_periodic_keepalive_is_silent_and_retains_the_session(monkeypatch):
+    async def scenario():
+        requests = []
+        async def request(message):
+            requests.append(message)
+            return {"alive": True}
+        device = types.SimpleNamespace(_backend=types.SimpleNamespace(_request=request))
+        session = object()
+        monkeypatch.setattr(code_runtime, "_SDK_KEEPALIVE", None)
+        monkeypatch.setattr(code_runtime, "_SDK_DEVICE", device)
+        monkeypatch.setattr(code_runtime, "_MAI_SESSION", session)
+        monkeypatch.setattr(code_runtime, "_SDK_LAST_KEEPALIVE_ERROR", "old error")
+        code_runtime._start_keepalive(interval=.01)
+        task = code_runtime._SDK_KEEPALIVE
+        try:
+            for _ in range(30):
+                if len(requests) >= 3:
+                    break
+                await asyncio.sleep(.01)
+            assert len(requests) >= 3
+            assert all(message == {"op": "keepalive", "timeout_ms": 5000} for message in requests)
+            assert code_runtime._SDK_LAST_KEEPALIVE_ERROR is None
+            assert code_runtime._MAI_SESSION is session
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+def test_keepalive_failure_does_not_fall_back_to_visible_app_inventory(monkeypatch):
+    async def scenario():
+        requests = []
+        async def request(message):
+            requests.append(message)
+            raise RuntimeError("offline fixture")
+        device = types.SimpleNamespace(_backend=types.SimpleNamespace(_request=request))
+        monkeypatch.setattr(code_runtime, "_SDK_KEEPALIVE", None)
+        monkeypatch.setattr(code_runtime, "_SDK_DEVICE", device)
+        monkeypatch.setattr(code_runtime, "_MAI_SESSION", object())
+        monkeypatch.setattr(code_runtime, "_SDK_LAST_KEEPALIVE_ERROR", None)
+        code_runtime._start_keepalive(interval=.01)
+        task = code_runtime._SDK_KEEPALIVE
+        try:
+            for _ in range(30):
+                if code_runtime._SDK_LAST_KEEPALIVE_ERROR:
+                    break
+                await asyncio.sleep(.01)
+            assert requests and all(message["op"] == "keepalive" for message in requests)
+            assert code_runtime._SDK_LAST_KEEPALIVE_ERROR == "offline fixture"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("platform", ["macos", "android"])
+def test_native_runtime_routes_keepalive_only_to_a_whole_mac_endpoint(platform):
+    from mai_ui import Runtime
+    from mai_ui._errors import MuError
+    class Adapter:
+        provider = "fixture.keepalive"
+        async def start(self): self.requests = []
+        async def close(self): pass
+        async def request(self, message):
+            self.requests.append(dict(message))
+            if message["op"] == "describe":
+                return {"result": {"protocol_major": 1, "platform": self.platform, "capabilities": {}}}
+            return {"result": {"alive": True}}
+    async def scenario():
+        adapter = Adapter(); adapter.platform = platform
+        async with Runtime() as runtime:
+            resource = await runtime.add_adapter(adapter, name="fixture", resource_id=platform+":fixture")
+            async with runtime.session() as session:
+                device = await session.register(resource, name="device")
+                adapter.requests.clear()
+                if platform == "macos":
+                    assert await device._backend._request({"op": "keepalive", "timeout_ms": 5000}) == {"alive": True}
+                    assert len(adapter.requests) == 1 and adapter.requests[0]["op"] == "keepalive"
+                    adapter.requests.clear()
+                    with pytest.raises(MuError, match="UNSUPPORTED_CAPABILITY"):
+                        await device._backend._request({"op": "keepalive", "app_id": "app:fixture", "timeout_ms": 5000})
+                else:
+                    with pytest.raises(MuError, match="UNSUPPORTED_CAPABILITY"):
+                        await device._backend._request({"op": "keepalive", "timeout_ms": 5000})
+                assert not adapter.requests, "Rejected heartbeat scopes must never reach the adapter"
+    asyncio.run(scenario())
+
+
 def test_sync_client_close_cancels_owned_loop_tasks(monkeypatch):
     class FakeClient:
         def __init__(self):

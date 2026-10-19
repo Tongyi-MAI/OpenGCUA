@@ -522,7 +522,9 @@ impl MacosProvider {
             ));
         }
         let mut permissions = json!({});
-        if !matches!(text(&q, "op"), "file" | "shell" | "stop") {
+        // Lease maintenance reads only session metadata. Even a permission
+        // probe can emit a System cursor cue on an existing MCP session.
+        if !matches!(text(&q, "op"), "file" | "shell" | "stop" | "keepalive") {
             let result = self
                 .tool(
                     "check_permissions",
@@ -542,6 +544,12 @@ impl MacosProvider {
         }
         match text(&q, "op") {
             "describe" => Ok(self.describe(&permissions)),
+            "keepalive" => {
+                // This session-scoped read refreshes the lease without emitting a
+                // cursor action. Inventory reads are visible App actions in Cua.
+                self.tool("get_agent_cursor_state", json!({})).await?;
+                Ok(json!({"alive":true}))
+            }
             "list_apps" => self.apps().await,
             "list_windows" => self.windows(q["app_id"].as_str()).await,
             "observe" => self.observe(&q).await,
@@ -779,6 +787,28 @@ mod tests {
         let r = p.request(serde_json::from_value(q).unwrap()).await.unwrap();
         assert!(r.error.is_none(), "{:?}", r.error);
         r.result.unwrap()
+    }
+    #[tokio::test]
+    async fn keepalive_never_dispatches_inventory_or_cursor_actions() {
+        let fixture = std::env::var_os("MAI_UI_MACOS_TEST_FIXTURE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixture/mock_cua.py"));
+        let mut command = tokio::process::Command::new("python3");
+        command.arg(fixture);
+        let p = MacosProvider::connect_command(command, tempfile::tempfile().unwrap(), false)
+            .await.unwrap();
+        for _ in 0..3 {
+            assert_eq!(call(&p, json!({"op":"keepalive"})).await["alive"], true);
+        }
+        let calls = p.tool("fixture_get_calls", json!({})).await.unwrap();
+        let names: Vec<_> = calls["structuredContent"]["calls"].as_array().unwrap()
+            .iter().map(|call| call["name"].as_str().unwrap()).collect();
+        assert_eq!(names.iter().filter(|&&name| name == "get_agent_cursor_state").count(), 3);
+        assert_eq!(names, vec!["start_session", "get_agent_cursor_state",
+            "get_agent_cursor_state", "get_agent_cursor_state"],
+            "A heartbeat must not enumerate apps, emit permission-probe cues, or post input");
+        p.close().await.unwrap();
     }
     #[tokio::test]
     async fn foreground_set_text_is_rejected_before_driver_dispatch() {
