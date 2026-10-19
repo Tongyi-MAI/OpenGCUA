@@ -60,7 +60,7 @@ def task_arguments(config: dict, runs_dir: Path):
         raise ValueError("请填写模型名称。")
     if args.background_mode and args.demo_mode:
         raise ValueError("后台模式与演示模式不能同时开启。")
-    args.multi_task = False
+    args.multi_task = True
     args.countdown = 0
     args.ui = "plain"
     args.runs_dir = runs_dir
@@ -85,8 +85,9 @@ def require_mac_permissions(report: dict) -> None:
 
 
 class TaskControl:
-    def __init__(self, task_id, send):
+    def __init__(self, task_id, send, sanitize=str):
         self.task_id, self.send = task_id, send
+        self.sanitize = sanitize
         self.resume_event = asyncio.Event()
         self.resume_event.set()
         self.question_id = None
@@ -95,6 +96,31 @@ class TaskControl:
         self.paused = False
         self.messages = []
         self.message_states = {}
+        self.message_event = asyncio.Event()
+        self.waiting_for_follow_up = False
+        self.ended = False
+        self.turn_index = 0
+        self.overlay_waits = {}
+
+    async def overlay(self, event):
+        fields = {k: event[k] for k in ("phase", "guard_id", "points") if k in event}
+        if "kind" in event: fields["impact"] = event["kind"]
+        if fields.get("phase") != "begin":
+            self.emit("overlay", **fields)
+            return
+        guard_id = fields["guard_id"]
+        future = asyncio.get_running_loop().create_future()
+        self.overlay_waits[guard_id] = future
+        try:
+            self.emit("overlay", **fields)
+            await asyncio.wait_for(future, 5)
+        finally:
+            self.overlay_waits.pop(guard_id, None)
+
+    def acknowledge_overlay(self, guard_id):
+        future = self.overlay_waits.get(guard_id)
+        if future is not None and not future.done():
+            future.set_result(True)
 
     def message(self, message_id, text):
         if not isinstance(message_id, str) or not message_id or len(message_id) > 100:
@@ -109,6 +135,36 @@ class TaskControl:
         self.messages.append({"id": message_id, "text": text.strip()})
         self.message_states[message_id] = "queued"
         self.emit("message", message_id=message_id, state="queued")
+        self.message_event.set()
+
+    def complete_turn(self, status, answer):
+        # A pause requested during the final cell belongs to the completed turn.
+        self.resume_event.set()
+        self.waiting_for_follow_up = True
+        self.emit("turn_finished", turn_index=self.turn_index,
+                  state="completed" if status == "success" else "failed",
+                  text=self.sanitize(answer), path=str(self.run_dir or ""))
+
+    def begin_turn(self, text):
+        self.waiting_for_follow_up = False
+        self.turn_index += 1
+        self.emit("turn_started", turn_index=self.turn_index, text=text)
+
+    async def follow_up(self):
+        # Never read the host's NDJSON command pipe through the terminal frontend.
+        while True:
+            await self.boundary()
+            if self.ended:
+                return None
+            if self.messages:
+                return "\n\n".join(m["text"] for m in self.take_messages())
+            self.message_event.clear()
+            await self.message_event.wait()
+
+    def end(self):
+        self.ended = True
+        self.resume_event.set()
+        self.message_event.set()
 
     def take_messages(self):
         messages, self.messages = self.messages, []
@@ -160,7 +216,7 @@ class TaskControl:
         if not text.strip():
             raise ValueError("请填写回复。")
         self.answer.set_result(text.strip())
-        self.emit("reply", question_id=question_id)
+        self.emit("reply", question_id=question_id, text=text.strip())
 
 
 class NativeHost:
@@ -199,11 +255,14 @@ class NativeHost:
         await self.stop_driver()
         raise RuntimeError("Mac 控制组件未就绪，请检查系统权限后重试。")
 
-    def public_error(self, exc):
-        message = str(exc)
+    def public_text(self, value):
+        message = str(value)
         if self.key:
             message = message.replace(self.key, "[REDACTED]")
-        return message[:2000]
+        return message
+
+    def public_error(self, exc):
+        return self.public_text(exc)[:2000]
 
     async def preflight(self):
         app = os.environ.get("GENERALIST_DRIVER_APP")
@@ -214,6 +273,27 @@ class NativeHost:
             "doctor", False, None, app, os.environ["GENERALIST_DRIVER_SOCKET"]
         ), 30)
         require_mac_permissions(json.loads(report))
+
+    def resume_path(self, value):
+        if not isinstance(value, str) or not value:
+            raise ValueError("历史对话的运行路径无效。")
+        path = Path(value).resolve()
+        root = self.runs_dir.resolve()
+        if path == root or not path.is_relative_to(root):
+            raise ValueError("只能恢复本应用保存的历史对话。")
+        try:
+            trajectory = (path / "traj.json").resolve()
+            if not trajectory.is_relative_to(root):
+                raise ValueError("历史对话的轨迹路径超出记录目录。")
+            data = json.loads(trajectory.read_text())
+            import mac_agent
+            mac_agent.validate_trajectory_ui_api(data, "mai-ui")
+            tasks = data.get("tasks")
+            if not isinstance(tasks, list) or not tasks or any(not isinstance(task, dict) for task in tasks):
+                raise ValueError("历史对话缺少有效的任务记录。")
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ValueError(f"无法恢复历史对话：{exc}") from exc
+        return path
 
     async def run(self, command, control):
         try:
@@ -227,6 +307,8 @@ class NativeHost:
             args = task_arguments(config, self.runs_dir)
             if not self.key and not args.allow_empty_api_key:
                 raise ValueError("请先在设置中保存此服务的 API Key。")
+            if command.get("resume_path") is not None:
+                args.resume = self.resume_path(command["resume_path"])
             args.task = str(command.get("text") or "").strip()
             if not args.task or len(args.task) > 32000:
                 raise ValueError("任务不能为空，且不能超过 32,000 字符。")
@@ -240,7 +322,7 @@ class NativeHost:
             data = json.loads((control.run_dir / "traj.json").read_text()) if control.run_dir else {}
             status = data.get("status", "error")
             control.emit("finished", state="completed" if status == "success" else "failed",
-                         text=self.public_error(data.get("final_answer") or data.get("answer")
+                         text=self.public_text(data.get("final_answer") or data.get("answer")
                                                 or (data.get("tasks") or [{}])[-1].get("answer")
                                                 or f"任务结束：{status}"),
                          path=str(control.run_dir or ""))
@@ -255,20 +337,30 @@ class NativeHost:
 
     async def command(self, command):
         kind = command.get("command")
+        if kind == "overlay_ack":
+            if self.control and command.get("task_id") == self.control.task_id:
+                self.control.acknowledge_overlay(command.get("guard_id"))
+            return
         if kind == "start":
+            # Validate before closing an idle live conversation or modifying files.
+            if command.get("resume_path") is not None:
+                self.resume_path(command["resume_path"])
             if self.task is not None and not self.task.done():
-                raise ValueError("已有任务正在运行。")
+                if not self.control.waiting_for_follow_up:
+                    raise ValueError("已有任务正在运行。")
+                self.control.end()
+                await self.task
             task_id = str(command.get("task_id") or "")
             if not task_id or len(task_id) > 100:
                 raise ValueError("任务标识无效。")
-            self.control = TaskControl(task_id, self.send)
+            self.control = TaskControl(task_id, self.send, self.public_text)
             self.task = asyncio.create_task(self.run(command, self.control))
             control = self.control
             # Cancellation may precede the coroutine's first instruction.
             self.task.add_done_callback(lambda task: control.emit(
                 "finished", state="stopped", text="任务已停止。", path=""
             ) if task.cancelled() else None)
-        elif kind in {"pause", "resume", "reply", "stop", "message"}:
+        elif kind in {"pause", "resume", "reply", "stop", "message", "end"}:
             if (not self.control or command.get("task_id") != self.control.task_id
                     or not self.task or self.task.done()):
                 raise ValueError("任务已结束或任务标识已过期。")
@@ -282,6 +374,11 @@ class NativeHost:
                 self.control.reply(command.get("question_id"), str(command.get("text") or ""))
             elif kind == "message":
                 self.control.message(command.get("message_id"), str(command.get("text") or ""))
+            elif kind == "end":
+                if not self.control.waiting_for_follow_up:
+                    raise ValueError("请先停止正在执行的任务。")
+                self.control.end()
+                await self.task
             elif kind == "stop":
                 self.control.emit("state", state="stopping")
                 self.task.cancel()

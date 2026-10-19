@@ -586,7 +586,11 @@ def test_sdk_output_translates_text_and_image(monkeypatch, tmp_path):
 
     assert events[0]["type"] == "display" and events[0]["text"] == "AX view"
     assert events[1]["type"] == "screenshot"
-    assert Path(events[1]["path"]).read_bytes() == image_bytes
+    path = Path(events[1]["path"])
+    assert path.suffix == ".webp"
+    with Image.open(path) as image:
+        assert image.size == (10, 20)
+        assert image.convert("RGB").tobytes() == Image.new("RGB", (10, 20), "navy").tobytes()
     assert events[1]["visual_ref"] == "image-1"
     assert events[1]["coordinate_space"] == "normalized_1000"
 

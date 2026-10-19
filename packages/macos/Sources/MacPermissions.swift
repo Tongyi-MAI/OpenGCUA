@@ -5,11 +5,12 @@ import SwiftUI
 
 @MainActor enum MacPermissions {
     private static var guide: NSWindow?
+    static func localizeGuide() { guide?.title = L("允许 OpenGCUA 控制这台 Mac") }
     static func closeGuide() { guide?.orderOut(nil) }
     static func showGuide(model: AppModel) {
         if guide == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 470), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.title = "允许 OpenGCUA 控制这台 Mac"
+            window.title = L("允许 OpenGCUA 控制这台 Mac")
             window.isReleasedWhenClosed = false
             window.level = .floating
             window.contentView = NSHostingView(rootView: PermissionGuide(model: model))
@@ -50,11 +51,14 @@ struct ApplicationDragIcon: NSViewRepresentable {
         let view = DraggableApplicationIcon()
         view.image = NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
         view.imageScaling = .scaleProportionallyUpOrDown
-        view.toolTip = "将 OpenGCUA.app 拖到系统设置的权限列表"
-        view.setAccessibilityLabel("OpenGCUA.app，可拖到系统权限列表")
+        view.toolTip = L("将 OpenGCUA.app 拖到系统设置的权限列表")
+        view.setAccessibilityLabel(L("OpenGCUA.app，可拖到系统权限列表"))
         return view
     }
-    func updateNSView(_ view: DraggableApplicationIcon, context: Context) {}
+    func updateNSView(_ view: DraggableApplicationIcon, context: Context) {
+        view.toolTip = L("将 OpenGCUA.app 拖到系统设置的权限列表")
+        view.setAccessibilityLabel(L("OpenGCUA.app，可拖到系统权限列表"))
+    }
 }
 
 struct PermissionGuide: View {
@@ -63,29 +67,29 @@ struct PermissionGuide: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("授权 OpenGCUA").font(.title2.weight(.bold))
-                Text("打开系统设置，将下方图标拖入权限列表，然后开启开关。").font(.callout).foregroundStyle(.secondary)
+                Text(L("授权 OpenGCUA")).font(.title2.weight(.bold))
+                Text(L("打开系统设置，将下方图标拖入权限列表，然后开启开关。")).font(.callout).foregroundStyle(.secondary)
             }
             HStack(spacing: 16) {
                 ApplicationDragIcon().frame(width: 64, height: 64)
                 VStack(alignment: .leading, spacing: 5) {
                     Text("OpenGCUA.app").font(.headline)
-                    Text("拖动左侧图标加入权限列表").font(.caption).foregroundStyle(.secondary)
-                    Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }.buttonStyle(.link)
+                    Text(L("拖动左侧图标加入权限列表")).font(.caption).foregroundStyle(.secondary)
+                    Button(L("在 Finder 中显示")) { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }.buttonStyle(.link)
                 }
             }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            permissionRow("辅助功能", detail: "用于点击、输入和操作应用", granted: model.accessibilityGranted, action: MacPermissions.requestAccessibility)
-            permissionRow("屏幕录制", detail: "用于查看你指定的任务界面", granted: model.screenRecordingGranted, action: MacPermissions.requestScreenRecording)
-            Text("请添加 OpenGCUA.app 本身。如果系统要求重新打开应用，请选择重新打开。此窗口会自动检查授权状态。").font(.caption).foregroundStyle(.secondary)
+            permissionRow(L("辅助功能"), detail: L("用于点击、输入和操作应用"), granted: model.accessibilityGranted, action: MacPermissions.requestAccessibility)
+            permissionRow(L("屏幕录制"), detail: L("用于查看你指定的任务界面"), granted: model.screenRecordingGranted, action: MacPermissions.requestScreenRecording)
+            Text(L("请添加 OpenGCUA.app 本身。如果系统要求重新打开应用，请选择重新打开。此窗口会自动检查授权状态。")).font(.caption).foregroundStyle(.secondary)
             Divider()
             HStack {
-                Label(model.accessibilityGranted && model.screenRecordingGranted ? "权限已就绪" : "等待系统授权", systemImage: model.accessibilityGranted && model.screenRecordingGranted ? "checkmark.circle.fill" : "clock")
+                Label(model.accessibilityGranted && model.screenRecordingGranted ? L("权限已就绪") : L("等待系统授权"), systemImage: model.accessibilityGranted && model.screenRecordingGranted ? "checkmark.circle.fill" : "clock")
                     .foregroundStyle(model.accessibilityGranted && model.screenRecordingGranted ? Color.green : .secondary)
                 Spacer()
-                Button(model.accessibilityGranted && model.screenRecordingGranted ? "完成" : "关闭") { MacPermissions.closeGuide() }.keyboardShortcut(.cancelAction)
+                Button(model.accessibilityGranted && model.screenRecordingGranted ? L("完成") : L("关闭")) { MacPermissions.closeGuide() }.keyboardShortcut(.cancelAction)
             }.font(.callout)
-        }.padding(24).frame(width: 500).fixedSize(horizontal: false, vertical: true)
+        }.padding(24).frame(width: 500).fixedSize(horizontal: false, vertical: true).environment(\.locale, L10n.locale)
             .onReceive(refresh) { _ in model.refreshPermissions() }
             .onChange(of: model.accessibilityGranted && model.screenRecordingGranted) { _, granted in
                 if granted { MacPermissions.closeGuide() }
@@ -99,7 +103,7 @@ struct PermissionGuide: View {
                 Text(detail).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Button("打开设置", action: action).accessibilityLabel("打开\(title)设置")
+            Button(L("打开设置"), action: action).accessibilityLabel(L("打开%@设置", String(describing: title)))
         }.padding(.vertical, 5)
     }
 }

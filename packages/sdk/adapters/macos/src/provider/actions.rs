@@ -299,7 +299,7 @@ impl MacosProvider {
         }
         if !matches!(
             tool,
-            "set_value" | "set_window_frame" | "invoke_menu" | "move_cursor"
+            "set_value" | "set_window_frame" | "invoke_menu"
         ) {
             args["delivery_mode"] = json!(delivery);
         }

@@ -46,7 +46,7 @@ import UniformTypeIdentifiers
     func chooseConfiguration() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.json]; panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false; panel.prompt = "选择配置"
+        panel.allowsMultipleSelection = false; panel.prompt = L("选择配置")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             var candidate = draft; candidate.configFilePath = url.path

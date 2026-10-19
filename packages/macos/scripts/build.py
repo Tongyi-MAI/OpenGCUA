@@ -50,6 +50,8 @@ def main():
     macos = bundle / "Contents/MacOS"
     macos.mkdir(parents=True, exist_ok=True)
     resources.mkdir(parents=True, exist_ok=True)
+    for localization in (APP_ROOT / "Resources").glob("*.lproj"):
+        shutil.copytree(localization, resources / localization.name, dirs_exist_ok=True)
     run("swiftc", "-parse-as-library", "-swift-version", "5", "-O", "-target", "arm64-apple-macosx14.0",
         *sorted((APP_ROOT / "Sources").glob("*.swift")), "-o", macos / "OpenGCUA",
         "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "Security",
@@ -59,14 +61,15 @@ def main():
     run("swift", APP_ROOT / "scripts/make_icon.swift", BUILD / "OpenGCUA.iconset", logo)
     run("iconutil", "-c", "icns", BUILD / "OpenGCUA.iconset", "-o", resources / "OpenGCUA.icns")
     info = {
+        "CFBundleDevelopmentRegion": "en", "CFBundleLocalizations": ["en", "zh-Hans"],
         "CFBundleExecutable": "OpenGCUA", "CFBundleIdentifier": "app.generalist.mac",
         "CFBundleName": "OpenGCUA", "CFBundleDisplayName": "OpenGCUA", "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": args.app_version, "CFBundleVersion": args.build_number, "LSMinimumSystemVersion": "14.0",
         "LSUIElement": True, "NSHighResolutionCapable": True,
         "CFBundleIconFile": "OpenGCUA.icns",
-        "NSMicrophoneUsageDescription": "开启语音对话后，OpenGCUA 持续使用麦克风与 Qwen 实时对话，并按你的要求下发或停止电脑任务。",
-        "NSScreenCaptureUsageDescription": "OpenGCUA 观察你指定的应用界面，让模型完成你发起的任务。",
-        "NSSpeechRecognitionUsageDescription": "OpenGCUA 使用本机语音识别将你的话转换为任务文字。",
+        "NSMicrophoneUsageDescription": "OpenGCUA uses your microphone for voice conversations and to carry out or stop tasks you request.",
+        "NSScreenCaptureUsageDescription": "OpenGCUA views the apps you select to carry out your tasks.",
+        "NSSpeechRecognitionUsageDescription": "OpenGCUA uses on-device speech recognition to turn speech into task text.",
     }
     (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
     # Retire only obsolete copied build assets, never an installed app.
@@ -100,7 +103,7 @@ def main():
         lock = json.loads((ROOT / "packages/sdk/adapters/macos/cua-driver.lock.json").read_text())
         cache = BUILD / "cache"
         cache.mkdir(exist_ok=True)
-        archive = cache / "cua-driver.tar.gz"
+        archive = cache / f"cua-driver-{lock['version']}.tar.gz"
         if not archive.exists():
             urllib.request.urlretrieve(lock["archive"]["url"], archive)
         if hashlib.sha256(archive.read_bytes()).hexdigest() != lock["archive"]["sha256"]:
@@ -138,6 +141,9 @@ def main():
     entitlements = APP_ROOT / "entitlements.plist"
     for path in (resources / "python").rglob("*"):
         if path.is_symlink() or not path.is_file(): continue
+        # DWARF files have Mach-O headers but are debug data, not executable
+        # code. Some PyObjC wheels include these companion symbol bundles.
+        if any(part.endswith(".dSYM") for part in path.parts): continue
         with path.open("rb") as f: magic = f.read(4)
         if magic in macho_magic:
             sign(*signing, "--entitlements", entitlements, path)

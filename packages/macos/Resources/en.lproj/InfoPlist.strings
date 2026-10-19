@@ -1,0 +1,3 @@
+"NSMicrophoneUsageDescription" = "OpenGCUA uses your microphone for voice conversations and to carry out or stop tasks you request.";
+"NSScreenCaptureUsageDescription" = "OpenGCUA views the apps you select to carry out your tasks.";
+"NSSpeechRecognitionUsageDescription" = "OpenGCUA uses on-device speech recognition to turn speech into task text.";

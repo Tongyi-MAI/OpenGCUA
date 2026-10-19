@@ -98,12 +98,48 @@ and recording options are not applied.
 The top-right **×** closes either the task panel or voice bar. Closing the voice
 bar also ends capture/playback; an accepted computer task continues in the
 background. Click the menu-bar sparkle to return, then **小窗** to reopen the panel.
+The interface defaults to your macOS preferred language, with English as the
+fallback. In **Settings → General → App Language**, choose **System Default**,
+**English**, or **简体中文**. Changes apply immediately, including menus and open
+windows, and are saved independently of model credentials. Chat content is kept
+in its original language. Voice replies follow the selected language unless you
+request another.
+
+The mini window rests as a 44-point status icon with a 36-point dark face. Its status dot pulses gently while
+working, with distinct paused, waiting, completed and error indicators; Reduce
+Motion uses static indicators. Hover briefly to reveal details and controls,
+move away to fade out the details before collapsing, click the icon for the full chat, or drag it to move.
+Returning during the fade restores the details without moving the icon.
+Details stay open while editing a reply or using a menu. Escape returns to the
+icon. The card grows above or below the icon to stay on screen.
+The badge stays visible during planning, execution, typing and screenshots.
+It hides only while a foreground pointer target or drag path intersects the
+current icon or expanded card, and returns immediately after that operation.
+Hover expansion is suspended during pointer operations. Automatic hiding keeps
+voice connected. Use the menu bar to open the chat and pause or stop a running task.
+
 The floating panel includes text input, a microphone, and Send (⌘Return).
 During a task, messages join the next planning round; a new message received
 while planning supersedes that plan before it executes. In-flight code finishes
 first. Sending does not resume a paused task. While the agent is asking a
-question, the same composer sends a question-ID-fenced reply. After completion,
-it starts a new task. Queued messages that were not consumed remain as a draft.
+question, the same composer sends a question-ID-fenced reply. After each answer,
+the agent stays available for another message in the same conversation, retaining
+model history, Python variables, app bindings and observations. Each turn has its
+own step budget. Messages queued at completion become the next turn automatically.
+Click **新对话** to close the idle session and start with a fresh worker and context.
+Stop, app shutdown or a runtime failure closes the session; unconsumed messages
+remain as a draft. Conversations are stored locally and shown as chat bubbles;
+Use **对话记录 → 继续对话** to return to a saved chat. Selecting it does not
+execute anything; sending a message restores its trajectory and appends a new
+turn to the same conversation. History and TODOs survive app restarts; Python
+variables and UI references are recreated in a fresh worker. Returning to the
+current live chat retains its worker. Stop an active task before switching to a
+different chat. Drafts are retained when switching.
+
+New screenshot outputs are stored once in `images/` as lossless WebP. Worker
+events, model history and trajectory records reference the same content-addressed
+file; repeated images reuse it. High-depth or oversized images retain PNG, and
+existing PNG histories remain readable. Model request encoding is unchanged.
 
 Voice is a separate **full-duplex conversation mode** powered by
 `qwen3.8-omni-flash-realtime` with the `Tina` voice. Clicking the

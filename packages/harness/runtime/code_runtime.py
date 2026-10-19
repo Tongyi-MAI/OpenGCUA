@@ -1559,11 +1559,9 @@ def _emit_image(value: Any, label: str | None, publish: Any) -> None:
         image = value.copy()
     if image.mode not in {"1", "L", "LA", "P", "RGB", "RGBA", "I", "I;16"}:
         image = image.convert("RGBA")
-    work_dir = Path(str(_CONFIG.get("work_dir") or "/tmp")).resolve()
-    work_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(prefix="emit_", suffix=".png", dir=work_dir, delete=False) as output:
-        image.save(output, format="PNG")
-        path = Path(output.name).resolve()
+    from image_store import save_image
+    image_dir = Path(str(_CONFIG.get("image_dir") or _CONFIG.get("work_dir") or "/tmp"))
+    path = save_image(image, image_dir)
     event = {
         "type": "screenshot", "path": str(path),
         "width": image.width, "height": image.height, **metadata,
@@ -2045,13 +2043,9 @@ def _sdk_output(output: dict[str, Any]) -> None:
                     )
         except (OSError, ValueError) as exc:
             raise RuntimeError(f"mai-ui returned an invalid image: {exc}") from exc
-        work_dir = Path(str(_CONFIG.get("work_dir") or "/tmp")).resolve()
-        work_dir.mkdir(parents=True, exist_ok=True)
-        suffix = ".jpg" if output.get("mime_type") == "image/jpeg" else ".png"
-        with tempfile.NamedTemporaryFile(prefix="sdk_emit_", suffix=suffix,
-                                         dir=work_dir, delete=False) as target:
-            target.write(data)
-            path = Path(target.name).resolve()
+        from image_store import save_image
+        image_dir = Path(str(_CONFIG.get("image_dir") or _CONFIG.get("work_dir") or "/tmp"))
+        path = save_image(data, image_dir)
         _emit({
             "type": "screenshot",
             "path": str(path),
@@ -2176,7 +2170,7 @@ def _instrument_sdk_session(session: Any) -> None:
     """Record SDK provider requests in the existing per-step tool-call audit."""
     original = session._request
 
-    async def traced(device, message):
+    async def traced_call(device, message):
         operation = str(message.get("op") or "request")
         action = str(message.get("action") or "")
         name = "mai_ui." + operation + (("." + action) if action else "")
@@ -2278,6 +2272,39 @@ def _instrument_sdk_session(session: Any) -> None:
         _record_tool(name, audit_message, _sdk_audit_result(operation, result, elapsed),
                      include_tree=False)
         return result
+
+    overlay_lock = asyncio.Lock()
+    async def traced(device, message):
+        from overlay_guard import impact
+        footprint = impact(device, message) if _CONFIG.get("overlay_guard") else None
+        if footprint is None:
+            return await traced_call(device, message)
+        async with overlay_lock:
+            guard_id = uuid.uuid4().hex
+            _emit({"type": "overlay_guard", "phase": "begin", "guard_id": guard_id, **footprint})
+            # No other reader consumes the worker control socket during a cell.
+            def acknowledged():
+                data = bytearray()
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline and len(data) < 4096:
+                    try:
+                        part = _CONTROL_SOCKET.recv(1)
+                    except socket.timeout:
+                        continue
+                    if not part:
+                        break
+                    data.extend(part)
+                    if part == b"\n":
+                        reply = json.loads(data)
+                        if reply.get("kind") == "overlay_ack" and reply.get("guard_id") == guard_id and reply.get("ready"):
+                            return
+                        break
+                raise RuntimeError("Overlay preparation was not acknowledged; UI operation was not dispatched")
+            try:
+                await asyncio.to_thread(acknowledged)
+                return await traced_call(device, message)
+            finally:
+                _emit({"type": "overlay_guard", "phase": "end", "guard_id": guard_id})
 
     session._request = traced
     # mu.help 升级为按需手册（从生成契约 api.pyi + playwright contract 渲染），

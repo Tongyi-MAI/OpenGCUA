@@ -1,0 +1,3 @@
+"NSMicrophoneUsageDescription" = "开启语音对话后，OpenGCUA 持续使用麦克风与 Qwen 实时对话，并按你的要求下发或停止电脑任务。";
+"NSScreenCaptureUsageDescription" = "OpenGCUA 观察你指定的应用界面，让模型完成你发起的任务。";
+"NSSpeechRecognitionUsageDescription" = "OpenGCUA 使用本机语音识别将你的话转换为任务文字。";

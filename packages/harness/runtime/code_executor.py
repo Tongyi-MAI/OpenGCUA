@@ -897,10 +897,14 @@ class CodeExecutor:
         enable_bash: bool,
         persistent: bool = True,
         ui_api: str = "mai-ui",
+        overlay_handler=None,
+        image_dir: Path | None = None,
     ) -> None:
         if ui_api not in {"mai-ui", "legacy-cua"}:
             raise ValueError("ui_api 必须是 mai-ui 或 legacy-cua")
         self.ui_api = ui_api
+        self.overlay_handler = overlay_handler
+        self.image_dir = image_dir.resolve() if image_dir is not None else None
         self.runtime_path = runtime_path.resolve()
         self.work_dir = work_dir.resolve()
         self.rpc_socket = rpc_socket.resolve()
@@ -936,6 +940,7 @@ class CodeExecutor:
     def _config(self) -> dict[str, Any]:
         return {
             "ui_api": self.ui_api,
+            "overlay_guard": self.overlay_handler is not None,
             "rpc_socket": str(self.rpc_socket),
             "rpc_timeout": self.rpc_timeout,
             "rpc_generation": self._rpc_generation,
@@ -943,6 +948,7 @@ class CodeExecutor:
             "pyautogui_pause": self.pyautogui_pause,
             "enable_bash": self.enable_bash,
             "work_dir": str(self.work_dir),
+            "image_dir": str(self.image_dir) if self.image_dir is not None else None,
         }
 
     async def _watch_worker(
@@ -1124,7 +1130,16 @@ class CodeExecutor:
                                 raise ValueError("worker 控制事件无效")
                             if kind == "event":
                                 # 只有专用 done 帧能够完成本轮，普通 end 事件也不能提前完成。
-                                if event.get("type") == "_child_group":
+                                if event.get("type") == "overlay_guard" and self.overlay_handler is not None:
+                                    ready = False
+                                    try:
+                                        await self.overlay_handler(event)
+                                        ready = True
+                                    finally:
+                                        if event.get("phase") == "begin":
+                                            self._writer.write(json.dumps({"kind": "overlay_ack", "guard_id": event.get("guard_id"), "ready": ready}).encode() + b"\n")
+                                            await self._writer.drain()
+                                elif event.get("type") == "_child_group":
                                     pid = int(event["pid"])
                                     if pid <= 1:
                                         raise ValueError("无效的 Bash 进程组")
@@ -1167,6 +1182,8 @@ class CodeExecutor:
                 if control["stopped_block"] is None and control["started_blocks"] > control["completed_blocks"]:
                     control["stopped_block"] = control["started_blocks"]
             finally:
+                if self.overlay_handler is not None:
+                    await self.overlay_handler({"phase": "reset"})
                 if not self.persistent:
                     await asyncio.shield(self._stop_worker())
                     self._reset_pending = False

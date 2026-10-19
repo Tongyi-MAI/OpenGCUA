@@ -11,12 +11,22 @@ spec.loader.exec_module(signing)
 
 class SigningSelectionTests(unittest.TestCase):
     def test_timestamp_failure_retries_without_weakening_signing(self):
-        failed = subprocess.CompletedProcess([], 1, "", "The timestamp service is not available.")
         passed = subprocess.CompletedProcess([], 0, "", "")
-        with patch.object(signing.subprocess, "run", side_effect=[failed, passed]) as run, patch.object(signing.time, "sleep"):
-            signing.sign("--timestamp", "--sign", "certificate", "app")
-            self.assertEqual(run.call_count, 2)
-            self.assertEqual(run.call_args_list[0], run.call_args_list[1])
+        for message in ("The timestamp service is not available.",
+                        "A timestamp was expected but was not found."):
+            with self.subTest(message=message):
+                failed = subprocess.CompletedProcess([], 1, "", message)
+                with patch.object(signing.subprocess, "run", side_effect=[failed, passed]) as run, patch.object(signing.time, "sleep"):
+                    signing.sign("--timestamp", "--sign", "certificate", "app")
+                    self.assertEqual(run.call_count, 2)
+                    self.assertEqual(run.call_args_list[0], run.call_args_list[1])
+
+    def test_persistent_timestamp_failure_is_bounded(self):
+        failed = subprocess.CompletedProcess([], 1, "", "A timestamp was expected but was not found.")
+        with patch.object(signing.subprocess, "run", return_value=failed) as run, patch.object(signing.time, "sleep"):
+            with self.assertRaises(RuntimeError):
+                signing.sign("--timestamp", "--sign", "certificate", "app")
+            self.assertEqual(run.call_count, 3)
 
     def test_other_signing_errors_fail_immediately(self):
         failed = subprocess.CompletedProcess([], 1, "", "Identity is invalid")

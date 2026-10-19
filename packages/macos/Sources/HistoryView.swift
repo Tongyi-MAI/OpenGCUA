@@ -18,7 +18,7 @@ struct HistoryView: View {
                             Text(record.date, style: .date).font(.caption).foregroundStyle(.secondary)
                         }
                     }.padding(.vertical, 5).tag(record.id)
-                }.listStyle(.sidebar).navigationTitle("任务记录")
+                }.listStyle(.sidebar).navigationTitle(L("对话记录"))
                     .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
             } detail: {
                 if let record = selected {
@@ -31,24 +31,37 @@ struct HistoryView: View {
                                     .font(.callout).foregroundStyle(.secondary)
                             }
                             Divider()
-                            Text(record.answer.isEmpty ? "尚无最终结果" : record.answer)
-                                .font(.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                            if !record.path.isEmpty { Button("查看运行记录", systemImage: "folder") { model.revealRun(record.path) } }
+                            if let messages = record.messages, !messages.isEmpty {
+                                ChatTranscript(messages: messages)
+                            } else {
+                                ChatBubble(text: record.title, isUser: true)
+                                ChatBubble(text: record.answer.isEmpty ? L("尚无最终结果") : record.answer)
+                            }
+                            HStack {
+                                Button(record.id == model.currentConversationID ? L("返回当前对话") : L("继续对话"), systemImage: "bubble.left.and.bubble.right") {
+                                    if model.openConversation(record) { onClose(); model.delegate?.expand() }
+                                }.buttonStyle(.borderedProminent).disabled(!model.canOpenConversation(record))
+                                if model.phase.active && record.id != model.currentConversationID {
+                                    Text(L("先停止当前任务即可切换")).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            if !model.error.isEmpty { Text(L(model.error)).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
+                            if !record.path.isEmpty { Button(L("查看运行记录"), systemImage: "folder") { model.revealRun(record.path) } }
                         }.padding(28)
                     }
                 } else {
-                    ContentUnavailableView(model.history.isEmpty ? "还没有任务记录" : "选择一个任务", systemImage: "clock.arrow.circlepath",
-                                           description: Text("任务结果会保存在这台 Mac。"))
+                    ContentUnavailableView(model.history.isEmpty ? L("还没有对话记录") : L("选择一个对话"), systemImage: "clock.arrow.circlepath",
+                                           description: Text(L("对话会保存在这台 Mac。")))
                 }
             }
             Divider()
             HStack {
-                Button("打开记录文件夹", systemImage: "folder") { NSWorkspace.shared.open(model.dataDirectory) }
+                Button(L("打开记录文件夹"), systemImage: "folder") { NSWorkspace.shared.open(model.dataDirectory) }
                 Spacer()
-                Button("完成", action: onClose).keyboardShortcut(.cancelAction)
+                Button(L("完成"), action: onClose).keyboardShortcut(.cancelAction)
             }.padding(16)
         }.frame(minWidth: 640, idealWidth: 720, minHeight: 440, idealHeight: 500)
-            .preferredColorScheme(model.colorScheme)
+            .preferredColorScheme(model.colorScheme).environment(\.locale, L10n.locale)
             .onAppear { selection = model.history.first?.id }
     }
 }

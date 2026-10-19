@@ -1640,18 +1640,14 @@ class TrajectoryWriter:
         self.flush()
 
     def _next_image_index(self) -> int:
-        """Resume 时接着现有 images/image_N.png 编号，不覆盖旧截图。"""
-        highest = -1
-        for path in self.screenshot_dir.glob("image_*.png"):
-            match = re.fullmatch(r"image_(\d+)\.png", path.name)
-            if match:
-                highest = max(highest, int(match.group(1)))
-        return highest + 1
+        """Count both legacy numbered PNGs and content-addressed images on resume."""
+        return sum(path.suffix.lower() in {".png", ".webp", ".jpg", ".jpeg"}
+                   for path in self.screenshot_dir.iterdir() if path.is_file())
 
     def save_observation(self, observation: Observation) -> Path:
-        path = self.screenshot_dir / f"image_{self.image_count}.png"
-        self.image_count += 1
-        path.write_bytes(observation.image_bytes)
+        from image_store import save_image
+        path = save_image(observation.image_bytes, self.screenshot_dir)
+        self.image_count = self._next_image_index()
         return path
 
     def _write_step_file(
@@ -1978,8 +1974,9 @@ def collect_emitted_images(
         try:
             if event.get("path"):
                 source = Path(str(event["path"])).resolve()
-                if not source.is_relative_to(writer.work_dir.resolve()):
-                    raise ValueError("图片输出文件不在当前 runtime 目录中")
+                if not any(source.is_relative_to(directory.resolve())
+                           for directory in (writer.work_dir, writer.screenshot_dir)):
+                    raise ValueError("图片输出文件不在当前 run 的 runtime 或 images 目录中")
                 image_bytes = source.read_bytes()
                 with Image.open(io.BytesIO(image_bytes)) as image:
                     image.load()
@@ -2001,7 +1998,13 @@ def collect_emitted_images(
                 observation = desktop.visual_observation(str(ref)) if ref else None
                 if observation is None:
                     raise ValueError("图片引用已失效；请重新获取并 emit，不会自动替换截图")
-            path = writer.save_observation(observation)
+            # New workers publish directly into the archive. Keep their exact path in
+            # control events and reuse it here, including after interruption/resume.
+            if event.get("path") and source.is_relative_to(writer.screenshot_dir.resolve()):
+                path = source
+                writer.image_count = writer._next_image_index()
+            else:
+                path = writer.save_observation(observation)
             info = {
                 "image": path.name, "label": event.get("label"),
                 "target": observation.target, "width": observation.width,
@@ -2258,7 +2261,7 @@ async def run_agent(
     )
     if resume_dir is not None:
         logger.info(
-            "resume loaded steps=%d tasks=%d next_image=%d restored_task=%r",
+            "resume loaded steps=%d tasks=%d stored_images=%d restored_task=%r",
             len(loaded_steps),
             len(loaded_tasks),
             writer.image_count,
@@ -2324,6 +2327,8 @@ async def run_agent(
         enable_bash=args.bash,
         persistent=True,
         ui_api=ui_api,
+        overlay_handler=host_control.overlay if host_control is not None else None,
+        image_dir=writer.screenshot_dir,
     )
     stall = StallDetector(
         warn_at=args.stall_warn_at,
@@ -2340,6 +2345,18 @@ async def run_agent(
     else:
         resume_step = 0
         resume_task_index = 0
+    if resume_dir is not None and host_control is not None:
+        # A history selection is read-only. Native resumption always starts with
+        # the user's new message, never reruns the saved task automatically.
+        previous = loaded_tasks[-1]
+        previous_result = {"status": str(previous.get("status") or "interrupted"),
+                           "answer": str(previous.get("answer") or "")}
+        if not previous.get("status"):
+            writer.close_task(previous_result["status"], previous_result["answer"])
+        resume_task_index = writer.begin_task(initial_message, resume_step)
+        context.set_task(initial_message, previous_result=previous_result)
+        host_control.turn_index = resume_task_index - 1
+        host_control.begin_turn(initial_message)
     final_status = "failure"
     solicitation_nudged = False
     final_answer = ""
@@ -2827,7 +2844,7 @@ async def run_agent(
                                 "blocks": [asdict(block) for block in action.ordered_blocks],
                             })
                             checkpoint(status="superseded", phase="complete")
-                            if args.max_steps > 0 and step + 1 >= args.max_steps:
+                            if args.max_steps > 0 and step + 1 - writer.data["tasks"][task_index]["first_step"] >= args.max_steps:
                                 final_status = "max_steps"
                                 final_answer = (
                                     f"Stopped after {args.max_steps} planning steps; "
@@ -3111,7 +3128,7 @@ async def run_agent(
                     elif stall.stop_reason:
                         task_status = "stalled"
                         task_answer = f"Stopped: {stall.stop_reason}."
-                    elif args.max_steps > 0 and step + 1 >= args.max_steps:
+                    elif args.max_steps > 0 and step + 1 - writer.data["tasks"][task_index]["first_step"] >= args.max_steps:
                         task_status = "max_steps"
                         task_answer = (
                             f"Stopped after {args.max_steps} steps without terminate()."
@@ -3136,12 +3153,14 @@ async def run_agent(
                         last_displayed_answer = task_answer
                         if not args.multi_task:
                             break
+                        if host_control is not None:
+                            host_control.complete_turn(task_status, task_answer)
                         present(
                             "notice",
                             "继续对话请直接输入；/new <消息> 清空 Python 变量与 UI 依据并开新任务；"
                             "空行或 /exit 结束。",
                         )
-                        raw_follow_up = await frontend.read(AgentPrompt(
+                        raw_follow_up = await host_control.follow_up() if host_control is not None else await frontend.read(AgentPrompt(
                             kind="task", empty_exits=not interactive,
                         ))
                         if raw_follow_up is None:
@@ -3154,7 +3173,7 @@ async def run_agent(
                             parts = raw_follow_up.strip().split(None, 1)
                             follow_up = parts[1] if len(parts) > 1 else ""
                             if not follow_up.strip():
-                                follow_up = await frontend.read(AgentPrompt(
+                                follow_up = await host_control.follow_up() if host_control is not None else await frontend.read(AgentPrompt(
                                     kind="task", empty_exits=not interactive,
                                 )) or ""
                             if not follow_up.strip():
@@ -3173,6 +3192,8 @@ async def run_agent(
                             previous_task,
                         )
                         context.set_task(follow_up, previous_result={"status": task_status, "answer": task_answer})
+                        if host_control is not None:
+                            host_control.begin_turn(follow_up)
                         stall.reset()
                         if fresh:
                             desktop.invalidate_references()
@@ -3235,7 +3256,7 @@ async def run_agent(
                     writer.data.setdefault("aborts", []).append(
                         {"step": step, "task_index": task_index, "timestamp": now_iso()})
                     writer.flush()
-                    follow_up = await frontend.read(AgentPrompt(
+                    follow_up = await host_control.follow_up() if host_control is not None else await frontend.read(AgentPrompt(
                         kind="task", empty_exits=not interactive,
                     ))
                     if follow_up is None:
@@ -3253,6 +3274,8 @@ async def run_agent(
                         task_index, step + 1, follow_up, previous_task,
                     )
                     context.set_task(follow_up, previous_result={"status": "aborted", "answer": ""})
+                    if host_control is not None:
+                        host_control.begin_turn(follow_up)
                     stall.reset()
                     current_user_response = ""
                     current_lifecycle_observation = False

@@ -811,6 +811,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn desktop_hover_preserves_foreground_consent_and_refuses_background() {
+        let mut command = tokio::process::Command::new("python3");
+        command.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture/mock_cua.py"));
+        let p = MacosProvider::connect_command(command, tempfile::tempfile().unwrap(), false)
+            .await.unwrap();
+        call(&p, json!({"op":"action", "action":"move", "display_id":"display:0",
+                        "x":10, "y":20, "delivery":"foreground"})).await;
+        let denied = p.request(serde_json::from_value(json!({"op":"action", "action":"move",
+            "display_id":"display:0", "x":10, "y":20, "delivery":"background"})).unwrap())
+            .await.unwrap().error.unwrap();
+        assert_eq!(denied.code, "INPUT_REFUSED");
+        let calls = p.tool("fixture_get_calls", json!({})).await.unwrap();
+        let moves: Vec<_> = calls["structuredContent"]["calls"].as_array().unwrap()
+            .iter().filter(|c| c["name"] == "move_cursor").collect();
+        assert_eq!(moves.len(), 1, "Refused input must never reach the driver");
+        assert_eq!(moves[0]["arguments"]["delivery_mode"], "foreground");
+        assert_eq!(moves[0]["arguments"]["scope"], "desktop");
+        p.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn native_failure_preserves_bounded_driver_diagnostic() {
         let mut command = tokio::process::Command::new("python3");
         command.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture/mock_cua.py"));
@@ -866,6 +887,18 @@ mod tests {
         assert_eq!(full["components"][8]["status"], "not_captured_limit");
         assert_eq!(full["components"][8]["bounds"]["width"], 100);
         assert!(full["components"][8]["captured_at"].is_null());
+        let calls = p.tool("fixture_get_calls", json!({})).await.unwrap();
+        let observations: Vec<_> = calls["structuredContent"]["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|call| call["name"] == "get_window_state")
+            .collect();
+        assert_eq!(observations.len(), 8);
+        for observation in observations {
+            assert_eq!(observation["arguments"]["full_output"], true);
+            assert_eq!(observation["arguments"]["tree_format"], "elements");
+        }
         let n = &full["nodes"][2];
         let action = json!({"op":"action","action":"click","app_id":app,"window_id":window,"node_id":n["id"],"target_token":n["target_token"],"snapshot_id":n["target"]["snapshot_id"],"delivery":"background"});
         let r = call(&p, action.clone()).await;

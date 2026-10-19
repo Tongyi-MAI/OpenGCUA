@@ -12,7 +12,11 @@ def sign(*arguments):
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode == 0:
             return
-        if "timestamp service is not available" in result.stderr.lower() and attempt < 2:
+        timestamp_error = any(message in result.stderr.lower() for message in (
+            "timestamp service is not available",
+            "a timestamp was expected but was not found",
+        ))
+        if timestamp_error and attempt < 2:
             print("Apple timestamp service unavailable; retrying signing.", flush=True)
             time.sleep(attempt + 1)
             continue

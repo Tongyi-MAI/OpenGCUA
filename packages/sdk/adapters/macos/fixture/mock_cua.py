@@ -84,6 +84,12 @@ for line in sys.stdin:
                         )
                     ],
                 )
+                # Match the driver's compact default: structured rows must be
+                # requested, and full_output preserves the old walk budget.
+                if args.get("tree_format") not in ("elements", "both"):
+                    data.pop("elements")
+                if not args.get("full_output"):
+                    data.pop("elements_complete")
             data["window_bounds"] = dict(x=0, y=0, width=100, height=200)
             if args.get("include_screenshot"):
                 images = [dict(type="image", mimeType="image/png", data=png)]

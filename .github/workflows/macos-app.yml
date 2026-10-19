@@ -48,31 +48,42 @@ jobs:
       - name: Test native task lifecycle and SDK integration
         run: |
           sdk_wheel="$(python3 -c 'from pathlib import Path; wheels = list(Path("packages/macos/build/wheels").glob("qwen_intelligence_sdk-*-cp312-*-macosx*.whl")); assert len(wheels) == 1, wheels; print(wheels[0].resolve())')"
-          uv run --no-project --python 3.12 --with ./packages/harness/runtime --with "$sdk_wheel" --with pytest pytest packages/harness/runtime/tests/test_native_host.py packages/harness/runtime/tests/test_sdk_runtime.py -q
+          uv run --no-project --python 3.12 --with ./packages/harness/runtime --with "$sdk_wheel" --with pytest pytest packages/harness/runtime/tests/test_native_host.py packages/harness/runtime/tests/test_sdk_runtime.py packages/harness/runtime/tests/test_overlay_guard.py packages/harness/runtime/tests/test_image_store.py -q
+      - name: Test localization and system language defaults
+        run: |
+          python3 packages/macos/tests/test_localization.py
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/tests/LocalizationContracts.swift -o packages/macos/build/generalist-localization-contracts
+          packages/macos/build/generalist-localization-contracts packages/macos/Resources
       - name: Test voice transcript and settings contracts
         run: |
-          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/AudioInputDevices.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/RealtimeTranscript.swift packages/macos/tests/VoiceContracts.swift -o /tmp/generalist-voice-contracts
-          /tmp/generalist-voice-contracts
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/AudioInputDevices.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/RealtimeTranscript.swift packages/macos/tests/VoiceContracts.swift -o packages/macos/build/generalist-voice-contracts
+          packages/macos/build/generalist-voice-contracts
       - name: Test voice task routing
         run: |
-          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/AudioInputDevices.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/SpeechInput.swift packages/macos/Sources/QwenSpeechInput.swift packages/macos/Sources/AppModel.swift packages/macos/tests/VoiceRouterContracts.swift -o /tmp/generalist-voice-router-contracts
-          /tmp/generalist-voice-router-contracts
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/AudioInputDevices.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/SpeechInput.swift packages/macos/Sources/QwenSpeechInput.swift packages/macos/Sources/AppModel.swift packages/macos/tests/VoiceRouterContracts.swift -o packages/macos/build/generalist-voice-router-contracts
+          packages/macos/build/generalist-voice-router-contracts
       - name: Test configuration file reload and credential isolation
         run: |
-          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/FirstLaunch.swift packages/macos/tests/ConfigContracts.swift -o /tmp/generalist-config-contracts
-          /tmp/generalist-config-contracts
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/FirstLaunch.swift packages/macos/tests/ConfigContracts.swift -o packages/macos/build/generalist-config-contracts
+          packages/macos/build/generalist-config-contracts
       - name: Test task input shortcuts and input method safety
         run: |
-          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/TaskInputShortcut.swift packages/macos/tests/TaskInputContracts.swift -o /tmp/generalist-task-input-contracts
-          /tmp/generalist-task-input-contracts
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/TaskInputShortcut.swift packages/macos/tests/TaskInputContracts.swift -o packages/macos/build/generalist-task-input-contracts
+          packages/macos/build/generalist-task-input-contracts
       - name: Test settings draft and credential destinations
         run: |
-          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/SettingsEditor.swift packages/macos/tests/SettingsEditorContracts.swift -o /tmp/generalist-settings-editor-contracts
-          /tmp/generalist-settings-editor-contracts
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/SettingsEditor.swift packages/macos/tests/SettingsEditorContracts.swift -o packages/macos/build/generalist-settings-editor-contracts
+          packages/macos/build/generalist-settings-editor-contracts
       - name: Test menu popover desktop transitions
         run: |
-          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/MenuPopoverBehavior.swift packages/macos/tests/PopoverContracts.swift -o /tmp/generalist-popover-contracts
-          /tmp/generalist-popover-contracts
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/MenuPopoverBehavior.swift packages/macos/tests/PopoverContracts.swift -o packages/macos/build/generalist-popover-contracts
+          packages/macos/build/generalist-popover-contracts
+      - name: Test mini window dragging and automation visibility
+        run: |
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/MiniWindow.swift packages/macos/tests/MiniWindowContracts.swift -o packages/macos/build/generalist-mini-window-contracts
+          packages/macos/build/generalist-mini-window-contracts
+          swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/MiniWindow.swift packages/macos/Sources/TaskOrbView.swift packages/macos/tests/MiniWindowLayoutContracts.swift -o packages/macos/build/generalist-mini-window-layout-contracts
+          packages/macos/build/generalist-mini-window-layout-contracts
       - name: Verify relocated runtime without a web server
         run: uv run --no-project --python 3.12 python packages/macos/tests/test_bundle.py
       - name: Archive local development build

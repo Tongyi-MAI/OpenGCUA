@@ -61,7 +61,7 @@ enum AudioInputDevices {
     }
     static func resolve(uid: String) throws -> AudioInputDevice {
         guard let device = resolve(uid: uid, devices: available(), defaultID: defaultID) else {
-            throw AppError.message(uid.isEmpty ? "没有可用的系统默认麦克风。" : "所选麦克风已断开，请切换输入音源。")
+            throw AppError.message(uid.isEmpty ? L("没有可用的系统默认麦克风。") : L("所选麦克风已断开，请切换输入音源。"))
         }
         return device
     }
@@ -70,7 +70,7 @@ enum AudioInputDevices {
         let unit = engine.inputNode.auAudioUnit
         try unit.setDeviceID(device.deviceID)
         guard unit.deviceID == device.deviceID else {
-            throw AppError.message("无法启用所选麦克风，请切换音源后重试。")
+            throw AppError.message(L("无法启用所选麦克风，请切换音源后重试。"))
         }
         // VPIO may replace the hardware ID with a private aggregate. Configure/verify the
         // physical source before enabling it; never overwrite its internal aggregate afterwards.
@@ -85,7 +85,7 @@ enum VoiceAudioFormat {
     static func capture(for hardware: AVAudioFormat) throws -> AVAudioFormat {
         guard hardware.sampleRate.isFinite, hardware.sampleRate > 0, hardware.channelCount > 0,
               let mono = AVAudioFormat(standardFormatWithSampleRate: hardware.sampleRate, channels: 1)
-        else { throw AppError.message("没有可用的麦克风") }
+        else { throw AppError.message(L("没有可用的麦克风")) }
         return mono
     }
 }

@@ -74,7 +74,10 @@ impl MacosProvider {
                 state.snapshots.remove(&w.id);
                 state.nodes.retain(|_, n| n["target"]["window_id"] != w.id);
             }
-            let r=self.tool("get_window_state",json!({"pid":pid,"window_id":w.native_id,"include_accessibility_tree":tree,"include_screenshot":screenshot})).await;
+            // Cua 0.35+ defaults to a 250-node Markdown projection. The SDK
+            // consumes snapshot-bound structured rows and capture geometry,
+            // so request the full metadata/2000-node budget explicitly.
+            let r=self.tool("get_window_state",json!({"pid":pid,"window_id":w.native_id,"include_accessibility_tree":tree,"include_screenshot":screenshot,"full_output":true,"tree_format":"elements"})).await;
             let r = match r {
                 Ok(v) => v,
                 Err(e)

@@ -1,6 +1,7 @@
 """Standalone relocation and native protocol smoke test; no GUI or model calls."""
 import json
 import os
+import plistlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,11 +11,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     source = ROOT / "build/OpenGCUA.app"
-    with tempfile.TemporaryDirectory(prefix="OpenGCUA relocation ") as stage:
+    with tempfile.TemporaryDirectory(prefix="OpenGCUA relocation ", dir=ROOT / "build") as stage:
         bundle = Path(stage) / "Moved App/OpenGCUA.app"
         subprocess.run(["ditto", str(source), str(bundle)], check=True)
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(bundle)], check=True)
         resources = bundle / "Contents/Resources"
+        info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+        assert info["CFBundleDevelopmentRegion"] == "en"
+        assert set(info["CFBundleLocalizations"]) >= {"en", "zh-Hans"}
+        for language in ("en", "zh-Hans"):
+            for name in ("Localizable.strings", "InfoPlist.strings"):
+                assert (resources / f"{language}.lproj" / name).is_file()
         python = resources / "python/bin/python3"
         script = """
 import asyncio, json, sys

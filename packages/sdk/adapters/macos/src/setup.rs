@@ -122,9 +122,9 @@ pub fn install(replace: bool, archive: Option<&str>) -> Result<Value, Error> {
             stage.path().to_str().unwrap(),
         ],
     )?;
-    let src = stage
-        .path()
-        .join(format!("cua-driver-rs-{VERSION}-darwin-universal/CuaDriver.app"));
+    let src = stage.path().join(format!(
+        "cua-driver-rs-{VERSION}-darwin-universal/CuaDriver.app"
+    ));
     verify_signature(&src)?;
     let backup = Path::new("/Applications/.mai-ui-CuaDriver-backup.app");
     if backup.exists() {

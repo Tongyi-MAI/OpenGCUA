@@ -18,7 +18,7 @@ import Foundation
         let host = resources.appendingPathComponent("runtime/native_host.py")
         guard FileManager.default.isExecutableFile(atPath: python.path),
               FileManager.default.fileExists(atPath: host.path) else {
-            throw AppError.message("应用运行组件缺失，请重新安装 OpenGCUA。")
+            throw AppError.message(L("应用运行组件缺失，请重新安装 OpenGCUA。"))
         }
         let p = Process(), toHost = Pipe(), fromHost = Pipe()
         let token = UUID(); generation = token
@@ -62,7 +62,7 @@ import Foundation
         }
     }
     func send(_ command: [String: Any]) throws {
-        guard running, let input else { throw AppError.message("运行组件已断开，请重新打开应用。") }
+        guard running, let input else { throw AppError.message(L("运行组件已断开，请重新打开应用。")) }
         var data = try JSONSerialization.data(withJSONObject: command)
         data.append(10)
         try input.write(contentsOf: data)

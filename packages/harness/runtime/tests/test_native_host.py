@@ -26,7 +26,7 @@ def test_source_config_options_map_to_native_tasks_without_replacing_host_owners
     assert args.api_retries == 4 and args.api_timeout == 90
     assert args.background_mode and args.history_turns == 8 and not args.llm_compaction
     assert args.runs_dir == tmp_path and args.resume is None
-    assert not args.multi_task and args.ui == "plain" and args.countdown == 0
+    assert args.multi_task and args.ui == "plain" and args.countdown == 0
     assert args.driver_socket != "/unrelated.sock"
 
 
@@ -128,7 +128,7 @@ def test_terminal_result_uses_trajectory_and_redacts_credentials(tmp_path):
         events = []
         async def runner(args, host_control):
             assert args.api_key == "private-test-key"
-            assert args.multi_task is False
+            assert args.multi_task is True
             host_control.emit("trajectory", path=str(tmp_path))
             (tmp_path / "traj.json").write_text(json.dumps({"status": "success", "answer": "done private-test-key"}))
             return 1  # the persisted result, not this return value, is authoritative
@@ -210,10 +210,13 @@ def test_real_agent_hooks_pause_before_execution_ask_and_finish(tmp_path, monkey
             await asyncio.sleep(0.01)
         assert host.control.question_id
         await host.command({"command": "reply", "task_id": "a", "question_id": host.control.question_id, "text": "yes"})
-        await asyncio.wait_for(host.task, 5)
+        await wait_for_turn(events, 0)
         assert events[-1]["state"] == "completed", events[-1]
         assert events[-1]["text"] == "Verified result"
-        assert len(calls) == 2 and closed
+        assert len(calls) == 2 and not closed and not host.task.done()
+        await host.command({"command": "end", "task_id": "a", "command_id": "end-turn"})
+        assert closed and host.task.done()
+        assert events[-1]["event"] == "command_ack" and events[-1]["command_id"] == "end-turn"
         first_executed = 1 if steering else 0
         data = json.loads((host.control.run_dir / f"steps/step_{first_executed}.json").read_text())
         assert data["execution"]["user_response"] == "yes"
@@ -273,4 +276,212 @@ def test_voice_receipts_follow_acceptance_and_never_ack_stale_task(tmp_path):
         assert all(e["task_id"] == "a" for e in receipts)
         assert not any("api_key" in e for e in receipts)
         assert events[-1]["state"] == "stopped"
+    asyncio.run(scenario())
+
+
+async def wait_for_turn(events, index, task_id="a"):
+    async def wait():
+        while not any(e["event"] == "turn_finished" and e["turn_index"] == index and e["task_id"] == task_id for e in events):
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(wait(), 5)
+
+
+@pytest.mark.parametrize("queued_before_completion", [False, True])
+def test_multi_round_preserves_worker_context_budget_and_new_chat_cleanup(tmp_path, monkeypatch, queued_before_completion):
+    """Run the real agent loop and trajectories through two complete native turns."""
+    import mac_agent
+    from code_executor import CodeExecutionResult, empty_control
+    from model_stream import CodeAction
+    monkeypatch.setitem(sys.modules, "mai_ui", types.SimpleNamespace(Runtime=object))
+    instances, plans, closed = [], [], []
+    first_execution = asyncio.Event()
+    release_execution = asyncio.Event()
+
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+
+    class Executor:
+        def __init__(self, **kwargs):
+            self.namespace = {}
+            self.steps = 0
+            instances.append(self)
+        def reset_output_context(self): pass
+        async def close(self): closed.append(self)
+        async def run(self, code, todos):
+            # An in-flight cell can finish while the next user message is queued.
+            if self.steps == 1 and queued_before_completion:
+                first_execution.set()
+                await release_execution.wait()
+            exec(code, self.namespace)
+            self.steps += 1
+            control = empty_control()
+            if self.steps in (2, 4):
+                control["terminate"] = {"status": "success", "answer": "saved" if self.steps == 2 else "remembered 42"}
+            return CodeExecutionResult("", "", 0, False, control)
+
+    async def plan(*args, **kwargs):
+        plans.append(json.dumps(args[1], ensure_ascii=False))
+        codes = ["assert 'memo' not in globals(); memo = 42", "pass", "assert memo == 42", "pass"]
+        code = codes[(len(plans) - 1) % 4]
+        return CodeAction(intent="test", code=code), f"<intent>test</intent><code>{code}</code>", "", {}
+
+    monkeypatch.setattr(mac_agent, "ModelClient", Client)
+    monkeypatch.setattr(mac_agent, "CodeExecutor", Executor)
+    monkeypatch.setattr(mac_agent, "plan_code", plan)
+
+    async def scenario():
+        events = []
+        host = NativeHost(events.append, tmp_path)
+        command = start_command()
+        command["config"]["max_steps"] = 2
+        try:
+            await host.command(command)
+            message = {"command": "message", "task_id": "a", "message_id": "next", "text": "Recall the number"}
+            if queued_before_completion:
+                await asyncio.wait_for(first_execution.wait(), 5)
+                await host.command(message)
+                release_execution.set()
+            else:
+                await wait_for_turn(events, 0)
+                assert not host.task.done() and not closed
+                await host.command(message)
+            await wait_for_turn(events, 1)
+            assert not host.task.done() and len(instances) == 1 and not closed
+            assert instances[0].steps == 4 and instances[0].namespace["memo"] == 42
+            assert "Recall the number" in plans[2] and "saved" in plans[2]
+            trajectory = json.loads((host.control.run_dir / "traj.json").read_text())
+            assert [t["status"] for t in trajectory["tasks"]] == ["success", "success"]
+            assert [t["first_step"] for t in trajectory["tasks"]] == [0, 2]
+            assert [e["state"] for e in events if e["event"] == "message"] == ["queued", "applied"]
+            old_control = host.control
+            # Starting a distinct conversation gracefully closes the idle worker.
+            await host.command(start_command("fresh"))
+            assert old_control.ended and closed == [instances[0]]
+            with pytest.raises(ValueError):
+                await host.command({**message, "message_id": "stale"})
+            await wait_for_turn(events, 0, "fresh")
+            assert len(instances) == 2 and instances[1].steps == 2
+            assert instances[1] not in closed
+        finally:
+            await host.close()
+        assert all(instance in closed for instance in instances)
+    asyncio.run(scenario())
+
+
+def test_idle_conversation_end_wakes_waiter_and_redacts_answer():
+    async def scenario():
+        events = []
+        control = TaskControl("a", events.append, lambda text: text.replace("secret", "[REDACTED]"))
+        control.pause()
+        control.complete_turn("success", "saved secret")
+        assert control.resume_event.is_set()
+        assert events[-1]["text"] == "saved [REDACTED]"
+        waiter = asyncio.create_task(control.follow_up())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        control.end()
+        assert await asyncio.wait_for(waiter, 1) is None
+    asyncio.run(scenario())
+
+
+def test_resume_rejects_missing_external_symlink_and_incompatible_history_before_closing_live_chat(tmp_path):
+    async def scenario():
+        events = []
+        async def runner(*args, **kwargs): await asyncio.Event().wait()
+        host = NativeHost(events.append, tmp_path / "runs", runner)
+        host.runs_dir.mkdir()
+        await host.command(start_command())
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "traj.json").write_text('{}')
+        escape = host.runs_dir / "escape"
+        escape.symlink_to(outside, target_is_directory=True)
+        broken = host.runs_dir / "broken"
+        broken.mkdir()
+        (broken / "traj.json").write_text('not json')
+        legacy = host.runs_dir / "legacy"
+        legacy.mkdir()
+        (legacy / "traj.json").write_text('{"tasks":[{"task":"old"}]}')
+        try:
+            for path in (outside, escape, broken, legacy, host.runs_dir / "missing"):
+                with pytest.raises(ValueError):
+                    await host.command({**start_command("restored"), "resume_path": str(path)})
+                assert host.control.task_id == "a" and not host.task.done()
+        finally:
+            await host.close()
+    asyncio.run(scenario())
+
+
+def test_native_history_resume_restores_context_but_starts_new_turn_in_fresh_worker(tmp_path, monkeypatch):
+    import mac_agent
+    from code_executor import CodeExecutionResult, empty_control
+    from model_stream import CodeAction
+    monkeypatch.setitem(sys.modules, "mai_ui", types.SimpleNamespace(Runtime=object))
+    plans, instances, closed = [], [], []
+
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+
+    class Executor:
+        def __init__(self, **kwargs):
+            self.namespace, self.steps = {}, 0
+            instances.append(self)
+        def reset_output_context(self): pass
+        async def close(self): closed.append(self)
+        async def run(self, code, todos):
+            exec(code, self.namespace)
+            self.steps += 1
+            control = empty_control()
+            if self.steps == 2:
+                control['terminate'] = {'status':'success', 'answer':'Saved 42' if len(instances) == 1 else 'History remembered'}
+            return CodeExecutionResult('', '', 0, False, control)
+
+    async def plan(*args, **kwargs):
+        plans.append(json.dumps(args[1], ensure_ascii=False))
+        codes = ['memo = 42', 'pass', "assert 'memo' not in globals()", 'pass']
+        code = codes[len(plans) - 1]
+        return CodeAction(intent='test', code=code), f'<intent>test</intent><code>{code}</code>', '', {}
+
+    monkeypatch.setattr(mac_agent, 'ModelClient', Client)
+    monkeypatch.setattr(mac_agent, 'CodeExecutor', Executor)
+    monkeypatch.setattr(mac_agent, 'plan_code', plan)
+
+    async def scenario():
+        events = []
+        first = NativeHost(events.append, tmp_path)
+        original = start_command()
+        original['text'] = 'Remember 42'
+        original['config']['max_steps'] = 2
+        await first.command(original)
+        try:
+            await wait_for_turn(events, 0)
+            path = first.control.run_dir
+            await first.command({'command':'end','task_id':'a'})
+        finally:
+            await first.close()
+        # A fresh host simulates reopening history after an app restart.
+        restored = NativeHost(events.append, tmp_path)
+        resumed = {**start_command('restored'), 'text':'Recall the number', 'resume_path':str(path)}
+        resumed['config']['max_steps'] = 2
+        await restored.command(resumed)
+        try:
+            await wait_for_turn(events, 1, 'restored')
+            assert 'Remember 42' in plans[2] and 'Saved 42' in plans[2] and 'Recall the number' in plans[2]
+            assert 'Python' in plans[2]  # Resume lifecycle notice accompanies the restored history.
+            assert len(plans) == 4 and len(instances) == 2
+            assert instances[0].namespace['memo'] == 42 and 'memo' not in instances[1].namespace
+            data = json.loads((path/'traj.json').read_text())
+            assert [t['task'] for t in data['tasks']] == ['Remember 42','Recall the number']
+            assert [t['first_step'] for t in data['tasks']] == [0,2]
+            assert all(t['status'] == 'success' for t in data['tasks'])
+            assert len(data['resume_history']) == 1
+            assert restored.control.run_dir == path
+            await restored.command({'command':'end','task_id':'restored'})
+        finally:
+            await restored.close()
+        assert len(closed) == 2
     asyncio.run(scenario())

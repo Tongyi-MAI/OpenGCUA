@@ -18,19 +18,19 @@ import Speech
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
         guard token == generation else { return }
-        guard status == .authorized else { onError?("请在系统设置中允许 OpenGCUA 使用语音识别，也可以直接输入任务。"); return }
+        guard status == .authorized else { onError?(L("请在系统设置中允许 OpenGCUA 使用语音识别，也可以直接输入任务。")); return }
         let microphone = await AVCaptureDevice.requestAccess(for: .audio)
         guard token == generation else { return }
-        guard microphone else { onError?("麦克风未授权，可以直接输入任务。"); return }
+        guard microphone else { onError?(L("麦克风未授权，可以直接输入任务。")); return }
         guard let recognizer = SFSpeechRecognizer(locale: Locale.current), recognizer.isAvailable,
               recognizer.supportsOnDeviceRecognition else {
-            onError?("当前语言的本机语音识别不可用，请使用键盘输入。"); return
+            onError?(L("当前语言的本机语音识别不可用，请使用键盘输入。")); return
         }
         let engine = AVAudioEngine(), request = SFSpeechAudioBufferRecognitionRequest()
         request.requiresOnDeviceRecognition = true
         request.shouldReportPartialResults = true
         let node = engine.inputNode, format = engine.inputNode.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { onError?("没有可用的麦克风。"); return }
+        guard format.sampleRate > 0, format.channelCount > 0 else { onError?(L("没有可用的麦克风。")); return }
         node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in request.append(buffer) }
         self.engine = engine; self.request = request
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in

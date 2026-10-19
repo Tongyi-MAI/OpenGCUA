@@ -45,6 +45,8 @@ py-modules = [
   "mobile_bridge",
   "console_server",
   "native_host",
+  "overlay_guard",
+  "image_store",
   "rich_help",
   "terminal_tui",
   "web_shim",
