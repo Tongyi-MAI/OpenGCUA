@@ -23,7 +23,6 @@ class SkillRuntime:
             info = document.info
             self.emit({"type": "skill_loaded", "name": info.name, "source": info.source, "digest": info.digest})
             self._loaded.add(name)
-            print(f"Skill '{name}' loaded from {info.source}:\n{document.body}")
         return document
 
     def read(self, name: str, relative_path: str) -> str:

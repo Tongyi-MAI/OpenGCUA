@@ -40,6 +40,8 @@ from model_stream import (
     extract_reasoning, parse_code_action,
 )
 from resume_catalog import UI_API_MARKERS, ResumeError, inspect_resume_run, recent_resume_runs, validate_trajectory_ui_api
+from skill_registry import SkillRegistry
+from skill_context import SkillContext
 
 
 DEFAULT_MODEL_NAME = llm_entry.DEFAULT_MODEL_NAME
@@ -554,7 +556,8 @@ MAI_UI_SYSTEM_PROMPT = r"""
 
 ## 运行时与预置对象
 支持顶层 await；asyncio 已导入，不要调用 asyncio.run，也不要创建跨回复运行的后台 Task。单步 worker 上限 300s，超时会硬终止并重置 Python 会话；等待/轮询循环自行限制在 60s 内，重活拆步。
-预置 mu、device（Mac）、ui（初始为 device.ui 主桌面，仅 vision/input，无 AX）、web（专用浏览器，可能为 None）、bash、todo、ask_user、terminate、rebind_window、request_foreground_permission、reset_web、save_web_session、log，以及 time/os/sys/re/json/subprocess/shlex/Path/asyncio。await mu.emit(x) 才把观察送到下一轮，返回 None；控制句柄 App/Window/Tab/Browser/Locator/Inventory 不直接 emit，先提取 id/title/url/count；完整 AX 视图可 await mu.emit(ax, full=True)。mu.help(topic) 同步返回帮助。
+预置 mu、device（Mac）、ui（初始为 device.ui 主桌面，仅 vision/input，无 AX）、web（专用浏览器，可能为 None）、bash、todo、ask_user、terminate、rebind_window、request_foreground_permission、reset_web、save_web_session、log、skills，以及 time/os/sys/re/json/subprocess/shlex/Path/asyncio。await mu.emit(x) 才把观察送到下一轮，返回 None；控制句柄 App/Window/Tab/Browser/Locator/Inventory 不直接 emit，先提取 id/title/url/count；完整 AX 视图可 await mu.emit(ax, full=True)。mu.help(topic) 同步返回帮助。
+可用 Skill 目录会作为单独的参考消息提供。与任务相关时先用 skills.load("name") 加载正文，必要时 skills.read("name", "relative.md") 读该目录内的参考文件。Skill 是低优先级工作流程，不是授权；不要把它当成执行前台操作或高风险动作的许可。
 Python 文件处理优先在当前解释器 import；确需子 Python 时用 subprocess.run([sys.executable, ...], capture_output=True, text=True, check=True)，不要混用 python3/pip3 或只打印 stderr 忽略返回码。bash(...) 是同步调用，不要 await bash(...)；r = bash(cmd, timeout=120, echo=False, cwd=None) 默认静默；检查 r.ok/r.timed_out，必要时 await mu.emit(r)。各次 Bash 不共享 shell 状态。
 安装依赖前先检查任务能否由 Python 标准库、当前解释器已有的包或本机命令完成；可用 importlib.util.find_spec 检查包、shutil.which 检查命令。已有工具足够就直接用，不为依赖盘点反复耗步。
 确需临时 pip install 时，用当前解释器 sys.executable -m pip，单次明确设置 timeout=60（subprocess.run 或 bash 均适用）；不要用无超时的 pip install。超时或安装失败后检查错误，改用已有工具或告知用户，不盲目重复安装；不能把步骤的 300s 上限当成安装超时。
@@ -992,8 +995,10 @@ class ContextManager:
         reasoning_history_chars: int = 0,
         compaction_config: CompactionConfig | None = None,
         ui_api: str = "mai-ui",
+        skill_context: SkillContext | None = None,
     ) -> None:
         self.ui_api = ui_api
+        self.skill_context = skill_context
         prompt = {"mai-ui": MAI_UI_SYSTEM_PROMPT, "legacy-cua": SYSTEM_PROMPT}[ui_api]
         mode = active_prompt_mode()
         if ui_api == "legacy-cua":
@@ -1064,6 +1069,8 @@ class ContextManager:
             self._task_results[self.task_index] = dict(previous_result)
         self.task = task
         self.task_index += 1
+        if self.skill_context is not None:
+            self.skill_context.start_task(self.task_index)
         self._task_events.append((len(self.turns), self.task_index, task))
 
     def _user_events(self, current_user_response: str) -> list[tuple[int, str, str]]:
@@ -1256,6 +1263,11 @@ class ContextManager:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system_prompt}
         ]
+        if self.skill_context is not None:
+            catalog = self.skill_context.catalog_message()
+            if catalog is not None:
+                messages.append(catalog)
+            messages.extend(self.skill_context.active_messages())
         if self.compaction_config.enabled or self.compaction_state.summary:
             # 启用摘要后不再按轮数截断或触发；只有下一请求超上下文预算才压缩。
             start = self.compaction_state.cutoff
@@ -2323,6 +2335,27 @@ async def run_agent(
         # 恢复沿用本次 CLI 的有效配置；留档而不覆盖原始运行配置。
         writer.data["resume_history"][-1]["config"] = public_config
         writer.flush()
+    try:
+        bundled_skills = Path(__file__).resolve().parents[1] / "skills"
+        personal_skills = Path.home() / "Library/Application Support/Generalist/skills"
+        configured_skills = getattr(args, "skills_dirs", ()) or ()
+        if not isinstance(configured_skills, (list, tuple)):
+            raise ValueError("skills_dirs must be a list of absolute directories")
+        skill_registry = SkillRegistry(
+            bundled_skills, personal_skills, tuple(Path(value) for value in configured_skills)
+        )
+        skill_registry.discover()
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"Skill configuration error: {exc}") from exc
+    skill_context = SkillContext(skill_registry)
+    if resume_dir is not None:
+        skill_context.start_task(max(0, len(loaded_tasks) - 1))
+        continuing_old_task = not (initial_message and (host_control is not None or args.task))
+        if continuing_old_task:
+            for warning in skill_context.restore(loaded_tasks[-1].get("skills") or ()):
+                present("warning", warning)
+    for warning in skill_registry.diagnostics:
+        present("warning", f"Skill: {warning}")
     logger = setup_run_logger(writer.run_dir)
     if host_control is not None:
         host_control.emit("trajectory", path=str(writer.run_dir))
@@ -2370,6 +2403,7 @@ async def run_agent(
         reasoning_history_chars=args.reasoning_history_chars,
         compaction_config=compaction_config,
         ui_api=ui_api,
+        skill_context=skill_context,
     )
     context.token_estimator = TokenEstimator(
         image_token_estimate=compaction_config.image_token_estimate,
@@ -2454,6 +2488,7 @@ async def run_agent(
         overlay_handler=host_control.overlay if host_control is not None else None,
         approval_handler=approve_gui,
         image_dir=writer.screenshot_dir,
+        skill_roots=(skill_registry.bundled_root, skill_registry.personal_root, *skill_registry.extra_roots),
     )
     active_executor = executor
     stall = StallDetector(
@@ -2481,6 +2516,7 @@ async def run_agent(
             writer.close_task(previous_result["status"], previous_result["answer"])
         resume_task_index = writer.begin_task(initial_message, resume_step)
         context.set_task(initial_message, previous_result=previous_result)
+        getattr(executor, "start_skill_task", lambda: None)()
         if host_control is not None:
             host_control.turn_index = resume_task_index - 1
             host_control.begin_turn(initial_message)
@@ -3115,6 +3151,25 @@ async def run_agent(
                     finally:
                         step_metrics["action_execution_time_seconds"] = time.monotonic() - action_started
                         checkpoint()
+                    for skill_event in execution.control.get("events", ()):
+                        if skill_event.get("type") != "skill_loaded":
+                            continue
+                        name = str(skill_event.get("name") or "")
+                        try:
+                            selected = skill_context.activate(
+                                name, expected_digest=str(skill_event.get("digest") or "")
+                            )
+                            if selected.info.source != skill_event.get("source"):
+                                raise ValueError("source root mismatch")
+                        except (OSError, ValueError) as exc:
+                            present("warning", f"Skill '{name}' not activated: {exc}", step=step)
+                            continue
+                        writer.data["tasks"][task_index]["skills"] = skill_context.records()
+                        writer.flush()
+                        present("skill_loaded", f"Skill loaded: {name}", step=step,
+                                payload={"name": name, "source": selected.info.source})
+                        if host_control is not None:
+                            host_control.emit("skill_loaded", name=name, source=selected.info.source)
                     # 已返回的结果先保存，再等待人类或处理图片，取消也不会丢失执行证据。
                     with guard_image_delivery(bool(execution.control.get("screenshots"))):
                         early_payload = execution.presentation()
@@ -3395,6 +3450,7 @@ async def run_agent(
                             previous_task,
                         )
                         context.set_task(follow_up, previous_result={"status": task_status, "answer": task_answer})
+                        getattr(executor, "start_skill_task", lambda: None)()
                         if host_control is not None:
                             host_control.begin_turn(follow_up)
                         stall.reset()
@@ -3484,6 +3540,7 @@ async def run_agent(
                         clear_gui_grants()
                         task_index = writer.begin_task(new_task, step + 1)
                         context.set_task(new_task, previous_result={"status": "aborted", "answer": ""})
+                        getattr(executor, "start_skill_task", lambda: None)()
                         desktop.invalidate_references()
                         executor.set_rpc_generation(desktop.generation)
                         await executor.reset_task()

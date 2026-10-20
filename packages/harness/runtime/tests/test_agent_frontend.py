@@ -272,6 +272,17 @@ def test_plain_frontend_hub_code_preview_preserves_multiline_delta():
     assert ordinary.getvalue() == ""
 
 
+def test_plain_frontend_hub_skill_load_is_structured():
+    output = io.StringIO()
+    frontend = PlainFrontend(lambda _prompt: None, interactive=False, stdout=output, hub_events=True)
+    frontend.emit(AgentEvent("skill_loaded", "Skill loaded: example", step=4,
+                             payload={"name": "example", "source": "bundled"}))
+    event = agent_events.decode_hub_event(output.getvalue().strip())
+    assert event["type"] == "skill_loaded"
+    assert event["name"] == "example"
+    assert event["source"] == "bundled"
+
+
 def test_frontend_failure_does_not_escape_agent_event_delivery():
     class BrokenFrontend:
         interactive = True

@@ -3017,6 +3017,8 @@ def _worker_requests(loop, namespace) -> int:
                         namespace = _bootstrap(loop)
                     # 每轮更新账本内容，始终使用同一个 todo 对象。
                     namespace["todo"] = todo
+                    if request.get("reset_skills"):
+                        namespace["skills"].reset_task()
                     if request.get("reset_task"):
                         namespace["skills"].reset_task()
                         session, device = loop.run_until_complete(_reset_sdk_session())

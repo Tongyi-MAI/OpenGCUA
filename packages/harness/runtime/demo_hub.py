@@ -1029,6 +1029,9 @@ es.onmessage = e => {
   if (ev.type === 'model_status') {
     modelSessionStatus = 'running'; handleModelStatus(ev); return;
   }
+  if (ev.type === 'skill_loaded') {
+    bubble('sys', 'Skill loaded: ' + String(ev.name || 'unknown')); return;
+  }
   if (['code_reset', 'code_start', 'code_delta', 'code_end'].includes(ev.type)) {
     handleCodePreview(ev); return;
   }

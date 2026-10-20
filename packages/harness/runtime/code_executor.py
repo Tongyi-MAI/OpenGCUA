@@ -928,6 +928,7 @@ class CodeExecutor:
         self._closed = False
         self._reset_pending = False
         self._task_reset_pending = False
+        self._skill_reset_pending = False
         self._output_reset_revision = 0
         self._output_reset_sent = 0
         self._rpc_generation = 0
@@ -1065,6 +1066,10 @@ class CodeExecutor:
                 raise RuntimeError("执行器已经关闭")
             self._task_reset_pending = True
 
+    def start_skill_task(self) -> None:
+        """Clear worker Skill activations at the next cell without resetting SDK handles."""
+        self._skill_reset_pending = True
+
     async def close(self) -> None:
         """幂等关闭；取消进行中的轮次并硬清理整个 worker 进程组。"""
         self._closed = True
@@ -1119,11 +1124,13 @@ class CodeExecutor:
                         "code": code,
                         "todo_items": todo_items,
                         "reset_task": self._task_reset_pending,
+                        "reset_skills": self._skill_reset_pending,
                         "reset_output_context": output_reset_revision != self._output_reset_sent,
                         "config": self._config(),
                     }
                     self._writer.write(json.dumps(payload, ensure_ascii=True).encode() + b"\n")
                     await self._writer.drain()
+                    self._skill_reset_pending = False
                     event_bytes = 0
                     while True:
                         raw = await self._reader.readline()

@@ -270,6 +270,17 @@ def test_hub_turns_code_preview_frames_into_sse_events(hub):
     assert session.backlog[-1]["block_index"] == 1
 
 
+def test_hub_turns_skill_load_frame_into_sse_event(hub):
+    session = hub[0].session
+    output = io.StringIO()
+    frontend = PlainFrontend(lambda _prompt: None, interactive=False, stdout=output, hub_events=True)
+    frontend.emit(AgentEvent("skill_loaded", "Skill loaded: example", step=4,
+                             payload={"name": "example", "source": "bundled"}))
+    session._push_line(output.getvalue().strip())
+    assert session.backlog[-1]["type"] == "skill_loaded"
+    assert session.backlog[-1]["name"] == "example"
+
+
 def test_hub_code_panel_streams_draft_until_matching_step_is_committed():
     node = shutil.which("node")
     if not node:

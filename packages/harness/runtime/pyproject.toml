@@ -54,6 +54,7 @@ py-modules = [
   "resume_catalog",
   "skill_registry",
   "skill_runtime",
+  "skill_context",
   "web_shim",
 ]
 

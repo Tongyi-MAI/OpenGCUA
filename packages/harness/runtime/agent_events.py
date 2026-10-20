@@ -61,12 +61,16 @@ def decode_hub_event(line: str) -> dict[str, Any] | None:
         event = json.loads(line[len(HUB_EVENT_PREFIX):])
     except json.JSONDecodeError as exc:
         raise ValueError("invalid hub event JSON") from exc
-    if not isinstance(event, dict) or event.get("type") not in HUB_CODE_EVENTS | {"model_status"}:
+    if not isinstance(event, dict) or event.get("type") not in HUB_CODE_EVENTS | {"model_status", "skill_loaded"}:
         raise ValueError("invalid hub event type")
     if type(event.get("step")) is not int or event["step"] < 0:
         raise ValueError("invalid hub event step")
     if not isinstance(event.get("text"), str):
         raise ValueError("invalid hub event text")
+    if event.get("type") == "skill_loaded" and not all(
+        isinstance(event.get(key), str) and event[key] for key in ("name", "source")
+    ):
+        raise ValueError("invalid skill load event")
     index = event.get("block_index")
     if index is not None and (type(index) is not int or index < 1):
         raise ValueError("invalid hub event block index")
@@ -198,6 +202,11 @@ class PlainFrontend:
                 print("\n" + HUB_EVENT_PREFIX + json.dumps(frame, ensure_ascii=False), flush=True, file=self.stdout)
             return
         if event.kind == "foreground_consent":
+            return
+        if event.kind == "skill_loaded" and self.hub_events and event.step is not None:
+            frame = {"type": "skill_loaded", "step": event.step, "text": event.text,
+                     "name": event.payload.get("name"), "source": event.payload.get("source")}
+            print(HUB_EVENT_PREFIX + json.dumps(frame, ensure_ascii=False), flush=True, file=self.stdout)
             return
         if event.kind in HUB_CODE_EVENTS:
             if self.hub_events and event.step is not None:
