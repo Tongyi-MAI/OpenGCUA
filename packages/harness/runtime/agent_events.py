@@ -95,6 +95,18 @@ class AgentPrompt:
     empty_exits: bool = False
 
 
+ConsentChoice = Literal["allow", "reject", "cancel"]
+
+
+@dataclass(frozen=True, slots=True)
+class ForegroundApprovalPrompt:
+    request_id: str
+    text: str
+    task_index: int
+    app_id: str
+    window_id: str
+
+
 class AgentFrontend(Protocol):
     """The I/O boundary consumed by ``mac_agent.run_agent``."""
 

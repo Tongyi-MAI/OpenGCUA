@@ -27,6 +27,7 @@ from agent_events import AgentEvent, AgentFrontend, AgentPrompt, PlainFrontend, 
 from console_protocol import decode_console_message
 from code_executor import BLOCK_PROGRESS_FIELDS, CodeExecutor
 from gui_approval import GuiGrantStore, request_gui_approval
+from agent_events import ForegroundApprovalPrompt
 from sdk_backend import CuaDesktop, CuaRpcServer, Observation
 from llm_compaction import CompactionConfig, CompactionState, maybe_compact, restore_state
 import llm_entry
@@ -2343,17 +2344,34 @@ async def run_agent(
     )
     gui_grants = GuiGrantStore()
 
-    async def approve_gui(event: dict[str, Any]) -> bool:
-        async def ask(question: str) -> str | None:
-            if host_control is not None:
-                return await host_control.ask(question)
-            if not frontend.interactive:
-                return None
-            return await frontend.read(AgentPrompt(
-                kind="approval", text=question, empty_exits=True,
-            ))
+    def clear_gui_grants() -> None:
+        gui_grants.clear()
+        present("foreground_consent", payload={"state": "unset"})
 
-        return await request_gui_approval(gui_grants, task_index, event, ask)
+    async def approve_gui(event: dict[str, Any]) -> bool:
+        async def choose(prompt: ForegroundApprovalPrompt) -> str:
+            if host_control is not None:
+                answer = await host_control.ask(prompt.text)
+            elif not frontend.interactive:
+                return "cancel"
+            else:
+                answer = await frontend.read(AgentPrompt(
+                    kind="approval", text=prompt.text, empty_exits=True,
+                ))
+            if not isinstance(answer, str):
+                return "cancel"
+            if answer.strip().casefold() in {"yes", "y", "同意", "允许"}:
+                return "allow"
+            if answer.strip().casefold() in {"no", "n", "拒绝"}:
+                return "reject"
+            return "cancel"
+
+        previous = gui_grants.state(task_index)
+        result = await request_gui_approval(gui_grants, task_index, event, choose)
+        state = gui_grants.state(task_index)
+        if state != previous:
+            present("foreground_consent", payload={"state": state})
+        return result
     if resume_dir is not None:
         context.token_estimator.load_state(loaded.get("token_estimator"))
         restore_context_from_trajectory(
@@ -3193,7 +3211,7 @@ async def run_agent(
                         final_status = task_status
                         final_answer = task_answer
                         writer.close_task(task_status, task_answer)
-                        gui_grants.clear()
+                        clear_gui_grants()
                         logger.info(
                             "task %d closed status=%s answer=%r",
                             task_index,
@@ -3333,7 +3351,7 @@ async def run_agent(
                             present("notice", "会话已结束。")
                             break
                         writer.close_task("aborted", "")
-                        gui_grants.clear()
+                        clear_gui_grants()
                         task_index = writer.begin_task(new_task, step + 1)
                         context.set_task(new_task, previous_result={"status": "aborted", "answer": ""})
                         desktop.invalidate_references()
@@ -3378,7 +3396,7 @@ async def run_agent(
             except Exception:  # noqa: BLE001 - 取证落盘失败不影响主流程
                 pass
     finally:
-        gui_grants.clear()
+        clear_gui_grants()
         try:
             try:
                 if step_metrics is not None and step_metrics["status"] == "running":

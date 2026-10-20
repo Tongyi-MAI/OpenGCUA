@@ -1,51 +1,63 @@
-"""Host-owned consent for SDK visual and foreground input."""
+"""Host-owned, task-scoped consent for SDK foreground input."""
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any
+from typing import Any, Literal
+
+from agent_events import ConsentChoice, ForegroundApprovalPrompt
+
+ConsentState = Literal["unset", "allowed", "denied"]
 
 
 class GuiGrantStore:
     def __init__(self) -> None:
-        self._grants: set[tuple[int, str, str]] = set()
+        self._states: dict[int, ConsentState] = {}
 
-    def allowed(self, task_index: int, app_id: str, window_id: str) -> bool:
-        return (task_index, app_id, window_id) in self._grants
+    def state(self, task_index: int) -> ConsentState:
+        return self._states.get(task_index, "unset")
 
-    def grant(self, task_index: int, app_id: str, window_id: str) -> None:
-        if not app_id or not window_id:
-            raise ValueError("GUI grant requires an exact app and window")
-        self._grants.add((task_index, app_id, window_id))
+    def decide(self, task_index: int, *, allow: bool) -> None:
+        self._states[task_index] = "allowed" if allow else "denied"
 
     def clear(self) -> None:
-        self._grants.clear()
+        self._states.clear()
 
 
 async def request_gui_approval(
     grants: GuiGrantStore,
     task_index: int,
     event: Mapping[str, Any],
-    ask: Callable[[str], Awaitable[str | None]],
+    choose: Callable[[ForegroundApprovalPrompt], Awaitable[ConsentChoice]],
 ) -> bool:
+    request_id = event.get("request_id")
     app_id = event.get("app_id")
     window_id = event.get("window_id")
-    if not isinstance(app_id, str) or not app_id or not isinstance(window_id, str) or not window_id:
+    if not all(isinstance(value, str) and value for value in (request_id, app_id, window_id)):
         return False
-    if grants.allowed(task_index, app_id, window_id):
+    state = grants.state(task_index)
+    explicit_retry = event.get("explicit_retry") is True
+    if explicit_retry and state != "denied":
+        return False
+    if state == "allowed":
         return True
-    question = (
-        f"Agent 请求操作 App {app_id} 的窗口 {window_id}。"
-        "本任务可能使用视觉点击（定向操作不一定移动真实鼠标），"
-        "必要时还会短暂接管前台焦点、鼠标和键盘。"
-        "同意后，该任务在此窗口可连续执行这些操作，直到任务结束；"
-        "切换 App/窗口会重新询问。是否同意？输入 yes 或 同意授权，输入 no 或 拒绝不授权；"
-        "未答复期间该动作不会执行。"
-    )
-    answer = await ask(question)
-    if not isinstance(answer, str) or answer.strip().casefold() not in {
-        "yes", "y", "同意", "允许", "可以",
-    }:
+    if state == "denied" and not explicit_retry:
         return False
-    grants.grant(task_index, app_id, window_id)
-    return True
+    reason = event.get("reason")
+    reason_text = f"原因：{reason}。" if isinstance(reason, str) and reason.strip() else ""
+    prompt = ForegroundApprovalPrompt(
+        request_id=request_id, app_id=app_id, window_id=window_id,
+        task_index=task_index,
+        text=(
+            f"Agent 请求接管前台键鼠：App {app_id}，窗口 {window_id}。{reason_text}"
+            "允许后，本次任务可反复激活窗口并使用你的鼠标和键盘，直到任务结束；"
+            "期间请避免同时操作桌面。选择允许或拒绝；未答复前不会执行该动作。"
+        ),
+    )
+    choice = await choose(prompt)
+    if choice == "allow":
+        grants.decide(task_index, allow=True)
+        return True
+    if choice == "reject":
+        grants.decide(task_index, allow=False)
+    return False

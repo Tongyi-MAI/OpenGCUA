@@ -693,27 +693,26 @@ def test_sdk_request_instrumentation_emits_tool_audit(monkeypatch):
     assert events[-1]["ok"] is True
 
 
-@pytest.mark.parametrize("action,delivery,needs_vision,needs_foreground", [
-    ("point_click", "background", True, False),
-    ("point_click", "foreground", True, True),
-    ("activate", None, False, True),
-    ("input_text", "foreground", False, True),
-    ("press_key", "foreground", False, True),
-    ("drag", "foreground", False, True),
-    ("move", "foreground", False, True),
-    ("click", "background", False, False),
-    ("set_text", "background", False, False),
+@pytest.mark.parametrize("action,delivery,protected", [
+    ("point_click", "background", False),
+    ("point_click", "foreground", True),
+    ("activate", None, True),
+    ("input_text", "foreground", True),
+    ("press_key", "foreground", True),
+    ("drag", "foreground", True),
+    ("move", "foreground", True),
+    ("click", "background", False),
+    ("set_text", "background", False),
 ])
 def test_gui_action_scope_classifies_protected_dispatch(
-    action, delivery, needs_vision, needs_foreground,
+    action, delivery, protected,
 ):
     device = types.SimpleNamespace(platform="macos", _app_id="app:a", _window_id="window:7")
     message = {"op": "action", "action": action}
     if delivery is not None:
         message["delivery"] = delivery
     result = code_runtime.gui_action_scope(device, message)
-    expected = ("app:a", "window:7", needs_vision, needs_foreground)
-    assert result == expected if needs_vision or needs_foreground else result is None
+    assert result == ("app:a", "window:7") if protected else result is None
 
 
 def test_protected_sdk_action_waits_for_approval_and_denial_never_dispatches(monkeypatch):
@@ -735,9 +734,9 @@ def test_protected_sdk_action_waits_for_approval_and_denial_never_dispatches(mon
     session = Session()
     code_runtime._instrument_sdk_session(session)
     device = types.SimpleNamespace(platform="macos", _app_id="app:a", _window_id="window:7")
-    with pytest.raises(MuError, match="approval"):
+    with pytest.raises(MuError, match="Foreground input denied"):
         asyncio.run(session._request(device, {
-            "op": "action", "action": "point_click", "delivery": "background",
+            "op": "action", "action": "point_click", "delivery": "foreground",
         }))
     assert sequence == ["approval"]
 
@@ -763,11 +762,14 @@ def test_background_ax_action_dispatches_without_approval(monkeypatch):
     asyncio.run(session._request(device, {
         "op": "action", "action": "set_text", "delivery": "background",
     }))
-    assert sequence == ["dispatch"]
+    asyncio.run(session._request(device, {
+        "op": "action", "action": "point_click", "delivery": "background",
+    }))
+    assert sequence == ["dispatch", "dispatch"]
 
 
 @pytest.mark.parametrize("app_id,window_id,message", [
-    ("app:a", None, {"op": "action", "action": "point_click"}),
+    ("app:a", None, {"op": "action", "action": "point_click", "delivery": "foreground"}),
     ("app:a", "window:7", {"op": "action", "action": "input_text",
                             "delivery": "foreground", "window_id": "window:8"}),
 ])

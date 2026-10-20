@@ -10,71 +10,101 @@ from code_executor import CodeExecutor
 import code_runtime
 
 
-def test_grant_is_scoped_to_task_app_and_exact_window():
+def test_grant_is_scoped_to_task_not_window():
     from gui_approval import GuiGrantStore
     grants = GuiGrantStore()
-    assert not grants.allowed(4, "app:a", "window:7")
-    grants.grant(4, "app:a", "window:7")
-    assert grants.allowed(4, "app:a", "window:7")
-    assert not grants.allowed(5, "app:a", "window:7")
-    assert not grants.allowed(4, "app:b", "window:7")
-    assert not grants.allowed(4, "app:a", "window:8")
+    assert grants.state(4) == "unset"
+    grants.decide(4, allow=True)
+    assert grants.state(4) == "allowed"
+    assert grants.state(5) == "unset"
     grants.clear()
-    assert not grants.allowed(4, "app:a", "window:7")
+    assert grants.state(4) == "unset"
 
 
-def test_one_explicit_yes_grants_repeated_actions_but_not_another_window():
+def test_one_allow_grants_all_windows_in_same_task():
     from gui_approval import request_gui_approval
 
     async def scenario():
         grants = GuiGrantStore()
         questions = []
-        async def ask(question):
-            questions.append(question)
-            return "yes"
+        async def choose(prompt):
+            questions.append(prompt)
+            return "allow"
 
         first = {"app_id": "app:a", "window_id": "window:7", "needs_vision": True}
-        assert await request_gui_approval(grants, 4, first, ask)
-        assert await request_gui_approval(grants, 4, first, ask)
+        first["request_id"] = "r1"
+        assert await request_gui_approval(grants, 4, first, choose)
+        assert await request_gui_approval(grants, 4, first, choose)
         assert len(questions) == 1
-        assert "app:a" in questions[0] and "window:7" in questions[0]
-        assert "前台" in questions[0] and "视觉" in questions[0]
-        assert "输入 no" in questions[0]
-        assert "未答复期间" in questions[0]
+        assert questions[0].app_id == "app:a" and questions[0].window_id == "window:7"
+        assert "键鼠" in questions[0].text
         assert await request_gui_approval(
-            grants, 4, {**first, "window_id": "window:8"}, ask,
+            grants, 4, {**first, "window_id": "window:8"}, choose,
         )
+        assert len(questions) == 1
+        assert await request_gui_approval(grants, 5, first, choose)
         assert len(questions) == 2
 
     from gui_approval import GuiGrantStore
     asyncio.run(scenario())
 
 
-def test_denial_missing_scope_and_cancel_never_grant():
+def test_reject_sticks_until_explicit_retry_and_cancel_does_not_change_state():
     from gui_approval import GuiGrantStore, request_gui_approval
 
     async def scenario():
         grants = GuiGrantStore()
         calls = []
-        async def deny(question):
-            calls.append(question)
-            return "maybe"
+        async def deny(prompt):
+            calls.append(prompt)
+            return "reject"
         assert not await request_gui_approval(
-            grants, 1, {"app_id": "app:a", "window_id": "window:7"}, deny,
+            grants, 1, {"request_id": "r1", "app_id": "app:a", "window_id": "window:7"}, deny,
         )
-        assert not grants.allowed(1, "app:a", "window:7")
+        assert grants.state(1) == "denied"
         assert not await request_gui_approval(
-            grants, 1, {"app_id": "app:a", "window_id": ""}, deny,
+            grants, 1, {"request_id": "r2", "app_id": "app:a", "window_id": "window:8"}, deny,
         )
         assert len(calls) == 1
+        async def cancel(prompt):
+            calls.append(prompt)
+            return "cancel"
+        assert not await request_gui_approval(grants, 1, {
+            "request_id": "r3", "app_id": "app:a", "window_id": "window:7",
+            "explicit_retry": True, "reason": "Need to click PDF field",
+        }, cancel)
+        assert grants.state(1) == "denied"
+        assert len(calls) == 2
+        assert not await request_gui_approval(grants, 2, {
+            "request_id": "r4", "app_id": "app:a", "window_id": "",
+        }, cancel)
+        assert len(calls) == 2
+        assert not await request_gui_approval(grants, 2, {
+            "request_id": "", "app_id": "app:a", "window_id": "window:7",
+        }, cancel)
+        assert len(calls) == 2
 
-        async def cancelled(_question):
-            raise asyncio.CancelledError
-        with pytest.raises(asyncio.CancelledError):
-            await request_gui_approval(
-                grants, 1, {"app_id": "app:a", "window_id": "window:7"}, cancelled,
-            )
-        assert not grants.allowed(1, "app:a", "window:7")
+    asyncio.run(scenario())
+
+
+def test_retry_only_after_reject_and_requires_new_allow():
+    from gui_approval import GuiGrantStore, request_gui_approval
+
+    async def scenario():
+        grants = GuiGrantStore()
+        calls = []
+
+        async def choose(prompt):
+            calls.append(prompt)
+            return "allow"
+
+        event = {"request_id": "r1", "app_id": "app:a", "window_id": "window:7"}
+        assert not await request_gui_approval(grants, 3, {**event, "explicit_retry": True}, choose)
+        assert calls == []
+        grants.decide(3, allow=False)
+        assert await request_gui_approval(grants, 3, {**event, "explicit_retry": True}, choose)
+        assert grants.state(3) == "allowed"
+        assert len(calls) == 1
 
     asyncio.run(scenario())
 
@@ -100,7 +130,7 @@ def test_worker_rejects_denied_or_mismatched_approval_ack(monkeypatch, approved,
     monkeypatch.setattr(code_runtime, "_emit", emit)
     try:
         result = asyncio.run(code_runtime._request_gui_approval(
-            "app:a", "window:7", needs_vision=True, needs_foreground=False,
+            "app:a", "window:7",
         ))
         assert result is expected
         assert seen[0]["type"] == "gui_approval_request"

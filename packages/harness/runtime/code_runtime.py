@@ -286,7 +286,7 @@ def _recv_host_ack(kind: str, id_key: str, request_id: str, timeout: float | Non
 
 
 async def _request_gui_approval(
-    app_id: str, window_id: str, *, needs_vision: bool, needs_foreground: bool,
+    app_id: str, window_id: str, *, explicit_retry: bool = False, reason: str = "",
 ) -> bool:
     if not _CONFIG.get("gui_approval", True) or _CONTROL_SOCKET is None:
         return False
@@ -294,7 +294,7 @@ async def _request_gui_approval(
     _emit({
         "type": "gui_approval_request", "request_id": request_id,
         "app_id": app_id, "window_id": window_id,
-        "needs_vision": needs_vision, "needs_foreground": needs_foreground,
+        "explicit_retry": explicit_retry, "reason": reason,
     })
     reply = await asyncio.to_thread(
         _recv_host_ack, "gui_approval_ack", "request_id", request_id, None,
@@ -302,18 +302,28 @@ async def _request_gui_approval(
     return reply is not None and reply.get("approved") is True
 
 
-def gui_action_scope(device: Any, message: dict[str, Any]) -> tuple[str, str, bool, bool] | None:
-    """Classify macOS SDK calls requiring task/window GUI consent."""
+def gui_action_scope(device: Any, message: dict[str, Any]) -> tuple[str, str] | None:
+    """Classify macOS SDK calls that may take foreground focus or input."""
     if getattr(device, "platform", None) != "macos" or message.get("op") != "action":
         return None
     action = message.get("action")
-    needs_vision = action == "point_click"
-    needs_foreground = action == "activate" or message.get("delivery") == "foreground"
-    if not needs_vision and not needs_foreground:
+    if action != "activate" and message.get("delivery") != "foreground":
         return None
     app_id = message.get("app_id") or getattr(device, "_app_id", None) or ""
     window_id = message.get("window_id") or getattr(device, "_window_id", None) or ""
-    return str(app_id), str(window_id), needs_vision, needs_foreground
+    return str(app_id), str(window_id)
+
+
+async def request_foreground_permission(window: Any, reason: str) -> bool:
+    """Explicitly re-request a task-level grant after a previous rejection."""
+    _check_active_request()
+    app_id = getattr(window, "_app_id", None)
+    window_id = getattr(window, "_window_id", None)
+    if not isinstance(app_id, str) or not app_id or not isinstance(window_id, str) or not window_id:
+        raise ValueError("request_foreground_permission requires a bound SDK Window")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("request_foreground_permission requires a reason")
+    return await _request_gui_approval(app_id, window_id, explicit_retry=True, reason=reason)
 
 
 def _check_active_request() -> None:
@@ -2333,7 +2343,7 @@ def _instrument_sdk_session(session: Any) -> None:
         scope = gui_action_scope(device, message)
         if scope is not None:
             from mai_ui import MuError
-            app_id, window_id, needs_vision, needs_foreground = scope
+            app_id, window_id = scope
             attached_app = getattr(device, "_app_id", None)
             attached_window = getattr(device, "_window_id", None)
             if (not app_id or not window_id
@@ -2341,12 +2351,9 @@ def _instrument_sdk_session(session: Any) -> None:
                     or (attached_window and window_id != attached_window)):
                 raise MuError("INPUT_REFUSED", "GUI approval requires an exact bound app/window target")
             async with control_ack_lock:
-                approved = await _request_gui_approval(
-                    app_id, window_id,
-                    needs_vision=needs_vision, needs_foreground=needs_foreground,
-                )
+                approved = await _request_gui_approval(app_id, window_id)
             if not approved:
-                raise MuError("PERMISSION_DENIED", "GUI approval was denied or unavailable; action not dispatched")
+                raise MuError("PERMISSION_DENIED", "Foreground input denied or unavailable; use background/AX or request_foreground_permission(win, reason) to ask again after rejection; action not dispatched")
         footprint = impact(device, message) if _CONFIG.get("overlay_guard") else None
         if footprint is None:
             return await traced_call(device, message)
@@ -2755,6 +2762,7 @@ def _bootstrap(loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
         "Path": Path,
         "bash": bash,
         "rebind_window": rebind_window,
+        "request_foreground_permission": request_foreground_permission,
         "reset_web": reset_web,
         "save_web_session": save_web_session,
         "terminate": terminate,
