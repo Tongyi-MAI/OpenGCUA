@@ -59,3 +59,24 @@ def test_active_skill_does_not_silently_switch_revision_after_catalog_reload(tmp
     document.write_text("---\nname: example\ndescription: Example\n---\n\nChanged body.\n")
     runtime.list()
     assert "Original body" in runtime.load("example").body
+
+
+def test_new_task_refreshes_persistent_worker_registry(tmp_path):
+    bundled = tmp_path / "bundle"
+    folder = bundled / "example"
+    folder.mkdir(parents=True)
+    document = folder / "SKILL.md"
+    document.write_text("---\nname: example\ndescription: Example\n---\n\nOriginal body.\n")
+    registry = SkillRegistry(bundled, tmp_path / "personal")
+    registry.discover()
+    runtime = SkillRuntime(registry, lambda _event: None)
+    assert "Original body" in runtime.load("example").body
+    document.write_text("---\nname: example\ndescription: Example\n---\n\nUpdated body.\n")
+    added = bundled / "added"
+    added.mkdir()
+    (added / "SKILL.md").write_text("---\nname: added\ndescription: New skill\n---\n\nNew body.\n")
+
+    runtime.reset_task()
+
+    assert "Updated body" in runtime.load("example").body
+    assert "New body" in runtime.load("added").body

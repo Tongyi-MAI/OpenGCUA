@@ -64,6 +64,12 @@ enum AppError: LocalizedError {
         precondition(model.taskProgressTitle == "思考中" && model.intent.isEmpty && model.taskProgressDetail == "最近动作：打开 Chrome")
         model.receive(["event": "progress", "task_id": "old-task", "phase": "execution", "step": 99])
         precondition(model.step == 2 && model.taskProgressTitle == "思考中")
+        model.receive(["event": "skill_loaded", "task_id": "task-a", "name": "pdf-form", "source": "bundled"])
+        precondition(model.conversationMessages.last?.text.contains("pdf-form") == true,
+                     "Skill activation must be visible in the native conversation")
+        model.receive(["event": "skill_warning", "task_id": "task-a", "text": "Invalid Skill metadata"])
+        precondition(model.conversationMessages.last?.text.contains("Invalid Skill metadata") == true,
+                     "Skill validation warnings must be visible in the native conversation")
         let context = VoiceTaskContext(taskID: "task-a", questionID: "")
         let result = await model.handleVoiceTool(VoiceTaskCall(id: "call-a", name: "queue_task", text: "Only use Chrome"), context: context)
         precondition(result["accepted"] as? Bool == true)

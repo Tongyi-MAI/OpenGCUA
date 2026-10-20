@@ -345,6 +345,14 @@ enum TaskPhase: String {
             if executionPhase == "execution", !intent.isEmpty { recentAction = intent }
             if executionPhase == "planning" { intent = "" }
         case "intent": intent = event["text"] as? String ?? ""
+        case "skill_loaded":
+            guard let name = event["name"] as? String, !name.isEmpty else { return }
+            appendChat(id: UUID().uuidString, text: L("已加载 Skill：") + name, isUser: false)
+            persistCurrent()
+        case "skill_warning":
+            guard let text = event["text"] as? String, !text.isEmpty else { return }
+            appendChat(id: UUID().uuidString, text: L("Skill 警告：") + text, isUser: false)
+            persistCurrent()
         case "trajectory":
             runPath = event["path"] as? String ?? ""; resumeRunPath = runPath; persistCurrent()
         case "question":

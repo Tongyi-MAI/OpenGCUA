@@ -77,6 +77,37 @@ def test_skill_directory_symlink_escape_is_rejected(tmp_path):
     assert registry.diagnostics
 
 
+def test_looping_skill_document_symlink_is_diagnostic_not_startup_failure(tmp_path):
+    bundled = tmp_path / "bundle"
+    folder = skill(bundled, "looped")
+    document = folder / "SKILL.md"
+    document.unlink()
+    document.symlink_to("SKILL.md")
+    skill(bundled, "healthy")
+    registry = SkillRegistry(bundled, tmp_path / "personal")
+
+    assert [item.name for item in registry.discover()] == ["healthy"]
+    assert any("looped" in message for message in registry.diagnostics)
+
+
+def test_symlink_loops_after_discovery_become_validation_errors(tmp_path):
+    bundled = tmp_path / "bundle"
+    folder = skill(bundled, "example")
+    reference = folder / "reference.md"
+    reference.write_text("Safe reference")
+    registry = SkillRegistry(bundled, tmp_path / "personal")
+    registry.discover()
+    reference.unlink()
+    reference.symlink_to("reference.md")
+    with pytest.raises(ValueError, match="reference unavailable"):
+        registry.read("example", "reference.md")
+    document = folder / "SKILL.md"
+    document.unlink()
+    document.symlink_to("SKILL.md")
+    with pytest.raises(ValueError, match="document unavailable"):
+        registry.load("example")
+
+
 def test_create_personal_template_refuses_overwrite(tmp_path):
     registry = SkillRegistry(tmp_path / "bundle", tmp_path / "personal")
     folder = registry.create("my-workflow")

@@ -102,6 +102,50 @@ def test_resume_handoff_is_typed_and_tui_supervisor_waits_for_new_message(monkey
     assert ui.events[-2:] == ["stop", "close"]
 
 
+def test_resume_wait_accepts_skill_commands_before_new_message(monkeypatch, tmp_path):
+    import argparse
+    import mac_agent
+    from resume_catalog import ResumeCandidate
+
+    selected = tmp_path / "saved-run"
+    selected.mkdir()
+    bundled = tmp_path / "bundle"
+    example = bundled / "example"
+    example.mkdir(parents=True)
+    (example / "SKILL.md").write_text(
+        "---\nname: example\ndescription: Example workflow\n---\n\nUse this.\n"
+    )
+    monkeypatch.setattr(mac_agent, "default_skill_roots", lambda _file: (bundled, tmp_path / "personal"))
+    monkeypatch.setattr(mac_agent, "inspect_resume_run", lambda path, *, ui_api: ResumeCandidate(path, "s", "old", "success", "now", 1, 0))
+    monkeypatch.setattr("prompt_toolkit.patch_stdout.patch_stdout", lambda **_kw: __import__("contextlib").nullcontext())
+    calls = []
+
+    async def fake_run(args, *, frontend):
+        calls.append((args.resume, args.task, getattr(args, "preselected_skill", None)))
+        return mac_agent.ResumeHandoff(selected) if len(calls) == 1 else 0
+
+    class Frontend:
+        terminal_error = None
+        def __init__(self):
+            self.messages = [TerminalCommand("skills_list"), TerminalCommand("skill_select", "example"), "new request"]
+            self.events = []
+        def start(self): pass
+        async def stop(self): pass
+        def close(self): pass
+        def emit(self, event): self.events.append(event)
+        async def read(self, _prompt): return self.messages.pop(0)
+
+    monkeypatch.setattr(mac_agent, "run_agent", fake_run)
+    ui = Frontend()
+    result = asyncio.run(mac_agent.run_interactive_agent(
+        argparse.Namespace(task="original", resume=None, runs_dir=tmp_path, skills_dirs=[]), ui
+    ))
+    assert result == 0
+    assert calls == [(None, "original", None), (str(selected), "new request", "example")]
+    assert any(event.kind == "skills_catalog" for event in ui.events)
+    assert any(event.kind == "skill_selected" for event in ui.events)
+
+
 def test_plain_frontend_decodes_framed_multiline_as_one_message():
     frames = [encode_console_message("first line\nsecond line").decode("utf-8")]
 

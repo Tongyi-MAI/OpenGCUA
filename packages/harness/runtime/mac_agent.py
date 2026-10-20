@@ -2178,7 +2178,12 @@ async def run_agent(
         skill_registry.discover()
     except (TypeError, ValueError) as exc:
         raise SystemExit(f"Skill configuration error: {exc}") from exc
-    pending_skill_name: str | None = None
+    pending_skill_name: str | None = getattr(args, "preselected_skill", None)
+
+    def skill_warning(message: str, *, step: int | None = None) -> None:
+        present("warning", message, step=step)
+        if host_control is not None:
+            host_control.emit("skill_warning", text=message)
 
     def publish_skill_catalog(*, show: bool = False) -> None:
         infos = skill_registry.discover()
@@ -2186,7 +2191,7 @@ async def run_agent(
         present("skills_catalog", "Available Skills:\n" + ("\n".join(rows) if rows else "(none)") if show else "",
                 payload={"names": [info.name for info in infos]})
         for warning in skill_registry.diagnostics:
-            present("warning", f"Skill: {warning}")
+            skill_warning(f"Skill: {warning}")
 
     def consume_skill_markers(raw: str) -> tuple[str, tuple[str, ...]]:
         nonlocal pending_skill_name
@@ -2195,7 +2200,7 @@ async def run_agent(
         unknown = {name for name in re.findall(r"(?<![\w$])\$([a-z][a-z0-9]*(?:-[a-z0-9]+)*)", cleaned)
                    if name not in known}
         for name in sorted(unknown):
-            present("warning", f"Unknown Skill ${name}; marker kept as task text. Use /skills to list names.")
+            skill_warning(f"Unknown Skill ${name}; marker kept as task text. Use /skills to list names.")
         if pending_skill_name is not None:
             selected = tuple(dict.fromkeys((pending_skill_name, *selected)))
             pending_skill_name = None
@@ -2401,7 +2406,7 @@ async def run_agent(
             try:
                 selected = skill_context.activate(name)
             except (OSError, ValueError) as exc:
-                present("warning", f"Skill '{name}' not activated: {exc}")
+                skill_warning(f"Skill '{name}' not activated: {exc}")
                 continue
             writer.data["tasks"][task_index]["skills"] = skill_context.records()
             writer.flush()
@@ -2418,7 +2423,7 @@ async def run_agent(
         continuing_old_task = not (initial_message and (host_control is not None or args.task))
         if continuing_old_task:
             for warning in skill_context.restore(loaded_tasks[-1].get("skills") or ()):
-                present("warning", warning)
+                skill_warning(warning)
     logger = setup_run_logger(writer.run_dir)
     if host_control is not None:
         host_control.emit("trajectory", path=str(writer.run_dir))
@@ -3228,7 +3233,7 @@ async def run_agent(
                             if selected.info.source != skill_event.get("source"):
                                 raise ValueError("source root mismatch")
                         except (OSError, ValueError) as exc:
-                            present("warning", f"Skill '{name}' not activated: {exc}", step=step)
+                            skill_warning(f"Skill '{name}' not activated: {exc}", step=step)
                             continue
                         writer.data["tasks"][task_index]["skills"] = skill_context.records()
                         writer.flush()
@@ -3758,12 +3763,47 @@ async def run_interactive_agent(args: argparse.Namespace, frontend: AgentFronten
                     f"Restored turns: {preview.turns} · TODOs: {preview.todos}",
                 ))
                 frontend.emit(AgentEvent("notice", "历史任务不会重跑。Python 内存、SDK/UI 句柄与前台授权不恢复；请输入新消息继续。"))
+                bundled_skills, personal_skills = default_skill_roots(__file__)
+                resume_skill_registry = SkillRegistry(
+                    bundled_skills, personal_skills,
+                    tuple(Path(value) for value in (getattr(args, "skills_dirs", ()) or ())),
+                )
+                resume_skill_registry.discover()
+                selected_skill_name: str | None = None
                 while True:
                     next_task = await frontend.read(AgentPrompt(kind="task"))
                     if next_task is None:
                         result = 0
                         break
                     if isinstance(next_task, TerminalCommand):
+                        if next_task.kind in {"skills_list", "skills_reload", "skill_select", "skill_create"}:
+                            if next_task.kind in {"skills_list", "skills_reload"}:
+                                infos = resume_skill_registry.discover()
+                                rows = [f"{info.name} — {info.description}" for info in infos]
+                                frontend.emit(AgentEvent(
+                                    "skills_catalog", "Available Skills:\n" + ("\n".join(rows) if rows else "(none)"),
+                                    payload={"names": [info.name for info in infos]},
+                                ))
+                                for warning in resume_skill_registry.diagnostics:
+                                    frontend.emit(AgentEvent("warning", f"Skill: {warning}"))
+                            elif next_task.kind == "skill_create":
+                                try:
+                                    created = resume_skill_registry.create(next_task.target or "")
+                                    resume_skill_registry.discover()
+                                    frontend.emit(AgentEvent("notice", f"Skill template created: {created}"))
+                                except (OSError, ValueError) as exc:
+                                    frontend.emit(AgentEvent("error", f"Cannot create Skill: {exc}"))
+                            else:
+                                try:
+                                    info = resume_skill_registry.load(next_task.target or "").info
+                                    selected_skill_name = info.name
+                                    frontend.emit(AgentEvent(
+                                        "skill_selected", f"Skill {info.name} selected for the next task message.",
+                                        payload={"name": info.name},
+                                    ))
+                                except (OSError, ValueError) as exc:
+                                    frontend.emit(AgentEvent("error", f"Cannot select Skill: {exc}"))
+                            continue
                         if next_task.kind == "resume":
                             try:
                                 if next_task.target:
@@ -3791,6 +3831,7 @@ async def run_interactive_agent(args: argparse.Namespace, frontend: AgentFronten
                     current_args = copy.copy(args)
                     current_args.resume = str(result.path)
                     current_args.task = next_task
+                    current_args.preselected_skill = selected_skill_name
                     break
                 if next_task is None:
                     break

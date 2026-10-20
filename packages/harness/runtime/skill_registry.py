@@ -153,7 +153,7 @@ class SkillRegistry:
                         raise ValueError("name does not match directory")
                     info = SkillInfo(name, description, resolved, source, hashlib.sha256(raw.encode("utf-8")).hexdigest())
                     documents.append(SkillDocument(info, body))
-                except (OSError, UnicodeError, ValueError) as exc:
+                except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
                     diagnostics.append(f"{source}/{folder.name}: {exc}")
         counts = Counter(document.info.name for document in documents)
         for name, count in sorted(counts.items()):
@@ -182,7 +182,10 @@ class SkillRegistry:
         if document is None:
             raise ValueError(f"Skill '{name}' is unavailable; run /skills reload")
         # Revalidate on use: a file may change or become a symlink after discovery.
-        path = (document.info.path / "SKILL.md").resolve(strict=True)
+        try:
+            path = (document.info.path / "SKILL.md").resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"Skill '{name}' document unavailable: {exc}") from exc
         if not path.is_relative_to(document.info.path):
             raise ValueError(f"Skill '{name}' now escapes its directory")
         raw = _read_text(path, MAX_SKILL_BYTES)
@@ -198,7 +201,7 @@ class SkillRegistry:
             raise ValueError("Skill reference must be a relative path within the Skill")
         try:
             path = (document.info.path / relative).resolve(strict=True)
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             raise ValueError(f"Skill reference unavailable: {relative_path}") from exc
         if not path.is_relative_to(document.info.path):
             raise ValueError("Skill reference escapes its directory")

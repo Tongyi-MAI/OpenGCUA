@@ -35,3 +35,4 @@ class SkillRuntime:
 
     def reset_task(self) -> None:
         self._loaded.clear()
+        self.registry.discover()

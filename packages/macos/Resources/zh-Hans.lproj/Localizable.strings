@@ -1,5 +1,7 @@
 /* OpenGCUA application UI. Chat content is never translated. */
 "通用" = "通用";
+"已加载 Skill：" = "已加载 Skill：";
+"Skill 警告：" = "Skill 警告：";
 "模型" = "模型";
 "权限" = "权限";
 "语音" = "语音";
