@@ -95,6 +95,14 @@ class AgentPrompt:
     empty_exits: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class TerminalCommand:
+    """A host-side command, never a model-facing user message."""
+
+    kind: Literal["resume", "compaction"]
+    target: str | None = None
+
+
 ConsentChoice = Literal["allow", "reject", "cancel"]
 
 

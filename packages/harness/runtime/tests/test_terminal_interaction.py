@@ -1,4 +1,5 @@
 from terminal_interaction import TerminalInteraction
+import agent_events
 
 
 def test_messages_queue_fifo_during_turn_and_release_after_normal_finish():
@@ -41,3 +42,35 @@ def test_queue_clear_and_blank_submit():
     state.finish_turn(normal=True)
     assert state.queued_messages() == ()
     assert state.next_message() is None
+
+
+def test_control_command_shares_fifo_without_becoming_chat_text():
+    state = TerminalInteraction()
+    command = agent_events.TerminalCommand("compaction")
+    state.begin_turn()
+    assert state.submit("task A") == "queued"
+    assert state.submit_control(command) == "queued"
+    assert state.submit("task B") == "queued"
+    assert state.queued_items() == ("task A", command, "task B")
+    state.finish_turn(normal=True)
+    assert state.next_item() == "task A"
+    assert state.next_message() is None  # A control item must not become chat text.
+    assert state.next_item() == command
+    assert state.next_item() == "task B"
+
+
+def test_abort_suspends_mixed_queue_until_explicit_release_or_clear():
+    state = TerminalInteraction()
+    command = agent_events.TerminalCommand("resume", "/tmp/a run")
+    state.begin_turn()
+    state.submit_control(command)
+    state.submit("later")
+    state.finish_turn(normal=False)
+    assert state.next_item() is None
+    assert state.queued_items() == (command, "later")
+    state.resume_queue()
+    assert state.next_item() == command
+    assert state.next_item() == "later"
+    state.submit_control(command)
+    state.clear_queue()
+    assert state.queued_items() == ()
