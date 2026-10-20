@@ -33,6 +33,9 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from skill_registry import SkillRegistry
+from skill_runtime import SkillRuntime
+
 
 CTRL_PREFIX = "__MAC_AGENT_CTRL__ "
 MAX_STDOUT_BYTES = 256 * 1024
@@ -2748,6 +2751,13 @@ def _bootstrap(loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
     # keepalive for the initial session too (not only after reconnect), otherwise a
     # long model/web/Python-only interval lets CuaDriver's 300s lease expire.
     _start_keepalive(loop)
+    roots = tuple(Path(root) for root in _CONFIG.get("skill_roots", ()))
+    skill_registry = SkillRegistry(roots[0], roots[1], roots[2:]) if len(roots) >= 2 else SkillRegistry(
+        Path(__file__).resolve().parents[1] / "skills",
+        Path.home() / "Library/Application Support/Generalist/skills",
+    )
+    skill_registry.discover()
+    skill_runtime = SkillRuntime(skill_registry, _emit)
     namespace: dict[str, Any] = {
         "__name__": "__main__",
         "__builtins__": __builtins__,
@@ -2774,6 +2784,7 @@ def _bootstrap(loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
         "ui": _SDK_DEVICE.ui,
         "web": _SDK_WEB,
         "asyncio": asyncio,
+        "skills": skill_runtime,
     }
     global _EXEC_NAMESPACE
     _EXEC_NAMESPACE = namespace
@@ -3007,6 +3018,7 @@ def _worker_requests(loop, namespace) -> int:
                     # 每轮更新账本内容，始终使用同一个 todo 对象。
                     namespace["todo"] = todo
                     if request.get("reset_task"):
+                        namespace["skills"].reset_task()
                         session, device = loop.run_until_complete(_reset_sdk_session())
                         namespace.update(mu=session, device=device, ui=device.ui)
                     if request.get("reset_output_context") and _MAI_SESSION is not None:

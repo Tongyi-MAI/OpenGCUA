@@ -641,6 +641,7 @@ def test_bootstrap_injects_actual_sdk_handles(monkeypatch):
         assert namespace["mu"] is code_runtime._MAI_SESSION
         assert namespace["device"] is code_runtime._SDK_DEVICE
         assert namespace["ui"] is code_runtime._SDK_DEVICE.ui
+        assert isinstance(namespace["skills"], code_runtime.SkillRuntime)
         assert "cua" not in namespace and "pyautogui" not in namespace and "emit" not in namespace
         loop.run_until_complete(code_runtime._close_sdk_session(close_runtime=True))
     finally:

@@ -900,6 +900,7 @@ class CodeExecutor:
         overlay_handler=None,
         approval_handler=None,
         image_dir: Path | None = None,
+        skill_roots: tuple[Path, ...] = (),
     ) -> None:
         if ui_api not in {"mai-ui", "legacy-cua"}:
             raise ValueError("ui_api 必须是 mai-ui 或 legacy-cua")
@@ -907,6 +908,7 @@ class CodeExecutor:
         self.overlay_handler = overlay_handler
         self.approval_handler = approval_handler
         self.image_dir = image_dir.resolve() if image_dir is not None else None
+        self.skill_roots = tuple(Path(root).resolve() for root in skill_roots)
         self.runtime_path = runtime_path.resolve()
         self.work_dir = work_dir.resolve()
         self.rpc_socket = rpc_socket.resolve()
@@ -967,6 +969,7 @@ class CodeExecutor:
             "enable_bash": self.enable_bash,
             "work_dir": str(self.work_dir),
             "image_dir": str(self.image_dir) if self.image_dir is not None else None,
+            "skill_roots": [str(root) for root in self.skill_roots],
         }
 
     async def _watch_worker(
