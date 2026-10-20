@@ -92,7 +92,7 @@ _NATIVE_GUIDE = """## 原生窗口：绑定 → 观察 → 操作 → 核验
 读控件：ax = await ui.ax.observe()；在 ax.tree.nodes 中按 role/name/text 筛选；长树可用 ax.text.search/page/read。需要模型看见时 await mu.emit(ax)。
 读外观：vision = await ui.vision.observe()；image = vision.images[0]；需要模型看见时 await mu.emit(vision)。
 后台控件点击：await ui.ax.click(node)；后台 AXValue 写入只在控件确实支持时 await ui.ax.set_text(node, value)，并核验。
-可见点击：仅在用户授权或演示模式下先 await win.activate()，再重新观察目标窗；有节点时 await ui.vision.click(node, image=image, delivery="foreground")；无节点时从截图生成 point，再 await ui.vision.click(point, delivery="foreground")。
+可见点击：绑定精确窗口后 await win.activate()；宿主会就本任务/窗口申请一次授权，演示模式也不豁免。再重新观察目标窗；有节点时 await ui.vision.click(node, image=image, delivery="foreground")；无节点时从截图生成 point，再 await ui.vision.click(point, delivery="foreground")。
 可见输入：确认目标窗和编辑焦点后 await ui.input.text(value, delivery="foreground")；需要组合键用 await ui.input.press_key("a", modifiers=["meta"], delivery="foreground")。
 滚动：point = image.point(x, y, space="normalized_1000")；await ui.vision.scroll("down", x=point, y=None, amount=3, unit="lines")。
 核验：回执只证明动作送达；在写入、导航、翻页和焦点依赖的字段组后重新观察，确认实际结果。不要在一段 Tab 链中跨几十个字段盲做。

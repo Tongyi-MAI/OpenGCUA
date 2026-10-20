@@ -48,18 +48,23 @@ def test_android_and_stale_points_do_not_guard_the_mac():
 @pytest.mark.parametrize("fail", [False, True])
 def test_worker_waits_for_ack_and_releases_overlay_even_on_action_error(monkeypatch, fail):
     d = device(); calls = []
+    d._app_id, d._window_id = "app:test", "window:7"
     class Session:
         async def _request(self, dev, message):
-            assert calls == ["begin", "ack"]
+            assert calls == ["approval", "begin", "ack"]
             calls.append("dispatch")
             if fail: raise ValueError("provider failed")
             return {"execution": "completed"}
     session = Session()
     worker, parent = socket.socketpair(); worker.settimeout(.1)
-    monkeypatch.setattr(code_runtime, "_CONFIG", {"overlay_guard": True})
+    monkeypatch.setattr(code_runtime, "_CONFIG", {"overlay_guard": True, "gui_approval": True})
     monkeypatch.setattr(code_runtime, "_CONTROL_SOCKET", worker)
     monkeypatch.setattr(code_runtime, "_record_tool", lambda *a, **k: None)
     def emit(event):
+        if event["type"] == "gui_approval_request":
+            calls.append("approval")
+            parent.sendall((json.dumps({"kind": "gui_approval_ack", "request_id": event["request_id"], "approved": True})+'\n').encode())
+            return
         calls.append(event["phase"])
         if event["phase"] == "begin":
             parent.sendall((json.dumps({"kind": "overlay_ack", "guard_id": event["guard_id"], "ready": True})+'\n').encode())
@@ -70,7 +75,7 @@ def test_worker_waits_for_ack_and_releases_overlay_even_on_action_error(monkeypa
         if fail:
             with pytest.raises(ValueError, match="provider failed"): asyncio.run(session._request(d, click()))
         else: asyncio.run(session._request(d, click()))
-        assert calls == ["begin", "ack", "dispatch", "end"]
+        assert calls == ["approval", "begin", "ack", "dispatch", "end"]
     finally:
         worker.close(); parent.close()
 

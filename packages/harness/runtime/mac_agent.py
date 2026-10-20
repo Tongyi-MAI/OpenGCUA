@@ -394,14 +394,16 @@ BACKGROUND_MODE_NOTE = r"""
 - 默认不抢占用户鼠标、键盘或焦点。原生 App 先按精确窗口观察 AX 树并操作节点、核验结果；AX 拒绝或效果未核实时，先尝试同窗截图定位和后台投递，不能直接升级前台。网页先用 DOM/Playwright，不以网页 AX 树代替 DOM。
 - isolated web 是有界面的任务专属浏览器，但后台模式按需启动：web 为 None 且确需网页时，先 web = await reset_web()。使用 pg.locator 等 DOM 操作，不主动激活浏览器；有界面不等于自动获得前台授权。attach/borrow 用户 Chrome 必须显式 opt-in。
 - 未运行的原生 App 优先 await device.apps.launch(已确认的 bundle ID, timeout_ms=30000)，这是驱动的后台启动路径；随后列窗、绑定、观察。不要调用会置前的 app.launch()/activate()，也不要用 open -a 或 open -g -a 代替后台启动。若后台启动或后续后台动作确实失败，再评估是否需要前台。
-- 确需占用焦点、真实键鼠或 delivery="foreground" 时，先用 ask_user 申请一次“前台接管”：说明本任务中要接管的 App/窗口、目的和预计操作范围。只有用户明确同意后，才连续执行该范围内的一系列前台动作；不要为每个前台动作重复询问。用户拒绝、换了任务或超出已说明范围时，停止前台操作，改走后台路径或重新询问。接管结束即回到后台；重大或不可逆操作仍按通用规则单独确认。
-- 桌面截图可了解态势，但不据此直接前台点击。上述接管边界依靠 prompt 与用户答复，不是执行层强制门禁。
+- 所有 SDK vision.click（包括后台投递）、delivery="foreground" 的键鼠动作和 win.activate() 都须绑定精确 App/窗口；宿主会在首次调用前暂停并向用户申请该任务/窗口的一次授权，后续同范围动作不重复询问。不要再用 ask_user 重复申请同一授权；用户拒绝就走后台 AX 路径或停止。重大或不可逆操作仍须单独确认。
+- 前台键鼠前先 await win.activate() 激活获准的精确窗口。若用户中途切换焦点，SDK 会以 INPUT_REFUSED 拒绝下一次前台动作；不要重放点击，先核实状态和用户意图。桌面截图可了解态势，但无精确窗口绑定时不能据此点击。
+- 门禁只覆盖本 harness 的 SDK 调用；普通 Python/Bash 能绕过它，不是操作系统沙箱，不得用其它输入库规避授权。
 """
 
 DEMO_MODE_NOTE = r"""
 
 ## 演示/前台模式（已开启，用于录制 demo）
 - 本模式覆盖通用的后台优先路线：需要展示的操作先将精确目标窗口置前，再用 delivery="foreground" 的真实键鼠完成；AX 可用于读取、定位和核验，不能把静默 AX 写入当作可见输入。
+- 演示模式仍须经过 SDK 的任务/窗口 GUI 授权；它不自动授予前台接管。
 - 若用户明确要求 GUI-only，只通过 GUI 读取和修改目标；若只要求操作可见，可用代码只读分析资料，但对目标应用/产物的修改与保存必须在可见 GUI 中完成。
 - web 保持可见；需录到网页操作时，将目标浏览器窗口/标签置前（具体方法按 mu.help("playwright")）。连续动作不为演示人为 sleep，只在界面确实加载时短暂等待；不隐藏或最小化目标窗口。
 - 观察和业务核验照常；重大或不可逆操作仍须取得授权。
@@ -536,7 +538,7 @@ MAI_UI_SYSTEM_PROMPT = r"""
 ## 原生任务速查
 绑定：apps = await device.apps.list()；按真实 id 选 app = await device.apps.get(id)；windows = await app.windows.list()；按精确 id 选 win = await app.windows.get(id)；ui = win.ui。健康且窗口未变时复用 win/ui，不每步重绑。
 观察：ax = await ui.ax.observe()；从 ax.tree.nodes 按 role/name/text 找 node；需要看外观时 vision = await ui.vision.observe()，image = vision.images[0]。观察默认静默；只在模型需要看到时 await mu.emit(ax) 或 await mu.emit(vision)。已有观察可在 Python 中搜索、筛选，不重复抓取。
-操作：后台控件点击用 await ui.ax.click(node)；AX 不适用且同窗截图可靠时可 await ui.vision.click(node,image=image)，默认仍为后台投递。仅在已获前台接管同意或演示模式下，可见点击才先 await win.activate() 再观察同窗口截图，用 await ui.vision.click(node,image=image,delivery="foreground")；没有可靠节点才从刚观察的 image 生成 point。可见输入先确认焦点，再 await ui.input.text(value,delivery="foreground")。
+操作：后台控件点击用 await ui.ax.click(node)；AX 不适用且同窗截图可靠时可 await ui.vision.click(node,image=image)，默认仍为后台投递，但首次视觉点击会触发宿主授权。可见点击先 await win.activate()（宿主会询问），再观察同窗口截图，用 await ui.vision.click(node,image=image,delivery="foreground")；没有可靠节点才从刚观察的 image 生成 point。可见输入先确认焦点，再 await ui.input.text(value,delivery="foreground")。
 核验：输入后查字段值或可见状态；布局、窗口、页面或资源变化后重新观察。不要把后台 AX 点击的回执当成前台键盘焦点证明。更多配方用 mu.help("native")，精确签名分别查 mu.help("ax")、mu.help("vision")、mu.help("input")；能力限制用 await win.capabilities()。
 
 ## 运行时与预置对象

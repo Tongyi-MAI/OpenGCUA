@@ -10,6 +10,7 @@ version = 0
 calls = []
 closed = set()
 expired = False
+frontmost_window = 1
 png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + struct.pack(">II", 100, 200)).decode()
 for line in sys.stdin:
     q = json.loads(line)
@@ -34,6 +35,8 @@ for line in sys.stdin:
             closed.add(args["window_id"])
         elif name == "fixture_expire":
             expired = True
+        elif name == "fixture_set_frontmost":
+            frontmost_window = args["window_id"]
         elif name == "fixture_refuse":
             data = dict(
                 code="background_input_refused",
@@ -48,7 +51,8 @@ for line in sys.stdin:
         elif name == "list_apps":
             data = {
                 "apps": [
-                    dict(pid=os.getpid(), name="Fixture", bundle_id="dev.mai-ui.fixture"),
+                    dict(pid=os.getpid(), name="Fixture", bundle_id="dev.mai-ui.fixture",
+                         active=frontmost_window != 0),
                     dict(pid=None, name="Installed", running=False),
                 ]
             }
@@ -60,6 +64,8 @@ for line in sys.stdin:
                         window_id=i,
                         title=f"Window {i}",
                         bounds=dict(x=0, y=0, width=100, height=200),
+                        layer=0, z_index=100 if i == frontmost_window else 10 - i,
+                        is_on_screen=True, on_current_space=True,
                     )
                     for i in range(1, 10)
                     if i not in closed

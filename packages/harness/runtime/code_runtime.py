@@ -258,6 +258,8 @@ def _emit(event: dict[str, Any]) -> None:
     ).decode("ascii")
     _REAL_STDOUT.write(CTRL_PREFIX + encoded + "\n")
     _REAL_STDOUT.flush()
+    if isinstance(output, _LimitedStream):
+        output.at_line_start = True
 
 
 def _recv_host_ack(kind: str, id_key: str, request_id: str, timeout: float) -> dict[str, Any] | None:
@@ -298,8 +300,20 @@ async def _request_gui_approval(
         _recv_host_ack, "gui_approval_ack", "request_id", request_id, 120,
     )
     return reply is not None and reply.get("approved") is True
-    if isinstance(output, _LimitedStream):
-        output.at_line_start = True
+
+
+def gui_action_scope(device: Any, message: dict[str, Any]) -> tuple[str, str, bool, bool] | None:
+    """Classify macOS SDK calls requiring task/window GUI consent."""
+    if getattr(device, "platform", None) != "macos" or message.get("op") != "action":
+        return None
+    action = message.get("action")
+    needs_vision = action == "point_click"
+    needs_foreground = action == "activate" or message.get("delivery") == "foreground"
+    if not needs_vision and not needs_foreground:
+        return None
+    app_id = message.get("app_id") or getattr(device, "_app_id", None) or ""
+    window_id = message.get("window_id") or getattr(device, "_window_id", None) or ""
+    return str(app_id), str(window_id), needs_vision, needs_foreground
 
 
 def _check_active_request() -> None:
@@ -2316,6 +2330,23 @@ def _instrument_sdk_session(session: Any) -> None:
     control_ack_lock = asyncio.Lock()
     async def traced(device, message):
         from overlay_guard import impact
+        scope = gui_action_scope(device, message)
+        if scope is not None:
+            from mai_ui import MuError
+            app_id, window_id, needs_vision, needs_foreground = scope
+            attached_app = getattr(device, "_app_id", None)
+            attached_window = getattr(device, "_window_id", None)
+            if (not app_id or not window_id
+                    or (attached_app and app_id != attached_app)
+                    or (attached_window and window_id != attached_window)):
+                raise MuError("INPUT_REFUSED", "GUI approval requires an exact bound app/window target")
+            async with control_ack_lock:
+                approved = await _request_gui_approval(
+                    app_id, window_id,
+                    needs_vision=needs_vision, needs_foreground=needs_foreground,
+                )
+            if not approved:
+                raise MuError("PERMISSION_DENIED", "GUI approval was denied or unavailable; action not dispatched")
         footprint = impact(device, message) if _CONFIG.get("overlay_guard") else None
         if footprint is None:
             return await traced_call(device, message)

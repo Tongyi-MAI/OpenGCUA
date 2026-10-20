@@ -1,6 +1,46 @@
 use super::*;
 
 impl MacosProvider {
+    async fn require_frontmost_window(&self, pid: i64, window_id: u64) -> Result<(), Error> {
+        let apps = self.tool("list_apps", json!({})).await?;
+        let active = apps["structuredContent"]["apps"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["active"] == true))
+            .and_then(|row| row["pid"].as_i64());
+        if active != Some(pid) {
+            return Err(error("INPUT_REFUSED", "target app is no longer frontmost; activate the exact window and retry"));
+        }
+        let windows = self.tool("list_windows", json!({"on_screen_only":true})).await?;
+        let rows = windows["structuredContent"]["windows"]
+            .as_array()
+            .ok_or_else(|| error("INPUT_REFUSED", "cannot verify the frontmost window"))?;
+        let mut highest: Option<(i64, i64, u64)> = None;
+        let mut tie = false;
+        for row in rows {
+            if row["layer"].as_i64() != Some(0)
+                || row["is_on_screen"] != true
+                || row["on_current_space"] != true
+            {
+                continue;
+            }
+            let Some(z) = row["z_index"].as_i64() else { continue };
+            let Some(row_pid) = row["pid"].as_i64().or_else(|| row["owner_pid"].as_i64()) else { continue };
+            let Some(row_window) = row["window_id"].as_u64().or_else(|| row["id"].as_u64()) else { continue };
+            match highest {
+                None => { highest = Some((z, row_pid, row_window)); tie = false; }
+                Some((top, _, _)) if z > top => {
+                    highest = Some((z, row_pid, row_window)); tie = false;
+                }
+                Some((top, _, _)) if z == top => { tie = true; }
+                _ => {}
+            }
+        }
+        if tie || highest.map(|(_, p, w)| (p, w)) != Some((pid, window_id)) {
+            return Err(error("INPUT_REFUSED", "target window is no longer frontmost or its focus cannot be verified"));
+        }
+        Ok(())
+    }
+
     pub(super) async fn action(&self, q: &Value) -> Result<Value, Error> {
         let action = text(q, "action");
         if self.managed_input && matches!(action, "key_up" | "button_up" | "release_all") {
@@ -80,6 +120,7 @@ impl MacosProvider {
                 .apps
                 .get(&w.app_id)
                 .ok_or_else(|| error("STALE_TARGET", "app ended"))?;
+            let target_pid = app.pid;
             args["pid"] = json!(app.pid);
             args["window_id"] = json!(w.native_id);
             if let Some(node) = q["node_id"].as_str() {
@@ -94,6 +135,10 @@ impl MacosProvider {
                     return Err(error("STALE_TARGET", "AX token was superseded"));
                 }
                 args["element_token"] = q["target_token"].clone();
+            }
+            drop(state);
+            if delivery == "foreground" {
+                self.require_frontmost_window(target_pid, w.native_id).await?;
             }
         } else if delivery != "foreground" && !matches!(action, "set_frame" | "invoke_menu") {
             return Err(error(

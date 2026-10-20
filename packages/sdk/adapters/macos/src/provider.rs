@@ -841,6 +841,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreground_typing_refuses_when_target_window_focus_cannot_be_verified() {
+        let mut command = tokio::process::Command::new("python3");
+        command.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture/mock_cua.py"));
+        let p = MacosProvider::connect_command(command, tempfile::tempfile().unwrap(), false)
+            .await.unwrap();
+        let apps = call(&p, json!({"op":"list_apps"})).await;
+        let app = &apps["apps"][0]["id"];
+        let inventory = call(&p, json!({"op":"list_windows","app_id":app})).await;
+        let window = &inventory["windows"][0]["id"];
+        p.tool("fixture_set_frontmost", json!({"window_id":2})).await.unwrap();
+        let error = p.request(serde_json::from_value(json!({
+            "op":"action", "action":"input_text", "app_id":app,
+            "window_id":window, "text":"hello", "delivery":"foreground"
+        })).unwrap()).await.unwrap().error.unwrap();
+        assert_eq!(error.code, "INPUT_REFUSED");
+        let calls = p.tool("fixture_get_calls", json!({})).await.unwrap();
+        assert!(!calls["structuredContent"]["calls"].as_array().unwrap()
+            .iter().any(|call| call["name"] == "type_text"));
+        p.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_typing_targets_verified_frontmost_window() {
+        let mut command = tokio::process::Command::new("python3");
+        command.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture/mock_cua.py"));
+        let p = MacosProvider::connect_command(command, tempfile::tempfile().unwrap(), false)
+            .await.unwrap();
+        let apps = call(&p, json!({"op":"list_apps"})).await;
+        let app = &apps["apps"][0]["id"];
+        let inventory = call(&p, json!({"op":"list_windows","app_id":app})).await;
+        let window = &inventory["windows"][0]["id"];
+        call(&p, json!({
+            "op":"action", "action":"input_text", "app_id":app,
+            "window_id":window, "text":"hello", "delivery":"foreground"
+        })).await;
+        let calls = p.tool("fixture_get_calls", json!({})).await.unwrap();
+        assert!(calls["structuredContent"]["calls"].as_array().unwrap()
+            .iter().any(|entry| entry["name"] == "type_text"));
+        p.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn desktop_hover_preserves_foreground_consent_and_refuses_background() {
         let mut command = tokio::process::Command::new("python3");
         command.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture/mock_cua.py"));

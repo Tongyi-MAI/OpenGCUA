@@ -332,7 +332,7 @@ def test_background_prompt_uses_ax_first_and_one_consented_takeover(monkeypatch)
     assert "device.apps.launch" in prompt
     assert "AX" in prompt and "后台投递" in prompt
     assert "前台接管" in prompt and "ask_user" in prompt
-    assert "每个前台动作" in prompt
+    assert "后续同范围动作不重复询问" in prompt
     assert "无头" not in mac_agent.BACKGROUND_MODE_NOTE
 
 
@@ -668,6 +668,109 @@ def test_sdk_request_instrumentation_emits_tool_audit(monkeypatch):
     assert events[-1]["type"] == "tool_call"
     assert events[-1]["tool"] == "mai_ui.action.click"
     assert events[-1]["ok"] is True
+
+
+@pytest.mark.parametrize("action,delivery,needs_vision,needs_foreground", [
+    ("point_click", "background", True, False),
+    ("point_click", "foreground", True, True),
+    ("activate", None, False, True),
+    ("input_text", "foreground", False, True),
+    ("press_key", "foreground", False, True),
+    ("drag", "foreground", False, True),
+    ("move", "foreground", False, True),
+    ("click", "background", False, False),
+    ("set_text", "background", False, False),
+])
+def test_gui_action_scope_classifies_protected_dispatch(
+    action, delivery, needs_vision, needs_foreground,
+):
+    device = types.SimpleNamespace(platform="macos", _app_id="app:a", _window_id="window:7")
+    message = {"op": "action", "action": action}
+    if delivery is not None:
+        message["delivery"] = delivery
+    result = code_runtime.gui_action_scope(device, message)
+    expected = ("app:a", "window:7", needs_vision, needs_foreground)
+    assert result == expected if needs_vision or needs_foreground else result is None
+
+
+def test_protected_sdk_action_waits_for_approval_and_denial_never_dispatches(monkeypatch):
+    from mai_ui import MuError
+    sequence = []
+
+    class Session:
+        async def _request(self, device, message):
+            sequence.append("dispatch")
+            return {"execution": "completed"}
+
+    async def deny(*_args, **_kwargs):
+        sequence.append("approval")
+        return False
+
+    monkeypatch.setattr(code_runtime, "_CONFIG", {"gui_approval": True, "overlay_guard": False})
+    monkeypatch.setattr(code_runtime, "_request_gui_approval", deny)
+    monkeypatch.setattr(code_runtime, "_record_tool", lambda *a, **k: None)
+    session = Session()
+    code_runtime._instrument_sdk_session(session)
+    device = types.SimpleNamespace(platform="macos", _app_id="app:a", _window_id="window:7")
+    with pytest.raises(MuError, match="approval"):
+        asyncio.run(session._request(device, {
+            "op": "action", "action": "point_click", "delivery": "background",
+        }))
+    assert sequence == ["approval"]
+
+
+def test_background_ax_action_dispatches_without_approval(monkeypatch):
+    sequence = []
+
+    class Session:
+        async def _request(self, device, message):
+            sequence.append("dispatch")
+            return {"execution": "completed"}
+
+    async def deny(*_args, **_kwargs):
+        sequence.append("approval")
+        return False
+
+    monkeypatch.setattr(code_runtime, "_CONFIG", {"gui_approval": True, "overlay_guard": False})
+    monkeypatch.setattr(code_runtime, "_request_gui_approval", deny)
+    monkeypatch.setattr(code_runtime, "_record_tool", lambda *a, **k: None)
+    session = Session()
+    code_runtime._instrument_sdk_session(session)
+    device = types.SimpleNamespace(platform="macos", _app_id="app:a", _window_id="window:7")
+    asyncio.run(session._request(device, {
+        "op": "action", "action": "set_text", "delivery": "background",
+    }))
+    assert sequence == ["dispatch"]
+
+
+@pytest.mark.parametrize("app_id,window_id,message", [
+    ("app:a", None, {"op": "action", "action": "point_click"}),
+    ("app:a", "window:7", {"op": "action", "action": "input_text",
+                            "delivery": "foreground", "window_id": "window:8"}),
+])
+def test_protected_action_refuses_missing_or_mismatched_window_before_approval(
+    monkeypatch, app_id, window_id, message,
+):
+    from mai_ui import MuError
+    calls = []
+
+    class Session:
+        async def _request(self, device, query):
+            calls.append("dispatch")
+            return {"execution": "completed"}
+
+    async def approve(*_args, **_kwargs):
+        calls.append("approval")
+        return True
+
+    monkeypatch.setattr(code_runtime, "_CONFIG", {"gui_approval": True})
+    monkeypatch.setattr(code_runtime, "_request_gui_approval", approve)
+    session = Session()
+    code_runtime._instrument_sdk_session(session)
+    device = types.SimpleNamespace(platform="macos", _app_id=app_id, _window_id=window_id)
+    with pytest.raises(MuError, match="exact bound app/window"):
+        asyncio.run(session._request(device, message))
+    assert calls == []
 
 
 def test_sdk_output_translates_text_and_image(monkeypatch, tmp_path):
