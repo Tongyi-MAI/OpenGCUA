@@ -282,21 +282,23 @@ On a normal interactive terminal this opens the visual CLI. Redirected stdin/std
 ```
 
 Each submitted message becomes a new task in the **same persistent session**: interpreter state,
-bindings, TODOs, and history carry across turns. The visual interface uses normal terminal
-scrollback rather than an alternate screen, so completed output remains searchable and copyable.
+bindings, TODOs, and history carry across turns. The visual interface uses an alternate screen
+that is cleared on exit; saved run trajectories remain on disk.
 
 | Input | Behavior |
 |---|---|
 | Enter | Submit the current message. |
 | Alt/Option+Enter | Insert a newline. Bracketed multiline paste remains one logical message. |
+| `/`, ↑/↓, Tab | Browse slash commands, select a suggestion, and complete its name or argument. Enter runs a complete command or inserts one that still needs an argument. This menu is available in the visual TUI, not plain mode. |
 | While the agent runs, Enter | Queue a message for the next normal turn; the fixed input area stays editable. |
 | `/queue`, `/queue send`, `/queue clear` | Inspect, resume, or discard queued messages. An abort suspends the queue; a new correction can still be sent immediately. |
 | `/help` | Show terminal commands and shortcuts. |
+| `/status` | Show the session, model, step, phase, queued-message count, and foreground-permission state. |
 | `/reasoning on\|off` | Show or hide reasoning emitted after the command. It is hidden by default. |
 | `/code on\|off` | Show or hide generated code emitted after the command. It is hidden by default. |
 | `/clear` | Clear visible terminal output without clearing the agent session or trajectory. |
 | `/new <message>` | Start a fresh task boundary and invalidate old UI observations while keeping the healthy interpreter session. |
-| `/exit`, `/quit`, or Ctrl-D | End the session. |
+| `/exit`, `/quit`, or Ctrl-D | End the program. During an active turn, the current work is stopped; use Ctrl-C instead to interrupt only the turn and keep chatting. |
 | Ctrl-C during an active step | Abort this turn but keep its task context and foreground consent. A second Ctrl-C force-stops a resistant worker. Already-issued actions are not rolled back. |
 | Foreground consent choice | When an SDK action requires foreground focus, mouse, or keyboard, use arrows/Tab to select Allow or Reject and Enter to confirm. Reject is selected by default; permission lasts only for this task. Background AX/visual clicks do not trigger it. |
 

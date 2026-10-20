@@ -177,8 +177,13 @@ The visual terminal keeps an input box available while the agent works. Press En
 message for after the current turn, or Alt/Option+Enter for a newline. `/queue` shows pending
 messages; after Ctrl-C aborts a turn, `/queue send` resumes the paused queue or `/queue clear`
 discards it. A new correction can be entered immediately after the abort in the same task.
+Type `/` to browse terminal commands, use ↑/↓ to select one, and Tab to complete it. Enter
+runs a complete command or inserts one that still needs an argument. `/status` shows the current
+session, model, step, queue, and foreground-permission state.
 Reasoning and generated code are hidden by default; `/reasoning on`, `/code on`, and `/help`
 control the display. A second Ctrl-C during interruption force-stops the current worker.
+`/exit` or Ctrl-D ends the program, including during an active turn; Ctrl-C only interrupts the
+turn and keeps the conversation open.
 Already-sent application or shell operations are not rolled back.
 
 The macOS agent defaults to background-first operation. Its dedicated browser has a visible
