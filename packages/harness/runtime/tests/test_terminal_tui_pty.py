@@ -106,6 +106,50 @@ asyncio.run(main())
     assert "EXITED" in output
 
 
+def test_resume_selector_in_narrow_terminal_moves_and_selects_without_task():
+    source = '''import asyncio
+from pathlib import Path
+from resume_catalog import ResumeCandidate
+from terminal_tui import RichTerminalFrontend
+async def main():
+    ui = RichTerminalFrontend()
+    ui.start()
+    candidates = tuple(ResumeCandidate(Path('/tmp/run' + str(i)), 's' + str(i), 'task' + str(i), 'success', '2026-10-20', i, 0) for i in range(3))
+    selected = await ui.choose_resume(candidates)
+    print('SELECTED=' + repr(selected.path if selected else None), flush=True)
+    print('QUEUED=' + repr(ui.queued_messages()), flush=True)
+    await ui.stop()
+asyncio.run(main())
+'''
+    code, output = run_in_pty(source, [(.4, b"\x1b[B\r")], terminal_size=(8, 30))
+    assert code == 0, output
+    assert "RESUME" in output
+    assert "SELECTED=PosixPath('/tmp/run1')" in output
+    assert "QUEUED=()" in output
+
+
+@pytest.mark.parametrize("cancel", [b"\x1b", b"\x03"])
+def test_resume_selector_cancels_without_task(cancel):
+    source = '''import asyncio
+from pathlib import Path
+from resume_catalog import ResumeCandidate
+from terminal_tui import RichTerminalFrontend
+async def main():
+    ui = RichTerminalFrontend()
+    ui.start()
+    candidate = ResumeCandidate(Path('/tmp/one'), 's', 'task', 'success', '2026-10-20', 1, 0)
+    selected = await ui.choose_resume((candidate,))
+    print('SELECTED=' + repr(selected), flush=True)
+    print('QUEUED=' + repr(ui.queued_messages()), flush=True)
+    await ui.stop()
+asyncio.run(main())
+'''
+    code, output = run_in_pty(source, [(.5, cancel)], terminal_size=(8, 30))
+    assert code == 0, output
+    assert "SELECTED=None" in output
+    assert "QUEUED=()" in output
+
+
 def test_short_conversation_has_no_scrollbar_arrows():
     source = '''import asyncio
 from terminal_tui import RichTerminalFrontend

@@ -39,6 +39,7 @@ from model_stream import (
     ContextBudgetError, ContextWindowError, ModelOutputTruncated,
     extract_reasoning, parse_code_action,
 )
+from resume_catalog import UI_API_MARKERS, validate_trajectory_ui_api
 
 
 DEFAULT_MODEL_NAME = llm_entry.DEFAULT_MODEL_NAME
@@ -386,7 +387,6 @@ getApp 可能绑定已有窗口，不代表获得接管授权；上述约束同�
 
 
 # SYSTEM_PROMPT 仅用于显式 legacy-cua；CLI、上下文与执行器默认统一 mai-ui。
-UI_API_MARKERS = {"mai-ui": "mai-ui/0.3-sdk-macos"}
 
 BACKGROUND_MODE_NOTE = r"""
 
@@ -1790,23 +1790,6 @@ def close_run_logger(logger: logging.Logger) -> None:
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
         handler.close()
-
-
-def validate_trajectory_ui_api(data: dict[str, Any], ui_api: str) -> None:
-    """先核对 API，再允许恢复；只读取标记，绝不转换历史代码或补写旧标记。"""
-    if not isinstance(data, dict):
-        raise AgentError("轨迹必须是 JSON 对象，无法确认 UI API；拒绝恢复")
-    config = data.get("config", {})
-    if not isinstance(config, dict):
-        raise AgentError("轨迹 config 无效，无法确认 UI API；拒绝恢复")
-    recorded_api = config.get("ui_api", "legacy-cua")
-    if not isinstance(recorded_api, str) or recorded_api not in UI_API_MARKERS or recorded_api != ui_api:
-        raise AgentError(
-            f"轨迹 UI API={recorded_api!r} 与当前 --ui-api {ui_api} 不兼容；"
-            "迁移前的本地 Cua 轨迹不能改写标签或直接恢复到 SDK runtime"
-        )
-    if "ui_api_version" in config and config["ui_api_version"] != UI_API_MARKERS[ui_api]:
-        raise AgentError(f"轨迹 UI API 版本不兼容：{config['ui_api_version']!r}；拒绝恢复")
 
 
 def restore_context_from_trajectory(

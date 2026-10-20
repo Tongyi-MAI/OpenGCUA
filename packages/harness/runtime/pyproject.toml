@@ -51,6 +51,7 @@ py-modules = [
   "rich_help",
   "terminal_tui",
   "terminal_interaction",
+  "resume_catalog",
   "web_shim",
 ]
 

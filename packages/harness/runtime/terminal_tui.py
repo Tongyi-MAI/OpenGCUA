@@ -23,6 +23,7 @@ from prompt_toolkit.widgets import TextArea
 
 from agent_events import AgentEvent, AgentPrompt, ConsentChoice, ForegroundApprovalPrompt
 from terminal_interaction import TerminalInteraction
+from resume_catalog import ResumeCandidate
 
 
 UiMode = Literal["tui", "plain"]
@@ -115,6 +116,8 @@ TERMINAL_STYLE = Style.from_dict({
     "approval": "bg:#49371c #fff0d1 bold",
     "approval.selected": "bg:#fff0d1 #30200a bold",
     "approval.unselected": "bg:#49371c #fff0d1",
+    "resume": "bg:#183343 #e2f3f5",
+    "resume.selected": "bg:#64c8d1 #10252e bold",
     "completion-menu": "bg:#243547 #dfeaf5",
     "completion-menu.completion.current": "bg:#40617e #ffffff bold",
     "completion-menu.meta.completion": "bg:#243547 #a5b8c9",
@@ -168,18 +171,25 @@ class RichTerminalFrontend:
             height=4, content=FormattedTextControl(self._approval_card_text, focusable=True),
             style="class:approval", wrap_lines=False,
         )
+        self._resume_card = Window(
+            height=4, content=FormattedTextControl(self._resume_card_text, focusable=True),
+            style="class:resume", wrap_lines=False,
+        )
         self._normal_composer = ConditionalContainer(
             HSplit([self._composer_title, self._input, self._choice]),
-            filter=Condition(lambda: self._approval is None),
+            filter=Condition(lambda: self._approval is None and self._resume_answer is None),
         )
         self._approval_composer = ConditionalContainer(
             self._approval_card, filter=Condition(lambda: self._approval is not None),
+        )
+        self._resume_composer = ConditionalContainer(
+            self._resume_card, filter=Condition(lambda: self._resume_answer is not None),
         )
         self._application = Application(
             layout=Layout(
                 FloatContainer(
                     HSplit([self._header, self._output, self._status,
-                            self._normal_composer, self._approval_composer]),
+                            self._normal_composer, self._approval_composer, self._resume_composer]),
                     [Float(xcursor=True, ycursor=True, transparent=True,
                            content=CompletionsMenu(max_height=8))],
                 ),
@@ -198,6 +208,9 @@ class RichTerminalFrontend:
         self._approval: ForegroundApprovalPrompt | None = None
         self._approval_answer: asyncio.Future[ConsentChoice] | None = None
         self._approval_index = 0  # Reject is the default.
+        self._resume_candidates: tuple[ResumeCandidate, ...] = ()
+        self._resume_answer: asyncio.Future[ResumeCandidate | None] | None = None
+        self._resume_index = 0
         self._turn_started_at: float | None = None
         self._last_progress_at: float | None = None
         self._model_status = ""
@@ -287,6 +300,21 @@ class RichTerminalFrontend:
         choices = ("[Reject]  Allow", "Reject  [Allow]")
         return f" GUI permission · {choices[self._approval_index]} · Arrow/Tab select, Enter confirm "
 
+    def _resume_card_text(self):
+        count = len(self._resume_candidates)
+        if not count:
+            return [("class:resume", " RESUME · no saved runs\n Esc to return")]
+        selected = self._resume_index
+        positions = range(max(0, min(selected - 1, count - 2)), min(count, max(0, min(selected - 1, count - 2)) + 2))
+        lines = [("class:resume", f" RESUME · {selected + 1}/{count}\n")]
+        for index in positions:
+            candidate = self._resume_candidates[index]
+            prefix = " ❯ " if index == selected else "   "
+            label = f"{prefix}{candidate.updated_at[5:16]} {candidate.status} {candidate.last_task[:28]}\n"
+            lines.append(("class:resume.selected" if index == selected else "class:resume", label))
+        lines.append(("class:resume", " ↑/↓ choose · Enter open · Esc cancel"))
+        return lines
+
     def _bindings(self) -> KeyBindings:
         keys = KeyBindings()
 
@@ -296,8 +324,12 @@ class RichTerminalFrontend:
 
         @keys.add("escape", "enter")
         def newline(_event) -> None:
-            if self._approval is None:
+            if self._approval is None and self._resume_answer is None:
                 self._input.buffer.insert_text("\n")
+
+        @keys.add("escape", filter=Condition(lambda: self._resume_answer is not None))
+        def cancel_resume(_event) -> None:
+            self._finish_resume(None)
 
         @keys.add("c-c", eager=True)
         def interrupt(_event) -> None:
@@ -331,10 +363,18 @@ class RichTerminalFrontend:
         def select_allow(_event) -> None:
             self._select_approval(1)
 
+        @keys.add("down", filter=Condition(lambda: self._resume_answer is not None))
+        def next_resume(_event) -> None:
+            self._select_resume(1)
+
+        @keys.add("up", filter=Condition(lambda: self._resume_answer is not None))
+        def previous_resume(_event) -> None:
+            self._select_resume(-1)
+
         return keys
 
     def _slash_menu_open(self) -> bool:
-        return self._approval is None and self._input.buffer.complete_state is not None
+        return self._approval is None and self._resume_answer is None and self._input.buffer.complete_state is not None
 
     def _complete_slash(self) -> None:
         buffer = self._input.buffer
@@ -375,6 +415,8 @@ class RichTerminalFrontend:
             self._abort_callback(True)
         if self._approval_answer is not None:
             self._finish_approval("cancel")
+        if self._resume_answer is not None:
+            self._finish_resume(None)
         if self._pending_read is not None:
             self._finish_read(None)
         if (self._interaction.queued_messages() or self._pending_correction or self._ready_direct) and not self._exit_requested:
@@ -425,6 +467,9 @@ class RichTerminalFrontend:
         self._abort_callback = callback
 
     def handle_sigint(self) -> None:
+        if self._resume_answer is not None:
+            self._finish_resume(None)
+            return
         if self._approval_answer is not None:
             self._finish_approval("cancel")
         if self._pending_kind in {"question", "retry"}:
@@ -464,6 +509,49 @@ class RichTerminalFrontend:
         if not answer.done():
             answer.set_result(choice)
         self._invalidate()
+
+    def _select_resume(self, offset: int) -> None:
+        if self._resume_answer is not None and self._resume_candidates:
+            self._resume_index = (self._resume_index + offset) % len(self._resume_candidates)
+            self._invalidate()
+
+    def _finish_resume(self, candidate: ResumeCandidate | None) -> None:
+        answer = self._resume_answer
+        if answer is None:
+            return
+        self._resume_answer = None
+        self._resume_candidates = ()
+        self._resume_index = 0
+        self._application.layout.focus(self._input)
+        if candidate is None:
+            self._append("\nResume selection cancelled.\n")
+        else:
+            self._append(f"\nResume selected: {candidate.path}\n")
+        if not answer.done():
+            answer.set_result(candidate)
+        self._invalidate()
+
+    async def choose_resume(self, candidates: tuple[ResumeCandidate, ...]) -> ResumeCandidate | None:
+        if self._closed:
+            return None
+        if self._app_task is None:
+            self.start()
+        if not candidates:
+            self._append("\nNo compatible saved sessions found.\n")
+            self._invalidate()
+            return None
+        if self._resume_answer is not None or self._approval_answer is not None:
+            return None
+        self._resume_candidates = candidates
+        self._resume_index = 0
+        self._resume_answer = asyncio.get_running_loop().create_future()
+        self._application.layout.focus(self._resume_card)
+        self._invalidate()
+        try:
+            return await self._resume_answer
+        finally:
+            if self._resume_answer is not None:
+                self._finish_resume(None)
 
     def _request_exit(self) -> None:
         if (self._interaction.queued_messages() or self._pending_correction or self._ready_direct) and not self._exit_requested:
@@ -527,6 +615,9 @@ class RichTerminalFrontend:
         return False
 
     def _submit_enter(self) -> None:
+        if self._resume_answer is not None:
+            self._finish_resume(self._resume_candidates[self._resume_index])
+            return
         if self._approval_answer is not None:
             self._finish_approval("allow" if self._approval_index else "reject")
             return
