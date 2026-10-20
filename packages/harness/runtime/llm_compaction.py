@@ -9,7 +9,7 @@ import json
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Literal
 
 from model_metrics import TokenEstimator, estimate_messages_tokens
 from model_stream import ContextWindowError
@@ -207,11 +207,12 @@ class SimpleContext:
 
 
 async def maybe_compact(
-    context: Any, client: Any, *, current: dict, action_max_tokens: int, force: bool = False,
+    context: Any, client: Any, *, current: dict, action_max_tokens: int,
+    trigger: Literal["auto", "server_limit", "manual"] = "auto",
 ) -> dict | None:
     """仅按动作总预算超限尝试至多提交一份摘要；取消传播，失败可落盘。
 
-    force 仅供服务端明确报告实际上下文超限时补救，不是日常触发开关。
+    server_limit 仅供服务端明确报告实际上下文超限时补救；manual 跳过自动阈值。
     estimated_tokens_before/after 与 budget_before/after 含下一动作输出预留；
     若先推进 micro，before 指推进后的基线，推进前预算另存 before_micro。
     completed 仅表示严格变短且已提交；是否满足额度必须检查 within_budget。
@@ -219,13 +220,13 @@ async def maybe_compact(
     校准只使用各自 purpose；估算器的 scope 与持久化由调用方管理。
     """
     config = context.compaction_config
-    if not config.enabled:
+    if trigger not in {"auto", "server_limit", "manual"}:
+        raise ValueError("不支持的压缩触发类型")
+    if not config.enabled and trigger != "manual":
         return None
     config.validate()
     if type(action_max_tokens) is not int or action_max_tokens < 0:
         raise ValueError("action_max_tokens 必须是非负整数")
-    if type(force) is not bool:
-        raise ValueError("force 必须是布尔值，仅用于服务端上下文超限补救")
     old = context.compaction_state
     total = len(context.turns)
     if type(old.cutoff) is not int or not 0 <= old.cutoff <= total:
@@ -247,6 +248,9 @@ async def maybe_compact(
     def finish(error: str | None = None) -> dict:
         if error is not None:
             record["error"] = error
+        if trigger == "manual" and record["status"] != "completed":
+            context.compaction_state = old
+            context.micro_cutoff = micro_before
         record["elapsed_seconds"] = time.perf_counter() - started
         record["micro_cutoff_before"] = micro_before
         record["micro_cutoff_after"] = context.micro_cutoff
@@ -263,7 +267,9 @@ async def maybe_compact(
                       reserve=action_max_tokens)
 
     def triggers(estimate: dict) -> list[str]:
-        if force:
+        if trigger == "manual":
+            return ["manual"]
+        if trigger == "server_limit":
             return ["server_context_limit"]
         return ["tokens"] if estimate["total_tokens"] > config.trigger_tokens else []
 
@@ -293,7 +299,7 @@ async def maybe_compact(
                       within_budget=before["total_tokens"] <= config.trigger_tokens)
         if pending < 2:
             record["blocked"] = True
-            return finish("上下文超限但未摘要历史不足两整轮，无法压缩；不能安全继续动作请求")
+            return finish("未摘要历史不足两整轮，无法压缩")
 
         keep = max(1, (pending + 2) // 3)
         cutoff = total - keep
