@@ -2,6 +2,7 @@
   "_comment": "Copy this file to local.json (gitignored), then set api_key/model_name/llm_base_url. Keep openai for Chat Completions-compatible endpoints; use openai-thinking for GPT Responses API with encrypted reasoning replay, or anthropic for Anthropic Messages. Set anthropic_thinking for a Claude model that supports the selected mode.",
   "api_key": "",
   "model_name": "qwen3.8-flash",
+  "skills_dirs": [],
   "llm_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
   "llm_protocol": "openai",
   "reasoning_effort": "low",

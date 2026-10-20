@@ -3837,6 +3837,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pyautogui-pause", type=float, default=0.5)
     parser.add_argument("--countdown", type=int, default=3)
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    parser.add_argument("--skills-dir", dest="skills_dirs", action="append", type=Path, default=[],
+                        help="add an absolute Skill discovery root (config key: skills_dirs)")
     boolean_flag(parser, "bash", default=True, help_text="allow bash() in model code")
     boolean_flag(parser, "intent", default=True, help_text="require <intent> output")
     boolean_flag(parser, "todo", default=True, help_text="enable persistent TODO ledger")

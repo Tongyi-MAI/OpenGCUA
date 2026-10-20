@@ -52,6 +52,7 @@ py-modules = [
   "terminal_tui",
   "terminal_interaction",
   "resume_catalog",
+  "skill_registry",
   "web_shim",
 ]
 
