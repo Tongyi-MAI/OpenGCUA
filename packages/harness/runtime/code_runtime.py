@@ -258,6 +258,46 @@ def _emit(event: dict[str, Any]) -> None:
     ).decode("ascii")
     _REAL_STDOUT.write(CTRL_PREFIX + encoded + "\n")
     _REAL_STDOUT.flush()
+
+
+def _recv_host_ack(kind: str, id_key: str, request_id: str, timeout: float) -> dict[str, Any] | None:
+    """Read one fenced host reply. Callers serialize reads for each SDK session."""
+    if _CONTROL_SOCKET is None:
+        return None
+    data = bytearray()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and len(data) < 4096:
+        try:
+            part = _CONTROL_SOCKET.recv(1)
+        except socket.timeout:
+            continue
+        if not part:
+            return None
+        data.extend(part)
+        if part == b"\n":
+            try:
+                reply = json.loads(data)
+            except (ValueError, UnicodeDecodeError):
+                return None
+            return reply if isinstance(reply, dict) and reply.get("kind") == kind and reply.get(id_key) == request_id else None
+    return None
+
+
+async def _request_gui_approval(
+    app_id: str, window_id: str, *, needs_vision: bool, needs_foreground: bool,
+) -> bool:
+    if not _CONFIG.get("gui_approval", True) or _CONTROL_SOCKET is None:
+        return False
+    request_id = uuid.uuid4().hex
+    _emit({
+        "type": "gui_approval_request", "request_id": request_id,
+        "app_id": app_id, "window_id": window_id,
+        "needs_vision": needs_vision, "needs_foreground": needs_foreground,
+    })
+    reply = await asyncio.to_thread(
+        _recv_host_ack, "gui_approval_ack", "request_id", request_id, 120,
+    )
+    return reply is not None and reply.get("approved") is True
     if isinstance(output, _LimitedStream):
         output.at_line_start = True
 
@@ -2273,35 +2313,21 @@ def _instrument_sdk_session(session: Any) -> None:
                      include_tree=False)
         return result
 
-    overlay_lock = asyncio.Lock()
+    control_ack_lock = asyncio.Lock()
     async def traced(device, message):
         from overlay_guard import impact
         footprint = impact(device, message) if _CONFIG.get("overlay_guard") else None
         if footprint is None:
             return await traced_call(device, message)
-        async with overlay_lock:
+        async with control_ack_lock:
             guard_id = uuid.uuid4().hex
             _emit({"type": "overlay_guard", "phase": "begin", "guard_id": guard_id, **footprint})
-            # No other reader consumes the worker control socket during a cell.
-            def acknowledged():
-                data = bytearray()
-                deadline = time.monotonic() + 8
-                while time.monotonic() < deadline and len(data) < 4096:
-                    try:
-                        part = _CONTROL_SOCKET.recv(1)
-                    except socket.timeout:
-                        continue
-                    if not part:
-                        break
-                    data.extend(part)
-                    if part == b"\n":
-                        reply = json.loads(data)
-                        if reply.get("kind") == "overlay_ack" and reply.get("guard_id") == guard_id and reply.get("ready"):
-                            return
-                        break
-                raise RuntimeError("Overlay preparation was not acknowledged; UI operation was not dispatched")
             try:
-                await asyncio.to_thread(acknowledged)
+                reply = await asyncio.to_thread(
+                    _recv_host_ack, "overlay_ack", "guard_id", guard_id, 8,
+                )
+                if reply is None or reply.get("ready") is not True:
+                    raise RuntimeError("Overlay preparation was not acknowledged; UI operation was not dispatched")
                 return await traced_call(device, message)
             finally:
                 _emit({"type": "overlay_guard", "phase": "end", "guard_id": guard_id})

@@ -233,8 +233,28 @@ def test_tui_ctrl_c_at_prompt_discards_input_and_reprompts():
     assert prompt.calls == 2
 
 
+def test_tui_ctrl_c_during_gui_approval_returns_denial():
+    class Prompt:
+        calls = 0
+
+        async def prompt_async(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise KeyboardInterrupt
+            raise EOFError
+
+    prompt = Prompt()
+    ui = RichTerminalFrontend(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        prompt_session=prompt,
+    )
+
+    assert asyncio.run(ui.read(AgentPrompt(kind="approval", text="Allow?"))) is None
+    assert prompt.calls == 1
+
+
 def test_runtime_package_lists_frontend_and_console_protocol_modules():
     pyproject = Path(__file__).parents[1] / "pyproject.toml"
     modules = set(tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["setuptools"]["py-modules"])
 
-    assert {"agent_events", "terminal_tui", "console_protocol"} <= modules
+    assert {"agent_events", "terminal_tui", "console_protocol", "gui_approval"} <= modules

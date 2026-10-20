@@ -89,7 +89,7 @@ class AgentEvent:
 class AgentPrompt:
     """A request for terminal input."""
 
-    kind: Literal["task", "question", "retry"]
+    kind: Literal["task", "question", "retry", "approval"]
     text: str = ""
     empty_exits: bool = False
 
@@ -207,7 +207,7 @@ class PlainFrontend:
         print(text, flush=bool(event.payload.get("flush", False)), file=target)
 
     async def read(self, prompt: AgentPrompt) -> str | None:
-        if prompt.kind == "question":
+        if prompt.kind in {"question", "approval"}:
             label = f"Agent> {prompt.text}\n你> " if self.interactive else "你> "
         elif prompt.kind == "retry":
             label = prompt.text

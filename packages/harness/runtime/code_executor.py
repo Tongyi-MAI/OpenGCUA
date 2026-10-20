@@ -898,12 +898,14 @@ class CodeExecutor:
         persistent: bool = True,
         ui_api: str = "mai-ui",
         overlay_handler=None,
+        approval_handler=None,
         image_dir: Path | None = None,
     ) -> None:
         if ui_api not in {"mai-ui", "legacy-cua"}:
             raise ValueError("ui_api 必须是 mai-ui 或 legacy-cua")
         self.ui_api = ui_api
         self.overlay_handler = overlay_handler
+        self.approval_handler = approval_handler
         self.image_dir = image_dir.resolve() if image_dir is not None else None
         self.runtime_path = runtime_path.resolve()
         self.work_dir = work_dir.resolve()
@@ -956,6 +958,7 @@ class CodeExecutor:
         return {
             "ui_api": self.ui_api,
             "overlay_guard": self.overlay_handler is not None,
+            "gui_approval": self.approval_handler is not None,
             "rpc_socket": str(self.rpc_socket),
             "rpc_timeout": self.rpc_timeout,
             "rpc_generation": self._rpc_generation,
@@ -1154,6 +1157,26 @@ class CodeExecutor:
                                         if event.get("phase") == "begin":
                                             self._writer.write(json.dumps({"kind": "overlay_ack", "guard_id": event.get("guard_id"), "ready": ready}).encode() + b"\n")
                                             await self._writer.drain()
+                                elif event.get("type") == "gui_approval_request":
+                                    approval_id = event.get("request_id")
+                                    scope_valid = all(
+                                        isinstance(event.get(key), str) and event[key]
+                                        for key in ("request_id", "app_id", "window_id")
+                                    )
+                                    approved = False
+                                    if scope_valid and self.approval_handler is not None:
+                                        try:
+                                            approved = await asyncio.wait_for(
+                                                self.approval_handler(event), timeout=120,
+                                            ) is True
+                                        except (Exception, TimeoutError):
+                                            approved = False
+                                    self._writer.write(json.dumps({
+                                        "kind": "gui_approval_ack",
+                                        "request_id": approval_id,
+                                        "approved": approved,
+                                    }).encode() + b"\n")
+                                    await self._writer.drain()
                                 elif event.get("type") == "_child_group":
                                     pid = int(event["pid"])
                                     if pid <= 1:

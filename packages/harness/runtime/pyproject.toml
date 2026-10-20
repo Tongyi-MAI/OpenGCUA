@@ -46,6 +46,7 @@ py-modules = [
   "console_server",
   "native_host",
   "overlay_guard",
+  "gui_approval",
   "image_store",
   "rich_help",
   "terminal_tui",

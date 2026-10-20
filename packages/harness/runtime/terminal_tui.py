@@ -40,7 +40,7 @@ def resolve_ui_mode(
     return "tui" if stdin_tty and stdout_tty and usable_term else "plain"
 
 
-def _prompt_session() -> PromptSession:
+def _prompt_session(on_ctrl_c: Callable[[], None] | None = None) -> PromptSession:
     bindings = KeyBindings()
 
     @bindings.add("escape", "enter")
@@ -50,6 +50,9 @@ def _prompt_session() -> PromptSession:
     @bindings.add("c-c")
     def _clear_input(event) -> None:
         event.current_buffer.reset()
+        if on_ctrl_c is not None:
+            on_ctrl_c()
+        event.app.exit(result="")
 
     return PromptSession(
         history=InMemoryHistory(),
@@ -72,7 +75,7 @@ class RichTerminalFrontend:
         clear_screen: Callable[[], None] | None = None,
     ) -> None:
         self.console = console or Console()
-        self._session = prompt_session or _prompt_session()
+        self._session = prompt_session or _prompt_session(self._prompt_ctrl_c)
         self._owns_prompt_session = prompt_session is None
         self._clear_screen = clear_screen or self.console.clear
         self.show_reasoning = False
@@ -91,9 +94,14 @@ class RichTerminalFrontend:
         self._code_preview: dict[int, str] = {}
         self._abort_callback: Callable[[bool], None] | None = None
         self._abort_requested = False
+        self._approval_pending = False
 
     def bind_abort(self, callback: Callable[[bool], None]) -> None:
         self._abort_callback = callback
+
+    def _prompt_ctrl_c(self) -> None:
+        if self._approval_pending and self._abort_callback is not None:
+            self._abort_callback(False)
 
     def handle_sigint(self) -> None:
         """Interrupt the active turn; a repeat asks for immediate force-stop."""
@@ -102,6 +110,11 @@ class RichTerminalFrontend:
             buffer = getattr(self._session, "default_buffer", None)
             if buffer is not None:
                 buffer.reset()
+            if self._approval_pending:
+                self._prompt_ctrl_c()
+                app = getattr(self._session, "app", None)
+                if app is not None and getattr(app, "is_running", False):
+                    app.exit(result="")
             return
         if self._abort_requested:
             if self._abort_callback is not None:
@@ -318,8 +331,10 @@ class RichTerminalFrontend:
     async def read(self, prompt: AgentPrompt) -> str | None:
         self.turn_active = False
         self.phase = "waiting"
-        if prompt.kind == "question":
-            self.console.print(Panel(prompt.text, title="Agent needs input", border_style="yellow"))
+        self._approval_pending = prompt.kind == "approval"
+        if prompt.kind in {"question", "approval"}:
+            title = "GUI permission" if prompt.kind == "approval" else "Agent needs input"
+            self.console.print(Panel(prompt.text, title=title, border_style="yellow"))
         elif prompt.kind == "retry":
             self.console.print(Panel(prompt.text, title="Model request failed", border_style="red"))
 
@@ -335,19 +350,26 @@ class RichTerminalFrontend:
                         "❯ ", bottom_toolbar=self._toolbar,
                     )
             except KeyboardInterrupt:
+                if prompt.kind == "approval":
+                    self._approval_pending = False
+                    return None
                 continue
             except EOFError:
+                self._approval_pending = False
                 return None
             command = value.strip().lower()
             if command in {"/exit", "/quit", "exit", "quit", "q"}:
+                self._approval_pending = False
                 return None
             if self._local_command(value):
                 continue
             if command:
+                self._approval_pending = False
                 return value
             if prompt.kind == "retry":
                 return ""
             if prompt.empty_exits:
+                self._approval_pending = False
                 return None
 
     def close(self) -> None:

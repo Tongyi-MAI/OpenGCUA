@@ -26,6 +26,7 @@ from typing import Any, Awaitable, Callable
 from agent_events import AgentEvent, AgentFrontend, AgentPrompt, PlainFrontend, emit_safely, model_status_event
 from console_protocol import decode_console_message
 from code_executor import BLOCK_PROGRESS_FIELDS, CodeExecutor
+from gui_approval import GuiGrantStore, request_gui_approval
 from sdk_backend import CuaDesktop, CuaRpcServer, Observation
 from llm_compaction import CompactionConfig, CompactionState, maybe_compact, restore_state
 import llm_entry
@@ -2338,6 +2339,19 @@ async def run_agent(
         scope=json.dumps([args.model_name, args.llm_base_url.rstrip("/"),
                           args.max_image_dimension, args.jpeg_quality], ensure_ascii=False),
     )
+    gui_grants = GuiGrantStore()
+
+    async def approve_gui(event: dict[str, Any]) -> bool:
+        async def ask(question: str) -> str | None:
+            if host_control is not None:
+                return await host_control.ask(question)
+            if not frontend.interactive:
+                return None
+            return await frontend.read(AgentPrompt(
+                kind="approval", text=question, empty_exits=True,
+            ))
+
+        return await request_gui_approval(gui_grants, task_index, event, ask)
     if resume_dir is not None:
         context.token_estimator.load_state(loaded.get("token_estimator"))
         restore_context_from_trajectory(
@@ -2368,6 +2382,7 @@ async def run_agent(
         persistent=True,
         ui_api=ui_api,
         overlay_handler=host_control.overlay if host_control is not None else None,
+        approval_handler=approve_gui,
         image_dir=writer.screenshot_dir,
     )
     active_executor = executor
@@ -3176,6 +3191,7 @@ async def run_agent(
                         final_status = task_status
                         final_answer = task_answer
                         writer.close_task(task_status, task_answer)
+                        gui_grants.clear()
                         logger.info(
                             "task %d closed status=%s answer=%r",
                             task_index,
@@ -3315,6 +3331,7 @@ async def run_agent(
                             present("notice", "会话已结束。")
                             break
                         writer.close_task("aborted", "")
+                        gui_grants.clear()
                         task_index = writer.begin_task(new_task, step + 1)
                         context.set_task(new_task, previous_result={"status": "aborted", "answer": ""})
                         desktop.invalidate_references()
@@ -3359,6 +3376,7 @@ async def run_agent(
             except Exception:  # noqa: BLE001 - 取证落盘失败不影响主流程
                 pass
     finally:
+        gui_grants.clear()
         try:
             try:
                 if step_metrics is not None and step_metrics["status"] == "running":
