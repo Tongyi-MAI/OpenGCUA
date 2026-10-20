@@ -20,6 +20,14 @@ def test_auto_mode_requires_usable_terminal():
     assert resolve_ui_mode("auto", stdin_tty=False, stdout_tty=True, term="xterm") == "plain"
 
 
+def test_mcp_status_is_visible_without_server_result_body():
+    ui = RichTerminalFrontend()
+    ui._consume(AgentEvent("mcp_status", "MCP · dingtalk.getUser running",
+                           payload={"stage": "running", "server": "dingtalk", "tool": "getUser"}))
+    assert "dingtalk.getUser" in ui._transcript
+    assert "private-contact" not in ui._transcript
+
+
 def test_slash_completion_lists_commands_and_filters_prefixes():
     ui = RichTerminalFrontend()
     completer = ui._input.buffer.completer

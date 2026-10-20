@@ -117,6 +117,29 @@ def test_changed_schema_rejects_call_until_relisted(tmp_path):
     _run(scenario())
 
 
+def test_external_schema_reference_is_rejected_without_dispatch(tmp_path):
+    from mcp_broker import McpBroker, McpBrokerError
+    from mcp_types import ListToolsResult, Tool
+
+    class Client:
+        class session:
+            @staticmethod
+            async def call_tool(*_args):
+                raise AssertionError("tool must not be dispatched")
+
+        async def list_tools(self, **_kwargs):
+            return ListToolsResult(tools=[Tool(
+                name="read_value", input_schema={"$ref": "https://example.invalid/schema.json"}
+            )])
+
+    async def scenario():
+        broker = McpBroker((_spec(),), _environ(tmp_path), lambda event: None)
+        with pytest.raises(McpBrokerError, match="external"):
+            await broker._call_on_client(_spec(), Client(), "read_value", {})
+
+    _run(scenario())
+
+
 def test_denied_call_never_reaches_server(tmp_path):
     from mcp_broker import McpBroker, McpBrokerError
 
@@ -153,8 +176,10 @@ def test_invalid_arguments_fail_before_dispatch(tmp_path):
 def test_server_tool_error_and_oversize_result(tmp_path):
     from mcp_broker import McpBroker
 
+    events = []
+
     async def scenario():
-        broker = McpBroker((_spec(allowed=("failing_read", "large_read")),), _environ(tmp_path), lambda event: None)
+        broker = McpBroker((_spec(allowed=("failing_read", "large_read")),), _environ(tmp_path), events.append)
         try:
             failure = await broker.call_tool("fixture", "failing_read", {})
             assert failure["is_error"] is True
@@ -165,6 +190,8 @@ def test_server_tool_error_and_oversize_result(tmp_path):
             await broker.close()
 
     _run(scenario())
+    assert any(event.get("type") == "mcp_call_failed" and event.get("code") == "MCP_TOOL_ERROR"
+               for event in events)
 
 
 def test_forwarded_secret_is_redacted_from_result(tmp_path):
@@ -175,6 +202,24 @@ def test_forwarded_secret_is_redacted_from_result(tmp_path):
         try:
             result = await broker.call_tool("fixture", "read_secret", {})
             assert SECRET not in str(result)
+        finally:
+            await broker.close()
+
+    _run(scenario())
+
+
+def test_secret_containing_json_escape_is_redacted(tmp_path):
+    from mcp_broker import McpBroker
+
+    env = _environ(tmp_path)
+    env["MCP_FIXTURE_SECRET"] = 'quoted"credential-819'
+
+    async def scenario():
+        broker = McpBroker((_spec(allowed=("read_secret",)),), env, lambda event: None)
+        try:
+            result = await broker.call_tool("fixture", "read_secret", {})
+            assert env["MCP_FIXTURE_SECRET"] not in str(result)
+            assert "credential-819" not in str(result)
         finally:
             await broker.close()
 

@@ -130,6 +130,9 @@ class _ServerActor:
                     else:
                         if not pending.done():
                             pending.set_result(result)
+                        if kind == "call" and result.get("is_error"):
+                            self.broker._event("mcp_call_failed", server=self.spec.name,
+                                               code="MCP_TOOL_ERROR")
                     pending = None
         except asyncio.CancelledError:
             raise
@@ -173,6 +176,15 @@ class McpBroker:
                 secret = self._environ.get(name)
                 if secret:
                     value = value.replace(secret, "[REDACTED]")
+        return value
+
+    def _redact_obj(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._redact(value)
+        if isinstance(value, list):
+            return [self._redact_obj(item) for item in value]
+        if isinstance(value, dict):
+            return {self._redact(key): self._redact_obj(item) for key, item in value.items()}
         return value
 
     def _server_error(self, spec: McpServerSpec, exc: Exception, stderr: str) -> McpBrokerError:
@@ -249,10 +261,12 @@ class McpBroker:
     async def _list_on_client(self, spec: McpServerSpec, client: Any) -> dict:
         catalog = await self._read_catalog(spec, client)
         self._catalog[spec.name] = catalog
-        return {"server": spec.name, "tools": list(catalog.values())}
+        return {"server": spec.name, "tools": self._redact_obj(list(catalog.values()))}
 
     async def _call_on_client(self, spec: McpServerSpec, client: Any, tool: str, arguments: dict) -> dict:
-        from jsonschema import validate, ValidationError, SchemaError
+        from jsonschema import Draft202012Validator, ValidationError, SchemaError
+        from referencing import Registry
+        from referencing.exceptions import Unresolvable
 
         current = await self._read_catalog(spec, client)
         descriptor = current.get(tool)
@@ -261,9 +275,29 @@ class McpBroker:
         previous = self._catalog.get(spec.name, {}).get(tool)
         if previous is not None and previous["input_schema"] != descriptor["input_schema"]:
             raise McpBrokerError("MCP_TOOL_ERROR", "tool schema changed; list tools again")
+        schema = descriptor["input_schema"]
+
+        def reject_external_refs(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key in {"$ref", "$dynamicRef", "$recursiveRef"}:
+                        if not isinstance(child, str) or not child.startswith("#"):
+                            raise McpBrokerError("MCP_TOOL_ERROR", "external tool schema references are not allowed")
+                    reject_external_refs(child)
+            elif isinstance(value, list):
+                for child in value:
+                    reject_external_refs(child)
+
+        # MCP servers supply untrusted schemas. Never let validation fetch a URI.
+        reject_external_refs(schema)
+
+        def deny_remote(_uri: str):
+            raise McpBrokerError("MCP_TOOL_ERROR", "external tool schema references are not allowed")
+
         try:
-            validate(arguments, descriptor["input_schema"])
-        except (ValidationError, SchemaError) as exc:
+            Draft202012Validator.check_schema(schema)
+            Draft202012Validator(schema, registry=Registry(retrieve=deny_remote)).validate(arguments)
+        except (ValidationError, SchemaError, Unresolvable) as exc:
             raise McpBrokerError("MCP_TOOL_ERROR", f"invalid tool arguments: {self._redact(str(exc))[:512]}") from exc
         # Use the low-level session call: Client.call_tool may automatically replay
         # a call after HEADER_MISMATCH, which this broker must never do.
@@ -274,7 +308,8 @@ class McpBroker:
             "is_error": bool(result.is_error),
             "truncated": False,
         }
-        encoded = self._redact(json.dumps(payload, ensure_ascii=False, default=str))
+        payload = self._redact_obj(payload)
+        encoded = json.dumps(payload, ensure_ascii=False, default=str)
         if len(encoded.encode()) > MAX_RESULT_BYTES:
             return {
                 "content": [{"type": "text", "text": "[MCP result truncated at 64 KiB]"}],

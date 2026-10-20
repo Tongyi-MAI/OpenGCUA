@@ -75,6 +75,15 @@ def test_missing_forwarded_variable_is_named_without_value():
         )
 
 
+def test_shell_symlink_is_rejected_without_resolving_python_venv_path(tmp_path):
+    link = tmp_path / "safe-looking-server"
+    link.symlink_to("/bin/sh")
+    with pytest.raises(ValueError, match="shell"):
+        _module().parse_mcp_servers(
+            {"fixture": _server(command=str(link), env_from_host=[])}, {}
+        )
+
+
 def test_invalid_server_name_and_non_object_are_rejected():
     with pytest.raises(ValueError):
         _module().parse_mcp_servers({"bad name": _server()}, {})

@@ -73,7 +73,9 @@ def parse_mcp_servers(value: object, environ: Mapping[str, str]) -> tuple[McpSer
         if not isinstance(command, str) or not command or not Path(command).is_absolute():
             raise ValueError(f"MCP server {name} command must be an absolute executable path")
         executable = Path(command)
-        if executable.name in _SHELLS or executable.name == "npx":
+        if (executable.name in _SHELLS or executable.name == "npx"
+                or executable.resolve().name in _SHELLS
+                or executable.resolve().name == "npx"):
             raise ValueError(f"MCP server {name} command cannot launch a shell or npx")
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise ValueError(f"MCP server {name} executable is missing or not runnable")

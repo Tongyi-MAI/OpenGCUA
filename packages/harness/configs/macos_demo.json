@@ -3,6 +3,7 @@
   "api_key": "",
   "model_name": "qwen3.8-flash",
   "skills_dirs": [],
+  "mcp_servers": {},
   "llm_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
   "llm_protocol": "openai",
   "reasoning_effort": "low",

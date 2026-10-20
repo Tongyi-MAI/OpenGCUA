@@ -328,6 +328,20 @@ def test_plain_frontend_hub_skill_load_is_structured():
     assert event["source"] == "bundled"
 
 
+def test_mcp_status_event_contains_only_safe_metadata():
+    from agent_events import mcp_status_event
+
+    event = mcp_status_event({
+        "type": "mcp_call_started", "server": "dingtalk", "tool": "getUser",
+        "content": "private-contact", "secret": "private-credential",
+    }, step=4)
+    assert event is not None
+    assert event.kind == "mcp_status"
+    assert event.payload == {"stage": "running", "server": "dingtalk", "tool": "getUser"}
+    assert "private-contact" not in event.text + str(event.payload)
+    assert "private-credential" not in event.text + str(event.payload)
+
+
 def test_frontend_failure_does_not_escape_agent_event_delivery():
     class BrokenFrontend:
         interactive = True
@@ -357,7 +371,8 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
                     simulate_gui_approval=False, simulate_question_abort=False,
                     resume_target=None, manual_command=False, manual_cancel=False,
                     return_model_inputs=False, task_message="hello", skills_dir=None,
-                    worker_skill_event=None, initial_commands=()):
+                    worker_skill_event=None, initial_commands=(), mcp_servers=None,
+                    fail_plan=False):
     import llm_entry
     import mac_agent
     from code_executor import CodeExecutionResult, empty_control
@@ -448,6 +463,8 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
     model_inputs = []
 
     async def plan(current_client, _messages, **_kwargs):
+        if fail_plan:
+            raise RuntimeError("fixture planning failure")
         model_inputs.append(_messages)
         if abort_then_correct and len(model_inputs) == 1:
             mac_agent._abort_event().set()
@@ -484,6 +501,8 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
     if resume_target is None and not manual_command:
         argv.append("--disable-multi-task")
     args = mac_agent.build_parser().parse_args(argv)
+    if mcp_servers is not None:
+        args.mcp_servers = mcp_servers
     frontend = RecordingFrontend()
     if initial_commands:
         args.task = None
@@ -542,6 +561,55 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
     if return_model_inputs:
         return result, frontend.events, observer_events, model_inputs
     return result, frontend.events, observer_events
+
+
+def test_run_agent_owns_opt_in_mcp_broker_and_closes_on_success_or_error(tmp_path, monkeypatch):
+    import mac_agent
+
+    created = []
+
+    class FakeBroker:
+        def __init__(self, specs, environ, on_event):
+            self.specs = specs
+            self.on_event = on_event
+            self.closed = False
+            created.append(self)
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(mac_agent, "McpBroker", FakeBroker, raising=False)
+    config = {"fixture": {
+        "transport": "stdio", "command": sys.executable, "args": [],
+        "env_from_host": [], "read_only_tools": ["read_value"],
+    }}
+    result, _events, _observer, model_inputs = _run_fake_agent(
+        tmp_path / "success", monkeypatch, mcp_servers=config, return_model_inputs=True,
+    )
+    assert result == 0
+    assert len(created) == 1 and created[0].closed
+    assert "mcp.list" in str(model_inputs[0])
+    assert "read_value" not in str(model_inputs[0])
+    failed, _events, _observer = _run_fake_agent(
+        tmp_path / "error", monkeypatch, mcp_servers=config, fail_plan=True,
+    )
+    assert failed != 0
+    assert len(created) == 2 and created[1].closed
+
+
+def test_unconfigured_agent_has_no_mcp_broker_or_catalog_prompt(tmp_path, monkeypatch):
+    import mac_agent
+
+    class UnexpectedBroker:
+        def __init__(self, *_args):
+            raise AssertionError("MCP broker must stay disabled by default")
+
+    monkeypatch.setattr(mac_agent, "McpBroker", UnexpectedBroker)
+    result, _events, _observer, inputs = _run_fake_agent(
+        tmp_path, monkeypatch, return_model_inputs=True,
+    )
+    assert result == 0
+    assert "mcp.list" not in str(inputs[0])
 
 
 def test_run_agent_emits_structured_lifecycle_action_and_answer(tmp_path, monkeypatch):

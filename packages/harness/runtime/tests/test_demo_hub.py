@@ -281,6 +281,19 @@ def test_hub_turns_skill_load_frame_into_sse_event(hub):
     assert session.backlog[-1]["name"] == "example"
 
 
+def test_hub_turns_mcp_status_into_content_free_sse_event(hub):
+    session = hub[0].session
+    output = io.StringIO()
+    frontend = PlainFrontend(lambda _prompt: None, interactive=False, stdout=output, hub_events=True)
+    frontend.emit(AgentEvent("mcp_status", "MCP · dingtalk.getUser running", step=4,
+                             payload={"stage": "running", "server": "dingtalk", "tool": "getUser"}))
+    session._push_line(output.getvalue().strip())
+    event = session.backlog[-1]
+    assert event["type"] == "mcp_status"
+    assert event["server"] == "dingtalk"
+    assert "content" not in event
+
+
 def test_hub_code_panel_streams_draft_until_matching_step_is_committed():
     node = shutil.which("node")
     if not node:
