@@ -150,6 +150,33 @@ asyncio.run(main())
     assert "QUEUED=()" in output
 
 
+def test_resume_command_selects_run_then_waits_for_new_message_in_pty():
+    source = '''import asyncio
+from pathlib import Path
+from agent_events import AgentPrompt
+from resume_catalog import ResumeCandidate
+from terminal_tui import RichTerminalFrontend
+async def main():
+    ui = RichTerminalFrontend()
+    ui.start()
+    command = await ui.read(AgentPrompt(kind='task'))
+    assert command.kind == 'resume'
+    options = tuple(ResumeCandidate(Path('/tmp/run' + str(i)), 's', 'old task', 'success', '2026-10-20', 2, 0) for i in range(2))
+    choice = await ui.choose_resume(options)
+    ui.suspend_queue_for_resume()
+    next_message = await ui.read(AgentPrompt(kind='task'))
+    await ui.stop()
+    print('CHOICE=' + repr(choice.path), flush=True)
+    print('NEW=' + repr(next_message), flush=True)
+asyncio.run(main())
+'''
+    code, output = run_in_pty(source, [(.4, b"/resume\r"), (.5, b"\x1b[B\r"), (.5, b"new instruction\r")],
+                              terminal_size=(8, 30))
+    assert code == 0, output
+    assert "CHOICE=PosixPath('/tmp/run1')" in output
+    assert "NEW='new instruction'" in output
+
+
 def test_short_conversation_has_no_scrollbar_arrows():
     source = '''import asyncio
 from terminal_tui import RichTerminalFrontend
