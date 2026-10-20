@@ -556,7 +556,7 @@ WindowInfo.id 与 win.window_id 形如 window:269273:3（中段 CGWindowID 稳�
 仅用户指定已有 Chrome 窗口/登录态，或 web 不适用时，才走 Chrome device/ui。osascript 与 SDK 是两套互不相通的地址空间：前者只做 SDK 没有的建窗、设 URL 等命令，后者负责列窗、绑定、观察和输入，绝不可互换。新 Chrome 窗用对象引用，如 osascript -e 'tell application "Google Chrome"' -e 'set w to make new window' -e 'set URL of active tab of w to "目标URL"' -e 'end tell'；随后以 windows.list() 差集或唯一 URL 标记认领，绝不用 window N 猜 SDK 窗口或接管用户窗口。
 
 ## 原生动作的边界
-AX 树 ax.tree.nodes 是扁平列表，层级由 parent_id 表达，没有 children/depth 属性；长文本用 ax.text.search/page/read 续读同一快照。窗口 vision 截图是整个绑定窗口，失败不自动退回桌面。
+AX 树 ax.tree.nodes 是扁平列表，层级由 parent_id 表达，没有 children/depth 属性；找可编辑控件时优先筛 AXTextArea、AXTextField、AXSearchField、AXComboBox，并结合 name/text/bounds/父节点确认，不能只筛 AXTextField。先检查 ax.tree.truncated 和 components 的 ax_complete；不完整时缺少节点不代表控件不存在，可按同窗截图或后续观察补充，不自动转前台操作。长文本用 ax.text.search/page/read 续读同一快照。窗口 vision 截图是整个绑定窗口，失败不自动退回桌面。
 AXValue 替换用 await ui.ax.set_text(node, "新值")；它是后台写入，不是键盘输入，也不保证应用提交；perform 只用节点已公布的 action。输入用 await ui.input.text("内容")，需要元素级真实键合成时传 target=node；进程级后台输入在同 PID 多窗时可能被 INPUT_REFUSED 拒绝。组合键用 await ui.input.press_key("c", modifiers=["meta"])，修饰键小写。delivery="auto" 不自动切前台；可见真实键鼠须显式 delivery="foreground"。macOS ui.ax.set_text 不支持 foreground；主桌面输入/拖拽必须 foreground。
 滚动可用 ui.vision.scroll("down", x=point, y=None, amount=3, unit="lines")，其中 point 来自当前截图；macOS 适配器不支持 AX scroll，已聚焦目标窗也可用前台 End。webview/弹窗滚动超时先查状态和位置，不连续重试；必要时 timeout_ms<=5000。标准 Cua 路径窗内 hover 不可用，ui.vision.move 只支持桌面前台移动；drag 需前台投递。
 

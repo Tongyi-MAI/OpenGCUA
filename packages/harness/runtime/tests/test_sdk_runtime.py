@@ -1076,6 +1076,14 @@ def test_macos_prompt_bounds_temporary_pip_install():
     assert "不要用无超时的 pip install" in prompt
 
 
+def test_macos_prompt_finds_editable_ax_roles_and_checks_partial_tree():
+    prompt = mac_agent.MAI_UI_SYSTEM_PROMPT
+    for role in ("AXTextArea", "AXTextField", "AXSearchField", "AXComboBox"):
+        assert role in prompt
+    assert "ax.tree.truncated" in prompt
+    assert "不代表控件不存在" in prompt
+
+
 def test_macos_prompt_uses_only_advertised_window_actions():
     prompt = mac_agent.MAI_UI_SYSTEM_PROMPT
     assert "AXMinimized=true/false" not in prompt

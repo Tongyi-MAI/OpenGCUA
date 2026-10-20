@@ -4,7 +4,7 @@ impl MacosProvider {
     pub(super) async fn observe(&self, q: &Value) -> Result<Value, Error> {
         let tree = q["tree"] == true;
         let screenshot = q["screenshot"] == true;
-        let mut result = json!({"nodes":[],"images":[],"components":[],"width":1,"height":1,"captured_at":now(),"age_ms":0,"source":"macos.cua","truncated":tree,"pending_invalidations":0,"identity_mode":"snapshot","identity_epoch":null});
+        let mut result = json!({"nodes":[],"images":[],"components":[],"width":1,"height":1,"captured_at":now(),"age_ms":0,"source":"macos.cua","truncated":false,"pending_invalidations":0,"identity_mode":"snapshot","identity_epoch":null});
         {
             let mut state = self.state.lock().await;
             state.counter += 1;
@@ -98,11 +98,13 @@ impl MacosProvider {
                 Err(e) => return Err(e),
             };
             let data = &r["structuredContent"];
-            let mut component = json!({"id":w.id,"title":w.title,"status":"ok","captured_at":now(),"bounds":rect(&w.bounds),"ax_complete":data["elements_complete"]});
+            let native_ax_complete = data["elements_complete"] == true && data["truncated"] != true;
+            let mut component = json!({"id":w.id,"title":w.title,"status":"ok","captured_at":now(),"bounds":rect(&w.bounds),"ax_complete":if tree { json!(native_ax_complete) } else { Value::Null }});
             if tree {
                 let snapshot = text(data, "snapshot_id");
                 if snapshot.is_empty() {
                     component["status"] = json!("unavailable");
+                    component["ax_complete"] = json!(false);
                     component["reason"] = json!(text(data, "degraded_reason")
                         .split(':')
                         .next()
@@ -147,7 +149,7 @@ impl MacosProvider {
                         let role = text(row, "role");
                         let editable = matches!(
                             role,
-                            "AXTextField" | "AXTextArea" | "AXComboBox" | "AXSecureTextField"
+                            "AXTextField" | "AXTextArea" | "AXSearchField" | "AXComboBox" | "AXSecureTextField"
                         );
                         let password = role == "AXSecureTextField";
                         let mut n = node(
@@ -201,6 +203,7 @@ impl MacosProvider {
             }
             components.push(component);
         }
+        result["truncated"] = json!(tree && components.iter().any(|part| part["ax_complete"] != true));
         result["nodes"] = json!(nodes);
         result["images"] = json!(images);
         result["components"] = json!(components);

@@ -940,6 +940,44 @@ mod tests {
         p.close().await.unwrap();
     }
     #[tokio::test]
+    async fn ax_observation_completeness_tracks_native_rows() {
+        let mut command = tokio::process::Command::new("python3");
+        command.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture/mock_cua.py"));
+        let p = MacosProvider::connect_command(command, tempfile::tempfile().unwrap(), false)
+            .await
+            .unwrap();
+        let apps = call(&p, json!({"op":"list_apps"})).await;
+        let app = &apps["apps"][0]["id"];
+        let inventory = call(&p, json!({"op":"list_windows","app_id":app})).await;
+        let window = &inventory["windows"][0]["id"];
+
+        let partial = call(&p, json!({"op":"observe","app_id":app,"window_id":window,"tree":true})).await;
+        assert_eq!(partial["truncated"], true);
+        assert_eq!(partial["components"][0]["ax_complete"], false);
+        let row = &partial["nodes"][2];
+        assert_eq!(row["role"], "AXButton");
+        assert_eq!(row["name"], "Click");
+
+        p.tool("fixture_set_ax_state", json!({"elements_complete":true,"truncated":false})).await.unwrap();
+        let complete = call(&p, json!({"op":"observe","app_id":app,"window_id":window,"tree":true})).await;
+        assert_eq!(complete["truncated"], false);
+        assert_eq!(complete["components"][0]["ax_complete"], true);
+        assert_eq!(complete["nodes"][2]["role"], row["role"]);
+        assert_eq!(complete["nodes"][2]["name"], row["name"]);
+
+        p.tool("fixture_set_ax_state", json!({"elements_complete":true,"truncated":true})).await.unwrap();
+        let native_truncated = call(&p, json!({"op":"observe","app_id":app,"window_id":window,"tree":true})).await;
+        assert_eq!(native_truncated["truncated"], true);
+        assert_eq!(native_truncated["components"][0]["ax_complete"], false);
+
+        p.tool("fixture_set_ax_state", json!({"elements_complete":true,"role":"AXSearchField"})).await.unwrap();
+        let search = call(&p, json!({"op":"observe","app_id":app,"window_id":window,"tree":true})).await;
+        assert_eq!(search["nodes"][2]["role"], "AXSearchField");
+        assert_eq!(search["nodes"][2]["editable"], true);
+        p.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn mcp_snapshots_are_window_bound_and_do_not_acquire_ax_for_vision() {
         let mut command = tokio::process::Command::new("python3");
         command.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture/mock_cua.py"));

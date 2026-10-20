@@ -11,6 +11,9 @@ calls = []
 closed = set()
 expired = False
 frontmost_window = 1
+ax_elements_complete = False
+ax_truncated = False
+ax_role = "AXButton"
 png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + struct.pack(">II", 100, 200)).decode()
 for line in sys.stdin:
     q = json.loads(line)
@@ -37,6 +40,10 @@ for line in sys.stdin:
             expired = True
         elif name == "fixture_set_frontmost":
             frontmost_window = args["window_id"]
+        elif name == "fixture_set_ax_state":
+            ax_elements_complete = args.get("elements_complete", False)
+            ax_truncated = args.get("truncated", False)
+            ax_role = args.get("role", "AXButton")
         elif name == "fixture_refuse":
             data = dict(
                 code="background_input_refused",
@@ -77,12 +84,13 @@ for line in sys.stdin:
                 snapshot = f"s{version:08x}"
                 data = dict(
                     snapshot_id=snapshot,
-                    elements_complete=False,
+                    elements_complete=ax_elements_complete,
+                    truncated=ax_truncated,
                     elements=[
                         dict(
                             element_index=0,
                             element_token=snapshot + ":0",
-                            role="AXButton",
+                            role=ax_role,
                             label="Click",
                             actions=["AXPress"],
                             frame=dict(x=1, y=2, w=10, h=20),
