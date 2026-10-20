@@ -40,7 +40,7 @@ from model_stream import (
     extract_reasoning, parse_code_action,
 )
 from resume_catalog import UI_API_MARKERS, ResumeError, inspect_resume_run, recent_resume_runs, validate_trajectory_ui_api
-from skill_registry import SkillRegistry
+from skill_registry import SkillRegistry, parse_explicit_skill
 from skill_context import SkillContext
 
 
@@ -2167,13 +2167,69 @@ async def run_agent(
     if ui_api not in UI_API_MARKERS:
         raise SystemExit(f"不支持的 UI API：{ui_api!r}")
     manual_compact_callback: Callable[[], Awaitable[None]] | None = None
+    try:
+        bundled_skills = Path(__file__).resolve().parents[1] / "skills"
+        personal_skills = Path.home() / "Library/Application Support/Generalist/skills"
+        configured_skills = getattr(args, "skills_dirs", ()) or ()
+        if not isinstance(configured_skills, (list, tuple)):
+            raise ValueError("skills_dirs must be a list of absolute directories")
+        skill_registry = SkillRegistry(
+            bundled_skills, personal_skills, tuple(Path(value) for value in configured_skills)
+        )
+        skill_registry.discover()
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"Skill configuration error: {exc}") from exc
+    pending_skill_name: str | None = None
+
+    def publish_skill_catalog(*, show: bool = False) -> None:
+        infos = skill_registry.discover()
+        rows = [f"{info.name} — {info.description}" for info in infos]
+        present("skills_catalog", "Available Skills:\n" + ("\n".join(rows) if rows else "(none)") if show else "",
+                payload={"names": [info.name for info in infos]})
+        for warning in skill_registry.diagnostics:
+            present("warning", f"Skill: {warning}")
+
+    def consume_skill_markers(raw: str) -> tuple[str, tuple[str, ...]]:
+        nonlocal pending_skill_name
+        known = {info.name for info in skill_registry.discover()}
+        cleaned, selected = parse_explicit_skill(raw, known)
+        unknown = {name for name in re.findall(r"(?<![\w$])\$([a-z][a-z0-9]*(?:-[a-z0-9]+)*)", cleaned)
+                   if name not in known}
+        for name in sorted(unknown):
+            present("warning", f"Unknown Skill ${name}; marker kept as task text. Use /skills to list names.")
+        if pending_skill_name is not None:
+            selected = tuple(dict.fromkeys((pending_skill_name, *selected)))
+            pending_skill_name = None
+            present("skill_consumed")
+        return cleaned, selected
+
 
     async def read_task_boundary(prompt: AgentPrompt, current_run: Path | None) -> str | None:
         """Consume host-only commands at a task boundary, never as model text."""
+        nonlocal pending_skill_name
         while True:
             value = await frontend.read(prompt)
             if not isinstance(value, TerminalCommand):
                 return value
+            if value.kind in {"skills_list", "skills_reload", "skill_select", "skill_create"}:
+                if value.kind in {"skills_list", "skills_reload"}:
+                    publish_skill_catalog(show=True)
+                elif value.kind == "skill_create":
+                    try:
+                        created = skill_registry.create(value.target or "")
+                        publish_skill_catalog()
+                        present("notice", f"Skill template created: {created}")
+                    except (OSError, ValueError) as exc:
+                        present("error", f"Cannot create Skill: {exc}")
+                else:
+                    try:
+                        info = skill_registry.load(value.target or "").info
+                        pending_skill_name = info.name
+                        present("skill_selected", f"Skill {info.name} selected for the next task message.",
+                                payload={"name": info.name})
+                    except (OSError, ValueError) as exc:
+                        present("error", f"Cannot select Skill: {exc}")
+                continue
             if value.kind == "compaction":
                 if manual_compact_callback is None:
                     present("notice", "当前没有可压缩的会话历史；先发送一条任务消息。")
@@ -2296,6 +2352,10 @@ async def run_agent(
     else:
         session_id = args.session_id or f"mac-{uuid.uuid4().hex[:12]}"
         task = initial_message
+    initial_skill_names: tuple[str, ...] = ()
+    model_task = task
+    if resume_dir is None and isinstance(initial_message, str):
+        model_task, initial_skill_names = consume_skill_markers(initial_message)
     public_config = {
         "ui_api": ui_api,
         "ui_api_version": UI_API_MARKERS[ui_api],
@@ -2335,27 +2395,31 @@ async def run_agent(
         # 恢复沿用本次 CLI 的有效配置；留档而不覆盖原始运行配置。
         writer.data["resume_history"][-1]["config"] = public_config
         writer.flush()
-    try:
-        bundled_skills = Path(__file__).resolve().parents[1] / "skills"
-        personal_skills = Path.home() / "Library/Application Support/Generalist/skills"
-        configured_skills = getattr(args, "skills_dirs", ()) or ()
-        if not isinstance(configured_skills, (list, tuple)):
-            raise ValueError("skills_dirs must be a list of absolute directories")
-        skill_registry = SkillRegistry(
-            bundled_skills, personal_skills, tuple(Path(value) for value in configured_skills)
-        )
-        skill_registry.discover()
-    except (TypeError, ValueError) as exc:
-        raise SystemExit(f"Skill configuration error: {exc}") from exc
     skill_context = SkillContext(skill_registry)
+
+    def activate_selected(names: tuple[str, ...], task_index: int) -> None:
+        for name in names:
+            try:
+                selected = skill_context.activate(name)
+            except (OSError, ValueError) as exc:
+                present("warning", f"Skill '{name}' not activated: {exc}")
+                continue
+            writer.data["tasks"][task_index]["skills"] = skill_context.records()
+            writer.flush()
+            present("skill_loaded", f"Skill loaded: {name}",
+                    step=int(writer.data["tasks"][task_index]["first_step"]),
+                    payload={"name": name, "source": selected.info.source})
+            if host_control is not None:
+                host_control.emit("skill_loaded", name=name, source=selected.info.source)
+
+    if initial_skill_names:
+        activate_selected(initial_skill_names, 0)
     if resume_dir is not None:
         skill_context.start_task(max(0, len(loaded_tasks) - 1))
         continuing_old_task = not (initial_message and (host_control is not None or args.task))
         if continuing_old_task:
             for warning in skill_context.restore(loaded_tasks[-1].get("skills") or ()):
                 present("warning", warning)
-    for warning in skill_registry.diagnostics:
-        present("warning", f"Skill: {warning}")
     logger = setup_run_logger(writer.run_dir)
     if host_control is not None:
         host_control.emit("trajectory", path=str(writer.run_dir))
@@ -2388,7 +2452,7 @@ async def run_agent(
     rpc_socket = Path("/tmp") / f"mac-agent-{uuid.uuid4().hex[:16]}.sock"
     rpc_server = CuaRpcServer(desktop, rpc_socket)
     context = ContextManager(
-        task=task,
+        task=model_task,
         coordinate_range=args.coordinate_range,
         img_keep_n=args.img_keep_n,
         img_interval=args.img_interval,
@@ -2515,7 +2579,9 @@ async def run_agent(
         if not previous.get("status"):
             writer.close_task(previous_result["status"], previous_result["answer"])
         resume_task_index = writer.begin_task(initial_message, resume_step)
-        context.set_task(initial_message, previous_result=previous_result)
+        cleaned_task, selected_names = consume_skill_markers(initial_message)
+        context.set_task(cleaned_task, previous_result=previous_result)
+        activate_selected(selected_names, resume_task_index)
         getattr(executor, "start_skill_task", lambda: None)()
         if host_control is not None:
             host_control.turn_index = resume_task_index - 1
@@ -2607,6 +2673,7 @@ async def run_agent(
             "mode": active_prompt_mode(),
         },
     )
+    publish_skill_catalog()
     if args.task and resume_dir is None:
         present("notice", f"你> {task}", payload={"role": "user"})
     if resume_dir is not None:
@@ -3441,6 +3508,7 @@ async def run_agent(
                             follow_up = raw_follow_up
                         previous_task = context.task
                         task_index = writer.begin_task(follow_up, step + 1)
+                        cleaned_task, selected_names = consume_skill_markers(follow_up)
                         logger.info(
                             "task %d begins at step %d fresh=%s task=%r previous=%r",
                             task_index,
@@ -3449,7 +3517,8 @@ async def run_agent(
                             follow_up,
                             previous_task,
                         )
-                        context.set_task(follow_up, previous_result={"status": task_status, "answer": task_answer})
+                        context.set_task(cleaned_task, previous_result={"status": task_status, "answer": task_answer})
+                        activate_selected(selected_names, task_index)
                         getattr(executor, "start_skill_task", lambda: None)()
                         if host_control is not None:
                             host_control.begin_turn(follow_up)
@@ -3539,7 +3608,9 @@ async def run_agent(
                         writer.close_task("aborted", "")
                         clear_gui_grants()
                         task_index = writer.begin_task(new_task, step + 1)
-                        context.set_task(new_task, previous_result={"status": "aborted", "answer": ""})
+                        cleaned_task, selected_names = consume_skill_markers(new_task)
+                        context.set_task(cleaned_task, previous_result={"status": "aborted", "answer": ""})
+                        activate_selected(selected_names, task_index)
                         getattr(executor, "start_skill_task", lambda: None)()
                         desktop.invalidate_references()
                         executor.set_rpc_generation(desktop.generation)

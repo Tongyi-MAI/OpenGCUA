@@ -42,13 +42,19 @@ class SlashCommandCompleter(Completer):
         ("/clear", "清空可见输出，不清除会话", False),
         ("/resume", "选择历史会话；可加运行目录", False),
         ("/compaction", "立即尝试压缩历史上下文", False),
+        ("/skills", "列出可用 Skills；/skills reload 重新读取", False),
+        ("/skill", "选用 Skill；/skill new <name> 创建", True),
         ("/exit", "退出程序", False),
     )
     _ARGUMENTS = {
         "/queue": ("send", "clear"),
         "/reasoning": ("on", "off"),
         "/code": ("on", "off"),
+        "/skills": ("reload",),
     }
+
+    def __init__(self, skill_names: tuple[str, ...] = ()) -> None:
+        self.skill_names = skill_names
 
     def get_completions(self, document: Document, complete_event: CompleteEvent):
         value = document.text_before_cursor
@@ -65,7 +71,8 @@ class SlashCommandCompleter(Completer):
         name, argument = value.split(" ", 1)
         if " " in argument:
             return
-        for option in self._ARGUMENTS.get(name, ()):
+        options = self.skill_names + ("new",) if name == "/skill" else self._ARGUMENTS.get(name, ())
+        for option in options:
             if option.startswith(argument):
                 yield Completion(option, start_position=-len(argument), display=option)
 
@@ -153,10 +160,12 @@ class RichTerminalFrontend:
         self.foreground_consent = "unset"
         self._transcript = ""
         self._interaction = TerminalInteraction()
+        self._skill_completer = SlashCommandCompleter()
+        self._pending_skill: str | None = None
         self._input = TextArea(
             height=3, multiline=True, wrap_lines=True,
             prompt=[("class:composer.prompt", " ❯ ")], style="class:composer",
-            completer=SlashCommandCompleter(), complete_while_typing=True,
+            completer=self._skill_completer, complete_while_typing=True,
         )
         self._output = TextArea(
             read_only=True, scrollbar=False, wrap_lines=True, focusable=False,
@@ -248,6 +257,7 @@ class RichTerminalFrontend:
         if self._pending_correction:
             queued += 1
         suspended = " (paused)" if self._interaction.queue_suspended else ""
+        pending_skill = f"  ·  skill: {self._pending_skill}" if self._pending_skill else ""
         if self.turn_active and self._turn_started_at is not None:
             now = time.monotonic()
             elapsed = max(0, int(now - self._turn_started_at))
@@ -257,8 +267,8 @@ class RichTerminalFrontend:
             if silence >= 20:
                 detail += f"  ·  no update {silence}s"
             return (f"  RUNNING {elapsed_text}  ·  step {step}{detail}"
-                    f"  ·  queued {queued}{suspended}  ·  foreground: {self.foreground_consent} ")
-        return f"  step {step}  ·  queued {queued}{suspended}  ·  foreground: {self.foreground_consent} "
+                    f"  ·  queued {queued}{suspended}  ·  foreground: {self.foreground_consent}{pending_skill} ")
+        return f"  step {step}  ·  queued {queued}{suspended}  ·  foreground: {self.foreground_consent}{pending_skill} "
 
     def _header_text(self):
         labels = {
@@ -576,7 +586,7 @@ class RichTerminalFrontend:
             self._append("\nEnter 发送 · Alt+Enter 换行 · Ctrl-C 中止当前轮 · Ctrl-D 退出\n"
                          "输入 / 可浏览命令；方向键选择，Tab 补全，Enter 选中或执行\n"
                          "/queue 查看 · /queue send 继续队列 · /queue clear 清空队列\n"
-                         "/new <消息> · /resume [run 目录] · /compaction · /status · /reasoning on|off · /code on|off · /clear · /exit\n")
+                         "/new <消息> · /resume [run 目录] · /compaction · /skills [reload] · /skill <name> · /skill new <name> · /status · /reasoning on|off · /code on|off · /clear · /exit\n")
             return True
         if command == "/status":
             self._append("\nSession: " + (self.session_id or "(not started)")
@@ -663,6 +673,14 @@ class RichTerminalFrontend:
         control: TerminalCommand | None = None
         if stripped == "/compaction":
             control = TerminalCommand("compaction")
+        elif stripped == "/skills":
+            control = TerminalCommand("skills_list")
+        elif stripped == "/skills reload":
+            control = TerminalCommand("skills_reload")
+        elif stripped.startswith("/skill new "):
+            control = TerminalCommand("skill_create", stripped[len("/skill new "):].strip())
+        elif stripped.startswith("/skill "):
+            control = TerminalCommand("skill_select", stripped[len("/skill "):].strip())
         elif stripped == "/resume":
             control = TerminalCommand("resume")
         elif stripped.startswith("/resume "):
@@ -802,6 +820,15 @@ class RichTerminalFrontend:
         if kind == "session":
             self.session_id = str(event.payload.get("session_id") or "")
             self.model = str(event.payload.get("model") or "")
+        elif kind == "skills_catalog":
+            self._skill_completer.skill_names = tuple(event.payload.get("names") or ())
+            if event.text:
+                self._append(event.text + "\n")
+        elif kind == "skill_selected":
+            self._pending_skill = str(event.payload.get("name") or "") or None
+            self._append(event.text + "\n")
+        elif kind == "skill_consumed":
+            self._pending_skill = None
         elif kind == "foreground_consent":
             state = event.payload.get("state")
             if state in {"unset", "allowed", "denied"}:

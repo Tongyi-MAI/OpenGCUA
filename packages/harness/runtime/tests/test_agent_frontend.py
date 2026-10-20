@@ -15,6 +15,7 @@ from agent_events import (
     AgentPrompt,
     ForegroundApprovalPrompt,
     PlainFrontend,
+    TerminalCommand,
     emit_safely,
 )
 from console_protocol import encode_console_message
@@ -311,7 +312,8 @@ def test_frontend_failure_does_not_escape_agent_event_delivery():
 def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_correct=False,
                     simulate_gui_approval=False, simulate_question_abort=False,
                     resume_target=None, manual_command=False, manual_cancel=False,
-                    return_model_inputs=False):
+                    return_model_inputs=False, task_message="hello", skills_dir=None,
+                    worker_skill_event=None, initial_commands=()):
     import llm_entry
     import mac_agent
     from code_executor import CodeExecutionResult, empty_control
@@ -366,9 +368,11 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
                     "request_id": "test-approval", "app_id": "app:a", "window_id": "window:7",
                 })
             control = empty_control()
+            if worker_skill_event is not None and self.calls == 1:
+                control["events"].append(worker_skill_event)
             if simulate_question_abort and self.calls == 1:
                 control["ask_user"] = {"question": "Which file?"}
-            elif not manual_command or self.calls >= 3:
+            elif (worker_skill_event is None or self.calls > 1) and (not manual_command or self.calls >= 3):
                 control["terminate"] = {"status": "success", "answer": "Verified result"}
             return CodeExecutionResult("long result " * 500 if manual_command else "", "", 0, False, control)
 
@@ -425,16 +429,25 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
     monkeypatch.setattr(llm_entry, "build_model_client", lambda *_args, **_kwargs: client)
 
     argv = [
-        "hello",
+        task_message,
         "--allow-empty-api-key",
         "--countdown", "0",
         "--startup-observation", "none",
         "--runs-dir", str(tmp_path),
     ]
+    if skills_dir is not None:
+        argv += ["--skills-dir", str(skills_dir)]
     if resume_target is None and not manual_command:
         argv.append("--disable-multi-task")
     args = mac_agent.build_parser().parse_args(argv)
     frontend = RecordingFrontend()
+    if initial_commands:
+        args.task = None
+        frontend.interactive = True
+        pending_inputs = [*initial_commands, task_message]
+        async def read_initial(_prompt):
+            return pending_inputs.pop(0) if pending_inputs else None
+        frontend.read = read_initial
     if resume_target is not None:
         frontend.interactive = True
         async def switch(_prompt):
@@ -501,6 +514,69 @@ def test_run_agent_emits_structured_lifecycle_action_and_answer(tmp_path, monkey
     assert kinds[-1] == "finished"
     assert next(event for event in events if event.kind == "action").payload["intent"] == "reply"
     assert next(event for event in events if event.kind == "answer").text == "Verified result"
+
+
+def test_explicit_skill_marker_is_loaded_before_first_model_request(tmp_path, monkeypatch):
+    folder = tmp_path / "skills" / "example"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: example\ndescription: Example workflow\n---\n\nSpecific workflow body.\n",
+        encoding="utf-8",
+    )
+    result, events, _observer, model_inputs = _run_fake_agent(
+        tmp_path / "runs", monkeypatch, task_message="$example do the task",
+        skills_dir=tmp_path / "skills", return_model_inputs=True,
+    )
+    assert result == 0
+    assert "Specific workflow body" in str(model_inputs[0])
+    assert "$example" not in str(model_inputs[0])
+    trajectory = json.loads(next((tmp_path / "runs").glob("*/traj.json")).read_text())
+    assert trajectory["tasks"][0]["task"] == "$example do the task"
+    assert trajectory["tasks"][0]["skills"][0]["name"] == "example"
+    assert any(event.kind == "skill_loaded" for event in events)
+
+
+def test_model_selected_skill_appears_only_after_load_event(tmp_path, monkeypatch):
+    from skill_registry import SkillRegistry
+
+    folder = tmp_path / "skills" / "example"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: example\ndescription: Example workflow\n---\n\nSpecific workflow body.\n",
+        encoding="utf-8",
+    )
+    registry = SkillRegistry(tmp_path / "none", tmp_path / "other", (tmp_path / "skills",))
+    info = registry.discover()[0]
+    event = {"type": "skill_loaded", "name": "example", "digest": info.digest, "source": info.source}
+    result, _events, _observer, model_inputs = _run_fake_agent(
+        tmp_path / "runs", monkeypatch, task_message="do the task", skills_dir=tmp_path / "skills",
+        worker_skill_event=event, return_model_inputs=True,
+    )
+    assert result == 0
+    assert len(model_inputs) == 2
+    assert "Example workflow" in str(model_inputs[0])
+    assert "Specific workflow body" not in str(model_inputs[0])
+    assert str(model_inputs[1]).count("Specific workflow body") == 1
+    trajectory = json.loads(next((tmp_path / "runs").glob("*/traj.json")).read_text())
+    assert trajectory["tasks"][0]["skills"][0]["digest"] == info.digest
+
+
+def test_host_skill_command_selects_next_message_without_becoming_task_text(tmp_path, monkeypatch):
+    folder = tmp_path / "skills" / "example"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: example\ndescription: Example workflow\n---\n\nSpecific workflow body.\n",
+        encoding="utf-8",
+    )
+    result, events, _observer, inputs = _run_fake_agent(
+        tmp_path / "runs", monkeypatch, task_message="do the task", skills_dir=tmp_path / "skills",
+        initial_commands=(TerminalCommand("skills_list"), TerminalCommand("skill_select", "example")),
+        return_model_inputs=True,
+    )
+    assert result == 0
+    assert "Specific workflow body" in str(inputs[0])
+    assert any(event.kind == "skill_selected" for event in events)
+    assert not any("/skill example" in str(request) for request in inputs)
 
 
 def test_resume_with_new_message_appends_task_without_replaying_old_one(tmp_path, monkeypatch):

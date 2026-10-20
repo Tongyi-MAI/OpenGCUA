@@ -103,7 +103,7 @@ class AgentPrompt:
 class TerminalCommand:
     """A host-side command, never a model-facing user message."""
 
-    kind: Literal["resume", "compaction"]
+    kind: Literal["resume", "compaction", "skills_list", "skills_reload", "skill_select", "skill_create"]
     target: str | None = None
 
 
@@ -202,6 +202,8 @@ class PlainFrontend:
                 print("\n" + HUB_EVENT_PREFIX + json.dumps(frame, ensure_ascii=False), flush=True, file=self.stdout)
             return
         if event.kind == "foreground_consent":
+            return
+        if event.kind in {"skills_catalog", "skill_consumed"} and not event.text:
             return
         if event.kind == "skill_loaded" and self.hub_events and event.step is not None:
             frame = {"type": "skill_loaded", "step": event.step, "text": event.text,

@@ -30,12 +30,41 @@ def test_slash_completion_lists_commands_and_filters_prefixes():
 
     assert {item.display_text for item in candidates("/")} >= {
         "/help", "/new", "/queue", "/status", "/clear", "/reasoning", "/code", "/exit",
-        "/resume", "/compaction",
+        "/resume", "/compaction", "/skills", "/skill",
     }
     assert [(item.display_text, item.text) for item in candidates("/sta")] == [("/status", "/status")]
     assert [(item.display_text, item.text) for item in candidates("/reasoning of")] == [("off", "off")]
     assert candidates("hello /sta") == []
     assert candidates("/new find a file") == []
+    ui.emit(AgentEvent("skills_catalog", payload={"names": ["pdf-form", "web-research"]}))
+    assert {item.display_text for item in candidates("/skill p")} == {"pdf-form"}
+
+
+def test_skill_commands_are_typed_and_wait_behind_questions():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui._interaction.begin_turn()
+        question = asyncio.create_task(ui.read(AgentPrompt(kind="question", text="Which one?")))
+        await asyncio.sleep(0)
+        ui._input.text = "/skill pdf-form"
+        ui._submit_enter()
+        assert not question.done()
+        ui._input.text = "answer"
+        ui._submit_enter()
+        assert await question == "answer"
+        ui._interaction.finish_turn(normal=True)
+        assert await ui.read(AgentPrompt(kind="task")) == TerminalCommand("skill_select", "pdf-form")
+        ui._input.text = "/skills"
+        ui._submit_enter()
+        assert await ui.read(AgentPrompt(kind="task")) == TerminalCommand("skills_list")
+        ui._input.text = "/skills reload"
+        ui._submit_enter()
+        assert await ui.read(AgentPrompt(kind="task")) == TerminalCommand("skills_reload")
+        ui._input.text = "/skill new my-skill"
+        ui._submit_enter()
+        assert await ui.read(AgentPrompt(kind="task")) == TerminalCommand("skill_create", "my-skill")
+    asyncio.run(scenario())
 
 
 def test_resume_and_compaction_commands_are_typed_and_preserve_path_spaces():
