@@ -50,6 +50,9 @@ _BASH_CALL_COUNT = 0
 _TOOL_CALL_COUNT = 0
 _CONTROL_SOCKET: socket.socket | None = None
 _CONTROL_LOCK = threading.Lock()
+_ACK_READ_LOCK = threading.Lock()
+_ACK_BUFFER = bytearray()
+_ACK_PENDING: dict[tuple[str, str], tuple[dict[str, Any], int]] = {}
 _REQUEST_CONTEXT = threading.local()
 _ACTIVE_REQUEST: ContextVar[dict | None] = ContextVar("active_code_request", default=None)
 _MAI_SESSION = None
@@ -265,27 +268,98 @@ def _emit(event: dict[str, Any]) -> None:
         output.at_line_start = True
 
 
-def _recv_host_ack(kind: str, id_key: str, request_id: str, timeout: float | None) -> dict[str, Any] | None:
-    """Read one fenced host reply. Callers serialize reads for each SDK session."""
+def _recv_host_ack(
+    kind: str, id_key: str, request_id: str, timeout: float | None,
+    max_bytes: int = 4096,
+) -> dict[str, Any] | None:
+    """Read one fenced host reply while preserving other concurrent replies."""
     if _CONTROL_SOCKET is None:
         return None
-    data = bytearray()
     deadline = time.monotonic() + timeout if timeout is not None else None
-    while (deadline is None or time.monotonic() < deadline) and len(data) < 4096:
-        try:
-            part = _CONTROL_SOCKET.recv(1)
-        except socket.timeout:
-            continue
-        if not part:
-            return None
-        data.extend(part)
-        if part == b"\n":
-            try:
-                reply = json.loads(data)
-            except (ValueError, UnicodeDecodeError):
+    key = (kind, request_id)
+    while deadline is None or time.monotonic() < deadline:
+        with _ACK_READ_LOCK:
+            cached = _ACK_PENDING.pop(key, None)
+            if cached is not None:
+                reply, size = cached
+                return reply if size <= max_bytes else None
+            newline = _ACK_BUFFER.find(b"\n")
+            if newline >= 0:
+                raw = bytes(_ACK_BUFFER[:newline + 1])
+                del _ACK_BUFFER[:newline + 1]
+                if len(raw) > 128 * 1024:
+                    return None
+                try:
+                    reply = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    return None
+                if not isinstance(reply, dict):
+                    return None
+                reply_kind = reply.get("kind")
+                reply_id = reply.get("call_id" if reply_kind == "mcp_reply" else
+                                     "guard_id" if reply_kind == "overlay_ack" else "request_id")
+                if reply_kind == kind and reply_id == request_id:
+                    return reply if len(raw) <= max_bytes else None
+                if reply_kind == kind and kind != "mcp_reply":
+                    # Existing GUI/overlay protocol treats a wrong correlation
+                    # ID as denial, not as a response to wait for indefinitely.
+                    return None
+                if isinstance(reply_kind, str) and isinstance(reply_id, str) and len(_ACK_PENDING) < 64:
+                    _ACK_PENDING[(reply_kind, reply_id)] = reply, len(raw)
+                continue
+            if len(_ACK_BUFFER) > 128 * 1024:
+                _ACK_BUFFER.clear()
                 return None
-            return reply if isinstance(reply, dict) and reply.get("kind") == kind and reply.get(id_key) == request_id else None
+            try:
+                part = _CONTROL_SOCKET.recv(65536)
+            except socket.timeout:
+                continue
+            if not part:
+                return None
+            _ACK_BUFFER.extend(part)
     return None
+
+
+class McpProxy:
+    """Narrow async MCP API exposed to model-authored code, never credentials."""
+
+    async def _request(self, operation: str, **fields: Any) -> dict:
+        _check_mcp_active_request()
+        if not _CONFIG.get("mcp_available") or _CONTROL_SOCKET is None:
+            raise RuntimeError("MCP_NOT_CONFIGURED: MCP is unavailable")
+        call_id = uuid.uuid4().hex
+        _emit({"type": "mcp_request", "call_id": call_id, "operation": operation, **fields})
+        reply = await asyncio.to_thread(
+            _recv_host_ack, "mcp_reply", "call_id", call_id, 130.0, 128 * 1024,
+        )
+        _check_mcp_active_request()
+        if reply is None:
+            raise RuntimeError("MCP_SERVER_UNAVAILABLE: MCP reply missing")
+        if reply.get("ok") is not True:
+            error = reply.get("error") or {}
+            raise RuntimeError(f"{error.get('code', 'MCP_TOOL_ERROR')}: {error.get('message', 'MCP operation failed')}")
+        result = reply.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("MCP_TOOL_ERROR: invalid MCP reply")
+        return result
+
+    async def list(self, server: str | None = None) -> dict:
+        if server is not None and not isinstance(server, str):
+            raise TypeError("MCP server must be a string or None")
+        return await self._request("list", server=server)
+
+    async def call(self, server: str, tool: str, arguments: dict) -> dict:
+        if not isinstance(server, str) or not isinstance(tool, str) or not isinstance(arguments, dict):
+            raise TypeError("MCP call requires server, tool, and a JSON argument object")
+        return await self._request("call", server=server, tool=tool, arguments=arguments)
+
+
+def _check_mcp_active_request() -> None:
+    token = _ACTIVE_REQUEST.get()
+    if (threading.current_thread() is not threading.main_thread() or token is None
+            or not token["active"]
+            or token["request_id"] != getattr(_REQUEST_CONTEXT, "request_id", None)):
+        raise RuntimeError("MCP 操作仅允许当前活动回复；旧任务或后台线程已被拒绝")
 
 
 async def _request_gui_approval(
@@ -2784,6 +2858,7 @@ def _bootstrap(loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
         "web": _SDK_WEB,
         "asyncio": asyncio,
         "skills": skill_runtime,
+        "mcp": McpProxy(),
     }
     global _EXEC_NAMESPACE
     _EXEC_NAMESPACE = namespace
