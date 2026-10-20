@@ -23,6 +23,17 @@ def run(*args, **kwargs):
     subprocess.run([str(x) for x in args], check=True, **kwargs)
 
 
+def copy_bundled_skills(source: Path, destination: Path) -> None:
+    """Copy only repository-shipped Skills into this build's app resources."""
+    if not source.is_dir() or source.is_symlink():
+        raise ValueError(f"bundled Skill directory missing or symlinked: {source}")
+    if any(path.is_symlink() for path in source.rglob("*")):
+        raise ValueError(f"bundled Skills contain a symlink: {source}")
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination, symlinks=False)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-runtime", action="store_true", help="Recompile UI in an existing local bundle")
@@ -80,6 +91,7 @@ def main():
     # Runtime source only: never copy local keys, configs, recordings, or runs.
     for source in (ROOT / "packages/harness/runtime").glob("*.py"):
         shutil.copy2(source, runtime / source.name)
+    copy_bundled_skills(ROOT / "packages/harness/skills", resources / "skills")
     if not args.skip_runtime:
         uv = shutil.which("uv")
         if not uv:

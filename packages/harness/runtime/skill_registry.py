@@ -19,6 +19,12 @@ _NAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
 _MARKER = re.compile(r"(?<![\w$])\$([a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?![\w-])")
 
 
+def default_skill_roots(runtime_file: Path | str) -> tuple[Path, Path]:
+    """Resolve bundled Skills from source checkout or app Resources/runtime."""
+    return (Path(runtime_file).resolve().parents[1] / "skills",
+            Path.home() / "Library/Application Support/Generalist/skills")
+
+
 @dataclass(frozen=True, slots=True)
 class SkillInfo:
     name: str

@@ -12,22 +12,25 @@ class SkillRuntime:
     def __init__(self, registry: SkillRegistry, emit: Callable[[dict[str, Any]], None]) -> None:
         self.registry = registry
         self.emit = emit
-        self._loaded: set[str] = set()
+        self._loaded: dict[str, SkillDocument] = {}
 
     def list(self) -> tuple[SkillInfo, ...]:
         return self.registry.discover()
 
     def load(self, name: str) -> SkillDocument:
+        if name in self._loaded:
+            return self._loaded[name]
         document = self.registry.load(name)
-        if name not in self._loaded:
-            info = document.info
-            self.emit({"type": "skill_loaded", "name": info.name, "source": info.source, "digest": info.digest})
-            self._loaded.add(name)
+        info = document.info
+        self.emit({"type": "skill_loaded", "name": info.name, "source": info.source, "digest": info.digest})
+        self._loaded[name] = document
         return document
 
     def read(self, name: str, relative_path: str) -> str:
         if name not in self._loaded:
             raise ValueError(f"load Skill '{name}' before reading its references")
+        if self.registry.load(name).info.digest != self._loaded[name].info.digest:
+            raise ValueError(f"Skill '{name}' changed; re-select it for a new task")
         return self.registry.read(name, relative_path)
 
     def reset_task(self) -> None:

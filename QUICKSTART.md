@@ -320,6 +320,47 @@ compaction. A successful manual summary is used on later turns and after `/resum
 manual summarization cancels it and pauses queued input; it does not leave the chat or roll back
 earlier computer actions.
 
+### Agent Skills
+
+Only `mac_agent` uses Skills; the GUI-only baseline does not. Bundled Skills are in
+`packages/harness/skills/` (or `Contents/Resources/skills/` in the macOS app). Personal Skills
+are in `~/Library/Application Support/Generalist/skills/`. To add another location, put an
+absolute path list in the existing top-level `local.json` object, for example
+`"skills_dirs": ["/Users/you/agent-skills"]`. The agent never scans the current working
+directory for Skills.
+
+Each immediate child directory is a Skill and must contain UTF-8 `SKILL.md` with `name` and
+`description` front matter. The name must match the lowercase kebab-case directory name:
+
+```markdown
+---
+name: my-workflow
+description: Use when a task needs this specific workflow.
+---
+
+# My workflow
+
+Describe the trigger, prerequisites, steps, verification, and when to stop and ask.
+```
+
+Use `/skills` to list, `/skill <name>` to select for the next task message, `/skill new <name>`
+to create a personal starter, and `/skills reload` after editing. A task can also contain an
+exact `$name` marker; the known marker is removed from model-facing task text while the original
+message remains in the trajectory. Unknown markers stay as text and produce a warning. Slash
+commands are TUI-only and wait for the next safe task boundary; `$name` works in plain CLI and
+demo hub too. A selected Skill applies to one task, not the entire conversation. A resumed
+unfinished task reloads its Skill only if its content digest still matches; `/resume` with a new
+message starts a new task and does not reactivate it.
+
+Discovery rejects duplicate names across roots, malformed metadata, out-of-root symlinks,
+files above the size limits, and relative `skills_dirs` entries. The limits are 64 Skills,
+240 characters per description, 64 KiB per `SKILL.md`, 256 KiB per text reference, and 16 KiB
+for the catalog. Skill references must be relative paths within their Skill directory. A Skill
+is lower-priority workflow guidance: it cannot authorize foreground mouse/keyboard takeover,
+sending, deletion, purchases, credential access, or other consequential actions. No Skill script
+or dependency is run or installed automatically. Do not put secrets into Skill files or run
+trajectories.
+
 ### One-shot / scripted: pass the first task as an argument
 
 ```bash

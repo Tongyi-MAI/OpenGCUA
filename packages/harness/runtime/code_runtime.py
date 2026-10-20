@@ -33,7 +33,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from skill_registry import SkillRegistry
+from skill_registry import SkillRegistry, default_skill_roots
 from skill_runtime import SkillRuntime
 
 
@@ -2753,8 +2753,7 @@ def _bootstrap(loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
     _start_keepalive(loop)
     roots = tuple(Path(root) for root in _CONFIG.get("skill_roots", ()))
     skill_registry = SkillRegistry(roots[0], roots[1], roots[2:]) if len(roots) >= 2 else SkillRegistry(
-        Path(__file__).resolve().parents[1] / "skills",
-        Path.home() / "Library/Application Support/Generalist/skills",
+        *default_skill_roots(__file__)
     )
     skill_registry.discover()
     skill_runtime = SkillRuntime(skill_registry, _emit)

@@ -40,7 +40,7 @@ from model_stream import (
     extract_reasoning, parse_code_action,
 )
 from resume_catalog import UI_API_MARKERS, ResumeError, inspect_resume_run, recent_resume_runs, validate_trajectory_ui_api
-from skill_registry import SkillRegistry, parse_explicit_skill
+from skill_registry import SkillRegistry, default_skill_roots, parse_explicit_skill
 from skill_context import SkillContext
 
 
@@ -578,8 +578,8 @@ AXValue 替换用 await ui.ax.set_text(node, "新值")；它是后台写入，�
 三种数值不能混用：① image.point(x,y,space="normalized_1000") 的 x/y 是当前截图内的 0–1000 比例，(0,0) 为左上、(1000,1000) 为右下；SDK 按截图实际宽高换成像素。② image.width/height 与 space="pixels" 表示该截图的像素，窗口截图不是桌面截图。③ node.bounds.x/y/width/height 是屏幕全局逻辑点，Bounds 是属性对象，不可当列表解包；Retina 缩放和窗口偏移使它不等于截图像素。
 优先传目标本身：有 AX 节点和同一窗口截图时 await ui.vision.click(node,image=image)；SDK 用截图几何把 node.bounds 映射到截图，不让模型手算倍率或窗口原点。没有可靠节点时 point = image.point(x,y,space="normalized_1000")，再 await ui.vision.click(point)；PointRef 已绑定截图，不能再传 image=image 或第二个 y。滚动的签名仍要求 x=point,y=None。节点、image、ui 必须属于同一窗口；窗口移动/缩放、页面滚动/重排、资源重置后重新观察。不要用桌面 image 的点点击窗口 ui，也不猜未读截图的位置；详见 mu.help("coordinates")。
 
-## PDF 表单例外
-原生 PDF 表单可能只有无名称 AXTextField；用截图标签、bounds 与只读表单元数据确认字段，editable=True 只按 AX role 推断，不证明 AXValue 可写。可见 GUI 填写时先激活并截目标窗，用同窗 image 进行前台点击、确认焦点，再 ui.input.text(value,delivery="foreground",timeout_ms=15000)；不要用后台 ui.ax.click(node) 的回执推断前台键盘焦点。改已有值时在已确认的编辑焦点内用前台 Cmd+A 选中，再输入，避免重新聚焦导致追加。仅后台且确认支持 AXValue 时才用 set_text 并核验。Preview 合成节点可能拒绝 AXValue/AXFocus；不能凭回执、print 或节点回显断言 PDF 已保存。
+## PDF 表单
+处理原生 PDF 表单时，查看可用 Skill 目录；如有 pdf-form，先用 skills.load("pdf-form") 获取专门流程。仍遵守上面的全局 AX、坐标、前台授权与结果核验规则。
 
 ## 网页浏览器 web
 普通网页用有界面的独立 web，优先 DOM/Playwright，不主动激活浏览器。后台模式按需启动，web is None 且任务确需网页时先 web = await reset_web()；然后 import uuid; new_tab_id = uuid.uuid4().hex; before_tabs = await web.browser.list_tabs(); tab = await web.browser.new_tab(url, action_id=new_tab_id); pg = tab.playwright。用唯一 pg.locator(选择器).fill/.click/.press、pg.evaluate(js) 读 DOM；导航/弹窗按需提高 SDK timeout_ms，不无限等待。不默认操作用户 Chrome，也不通过 osascript execute javascript 或 defaults 改 Chrome 开关。
@@ -2168,8 +2168,7 @@ async def run_agent(
         raise SystemExit(f"不支持的 UI API：{ui_api!r}")
     manual_compact_callback: Callable[[], Awaitable[None]] | None = None
     try:
-        bundled_skills = Path(__file__).resolve().parents[1] / "skills"
-        personal_skills = Path.home() / "Library/Application Support/Generalist/skills"
+        bundled_skills, personal_skills = default_skill_roots(__file__)
         configured_skills = getattr(args, "skills_dirs", ()) or ()
         if not isinstance(configured_skills, (list, tuple)):
             raise ValueError("skills_dirs must be a list of absolute directories")

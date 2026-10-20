@@ -45,3 +45,17 @@ def test_executor_serializes_only_explicit_roots(tmp_path):
         enable_bash=False, skill_roots=(tmp_path / "one",),
     )
     assert executor._config()["skill_roots"] == [str(tmp_path / "one")]
+
+
+def test_active_skill_does_not_silently_switch_revision_after_catalog_reload(tmp_path):
+    folder = tmp_path / "bundle" / "example"
+    folder.mkdir(parents=True)
+    document = folder / "SKILL.md"
+    document.write_text("---\nname: example\ndescription: Example\n---\n\nOriginal body.\n")
+    registry = SkillRegistry(tmp_path / "bundle", tmp_path / "personal")
+    registry.discover()
+    runtime = SkillRuntime(registry, lambda _event: None)
+    assert "Original body" in runtime.load("example").body
+    document.write_text("---\nname: example\ndescription: Example\n---\n\nChanged body.\n")
+    runtime.list()
+    assert "Original body" in runtime.load("example").body

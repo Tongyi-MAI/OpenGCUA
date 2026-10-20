@@ -1069,7 +1069,9 @@ def test_macos_prompt_does_not_treat_ax_value_as_foreground_typing():
     assert 'ui.ax.set_text(node,value,delivery="foreground"' not in prompt
     assert "AXValue 替换" in prompt and "它是后台写入" in prompt
     assert 'ui.input.text(value,delivery="foreground"' in prompt
-    assert "editable=True 只按 AX role 推断" in prompt
+    assert 'skills.load("pdf-form")' in prompt
+    pdf_skill = (Path(__file__).resolve().parents[2] / "skills/pdf-form/SKILL.md").read_text(encoding="utf-8")
+    assert "`editable=True` as proof" in pdf_skill
 
 
 def test_macos_prompt_bounds_temporary_pip_install():

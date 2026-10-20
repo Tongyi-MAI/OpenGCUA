@@ -221,6 +221,21 @@ installation and wheel builds, see the [SDK guide](packages/sdk/README.md#instal
 The terminal TUI receives new features more frequently and may change faster. The macOS app is
 the stability-focused version, with a more conservative update cadence.
 
+### Agent Skills
+
+The macOS harness can use local `SKILL.md` workflows on demand. It advertises each Skill's name
+and short description first; the full instructions enter the model context only after you select
+one or the agent calls `skills.load("name")`. The source checkout includes a
+[PDF-form example](packages/harness/skills/pdf-form/SKILL.md); the macOS app bundles the same
+built-ins. Skills do not grant computer permissions or automatically run scripts.
+
+In the visual TUI, `/skills` lists available workflows, `/skill pdf-form` selects one for your
+next message, `/skill new my-workflow` creates a personal starter, and `/skills reload` picks up
+edits. You can also put an exact `$pdf-form` marker in a task message (including plain CLI or demo
+hub input). Personal Skills live in `~/Library/Application Support/Generalist/skills/`; additional
+absolute directories can be listed in `skills_dirs` in `local.json`. See the
+[Skill authoring and troubleshooting guide](QUICKSTART.md#agent-skills) for the format and limits.
+
 ## Native macOS app
 
 [OpenGCUA for macOS](packages/macos/README.md) implements the menu bar assistant:
