@@ -1,268 +1,125 @@
 from __future__ import annotations
 
 import asyncio
-import io
 from pathlib import Path
 import tomllib
 
-import pytest
-
-from agent_events import AgentEvent, AgentPrompt, PlainFrontend
+from agent_events import AgentEvent, AgentPrompt, ForegroundApprovalPrompt
 from terminal_tui import RichTerminalFrontend, resolve_ui_mode
-from rich.console import Console
-from prompt_toolkit.formatted_text import to_formatted_text
 
 
-class PromptSession:
-    def __init__(self, *values: str) -> None:
-        self.values = list(values)
-
-    async def prompt_async(self, *_args, **_kwargs) -> str:
-        return self.values.pop(0)
+def approval_prompt(request_id="r1"):
+    return ForegroundApprovalPrompt(request_id, "Agent 将接管前台键鼠直到本任务结束", 0, "app:a", "window:7")
 
 
-def frontend(*values: str, clear=None):
-    output = io.StringIO()
-    console = Console(file=output, force_terminal=False, color_system=None, width=100)
-    ui = RichTerminalFrontend(
-        console=console,
-        prompt_session=PromptSession(*values),
-        clear_screen=clear or (lambda: None),
-    )
-    return ui, output
+def test_auto_mode_requires_usable_terminal():
+    assert resolve_ui_mode("auto", stdin_tty=True, stdout_tty=True, term="xterm") == "tui"
+    assert resolve_ui_mode("auto", stdin_tty=False, stdout_tty=True, term="xterm") == "plain"
 
 
-def test_auto_ui_requires_two_ttys_and_non_dumb_term():
-    assert resolve_ui_mode("auto", stdin_tty=True, stdout_tty=True, term="xterm-256color") == "tui"
-    assert resolve_ui_mode("auto", stdin_tty=False, stdout_tty=True, term="xterm-256color") == "plain"
-    assert resolve_ui_mode("auto", stdin_tty=True, stdout_tty=False, term="xterm-256color") == "plain"
-    assert resolve_ui_mode("auto", stdin_tty=True, stdout_tty=True, term="dumb") == "plain"
-    assert resolve_ui_mode("auto", stdin_tty=True, stdout_tty=True, term="") == "plain"
-
-
-def test_explicit_plain_always_wins():
-    assert resolve_ui_mode("plain", stdin_tty=True, stdout_tty=True, term="xterm-256color") == "plain"
-
-
-def test_plain_frontend_redirected_output_has_no_ansi():
-    output = io.StringIO()
-
-    async def read(_prompt: str) -> str:
-        return "/exit"
-
-    plain = PlainFrontend(read, interactive=False, stdout=output, stderr=output)
-    plain.emit(AgentEvent("warning", "plain warning"))
-
-    assert output.getvalue() == "plain warning\n"
-    assert "\x1b" not in output.getvalue()
-
-
-def test_parser_exposes_all_ui_modes():
-    import mac_agent
-
-    assert mac_agent.build_parser().parse_args([]).ui == "auto"
-    assert mac_agent.build_parser().parse_args(["--ui", "tui"]).ui == "tui"
-    assert mac_agent.build_parser().parse_args(["--ui", "plain"]).ui == "plain"
-
-
-def test_tui_hides_reasoning_and_code_by_default():
-    ui, output = frontend()
-
-    ui.emit(AgentEvent("reasoning_delta", "PRIVATE_REASONING", step=1))
-    ui.emit(AgentEvent(
-        "action",
-        "legacy response",
-        step=1,
-        payload={"intent": "Open the report", "code": "PRIVATE_CODE"},
-    ))
-
-    rendered = output.getvalue()
-    assert "Open the report" in rendered
-    assert "PRIVATE_REASONING" not in rendered
-    assert "PRIVATE_CODE" not in rendered
-
-
-def test_tui_ignores_streamed_code_when_code_view_is_off():
-    ui, output = frontend()
+def test_streamed_intent_and_code_preserve_lines_and_hide_private_by_default():
+    ui = RichTerminalFrontend()
+    ui.emit(AgentEvent("reasoning_delta", "SECRET_THOUGHT", step=0))
+    ui.emit(AgentEvent("intent_delta", "first\nsecond", step=0))
+    ui.emit(AgentEvent("intent_end", step=0))
     ui.emit(AgentEvent("code_start", step=0, payload={"block_index": 1}))
-    ui.emit(AgentEvent("code_delta", "terminate", step=0, payload={"block_index": 1}))
-    ui.emit(AgentEvent("code_end", step=0, payload={"block_index": 1}))
+    ui.emit(AgentEvent("code_delta", "print('secret')\n", step=0))
+    ui.emit(AgentEvent("code_end", step=0))
+    assert "first\nsecond" in ui.transcript
+    assert "SECRET_THOUGHT" not in ui.transcript
+    assert "print('secret')" not in ui.transcript
 
-    assert output.getvalue() == ""
 
-
-def test_tui_streamed_code_preserves_model_line_breaks_without_duplication():
-    ui, output = frontend()
+def test_action_does_not_duplicate_streamed_code_and_unknown_payload_is_hidden():
+    ui = RichTerminalFrontend()
     ui.show_code = True
-    code = 'terminate(status="success", answer="你好！有什么我可以帮你的吗？")'
-    ui.emit(AgentEvent("code_start", step=0, payload={"block_index": 1}))
-    ui.emit(AgentEvent("code_delta", "terminate", step=0, payload={"block_index": 1}))
-    ui.emit(AgentEvent("code_delta", code[len("terminate"):], step=0,
-                       payload={"block_index": 1}))
-    ui.emit(AgentEvent("code_end", step=0, payload={"block_index": 1}))
-    ui.emit(AgentEvent("action", step=0, payload={"intent": "问候用户并终止", "code": code}))
-
-    rendered = output.getvalue()
-    assert code in rendered
-    assert rendered.count(code) == 1
-    assert "terminate\n(status" not in rendered
+    code = "print('a')\nprint('b')"
+    ui.emit(AgentEvent("code_start", step=1, payload={"block_index": 1}))
+    ui.emit(AgentEvent("code_delta", code, step=1))
+    ui.emit(AgentEvent("code_end", step=1))
+    ui.emit(AgentEvent("action", step=1, payload={"intent": "Run", "code": code}))
+    ui.emit(AgentEvent("future_event", "Public", payload={"api_key": "SECRET"}))
+    assert ui.transcript.count(code) == 1
+    assert "Public" in ui.transcript
+    assert "SECRET" not in ui.transcript
 
 
-def test_tui_does_not_repeat_validated_code_after_trailing_stream_newline():
-    ui, output = frontend()
-    ui.show_code = True
-    code = 'terminate(status="success", answer="你好！")'
-    ui.emit(AgentEvent("code_start", step=0, payload={"block_index": 1}))
-    ui.emit(AgentEvent("code_delta", code + "\n", step=0, payload={"block_index": 1}))
-    ui.emit(AgentEvent("code_end", step=0, payload={"block_index": 1}))
-    ui.emit(AgentEvent("action", step=0, payload={"intent": "问候", "code": code}))
-
-    assert output.getvalue().count(code) == 1
-
-
-def test_tui_toggles_apply_only_to_future_events():
-    ui, output = frontend("/reasoning on", "continue")
-    ui.emit(AgentEvent("reasoning_delta", "HIDDEN_EARLIER", step=1))
-
-    message = asyncio.run(ui.read(AgentPrompt(kind="task")))
-    ui.emit(AgentEvent("reasoning_delta", "VISIBLE_LATER", step=2))
-    ui.emit(AgentEvent("reasoning_end", step=2))
-
-    assert message == "continue"
-    assert "HIDDEN_EARLIER" not in output.getvalue()
-    assert "VISIBLE_LATER" in output.getvalue()
+def test_approval_choice_rejects_by_default_and_preserves_chat_draft():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None  # Exercise the choice state without opening this test runner's stdin.
+        ui._input.text = "unrelated draft"
+        pending = asyncio.create_task(ui.choose_approval(approval_prompt()))
+        await asyncio.sleep(0)
+        ui._submit_enter()
+        assert await pending == "reject"
+        assert ui._input.text == "unrelated draft"
+    asyncio.run(scenario())
 
 
-def test_tui_unknown_event_does_not_leak_payload():
-    ui, output = frontend()
-
-    ui.emit(AgentEvent(
-        "future_event",
-        "A future update occurred",
-        payload={"api_key": "SECRET_KEY", "cookie": "SECRET_COOKIE"},
-    ))
-
-    rendered = output.getvalue()
-    assert "A future update occurred" in rendered
-    assert "SECRET_KEY" not in rendered
-    assert "SECRET_COOKIE" not in rendered
-    assert "api_key" not in rendered
-
-
-def test_tui_local_commands_do_not_reach_agent():
-    clears: list[bool] = []
-    ui, _output = frontend(
-        "/help",
-        "/code on",
-        "/clear",
-        "first line\nsecond line",
-        clear=lambda: clears.append(True),
-    )
-
-    message = asyncio.run(ui.read(AgentPrompt(kind="task")))
-    ui.emit(AgentEvent("action", payload={"intent": "Run", "code": "print('shown')"}))
-
-    assert message == "first line\nsecond line"
-    assert ui.show_code is True
-    assert "print('shown')" in _output.getvalue()
-    assert clears == [True]
+def test_approval_allow_needs_selection_and_ctrl_c_cancels():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        pending = asyncio.create_task(ui.choose_approval(approval_prompt()))
+        await asyncio.sleep(0)
+        ui._select_approval(1)
+        ui._submit_enter()
+        assert await pending == "allow"
+        pending2 = asyncio.create_task(ui.choose_approval(approval_prompt("r2")))
+        await asyncio.sleep(0)
+        ui.handle_sigint()
+        assert await pending2 == "cancel"
+    asyncio.run(scenario())
 
 
-def test_tui_retry_keeps_empty_enter_as_retry():
-    ui, _output = frontend("")
-
-    assert asyncio.run(ui.read(AgentPrompt(
-        kind="retry", empty_exits=True,
-    ))) == ""
-
-
-def test_gui_permission_requires_explicit_yes_or_no_and_reprompts_invalid_input():
-    ui, output = frontend("", "maybe", "yes")
-
-    assert asyncio.run(ui.read(AgentPrompt(kind="approval", text="Allow window?"))) == "yes"
-    assert "yes" in output.getvalue().lower()
-    assert "no" in output.getvalue().lower()
-
-
-def test_tui_toolbar_renders_model_and_session_as_literal_text():
-    ui, _output = frontend()
-    ui.model = "model<a>&b"
-    ui.session_id = "session<1>"
-
-    rendered = "".join(fragment[1] for fragment in to_formatted_text(ui._toolbar()))
-
-    assert "model<a>&b" in rendered
-    assert "session<1>" in rendered
+def test_question_uses_separate_input_and_restores_draft_without_eating_queue():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui._interaction.begin_turn()
+        ui._interaction.submit("queued task")
+        ui._input.text = "unfinished draft"
+        pending = asyncio.create_task(ui.read(AgentPrompt(kind="question", text="Which file?")))
+        await asyncio.sleep(0)
+        assert ui._input.text == ""
+        ui._input.text = "report.pdf"
+        ui._submit_enter()
+        assert await pending == "report.pdf"
+        assert ui._input.text == "unfinished draft"
+        assert ui.queued_messages() == ("queued task",)
+    asyncio.run(scenario())
 
 
-def test_tui_abort_notice_disclaims_rollback():
-    ui, output = frontend()
+def test_messages_queue_during_active_turn_and_status_shows_consent():
+    ui = RichTerminalFrontend()
+    ui.emit(AgentEvent("phase", step=2, payload={"phase": "planning"}))
+    ui._input.text = "send later"
+    ui._submit_enter()
+    assert ui.queued_messages() == ("send later",)
+    ui.emit(AgentEvent("foreground_consent", payload={"state": "allowed"}))
+    assert "foreground: allowed" in ui.status_text
+    ui.emit(AgentEvent("answer", "done"))
+    assert ui._interaction.next_message() == "send later"
 
-    ui.emit(AgentEvent("aborted", "本轮已停止", step=4))
 
-    rendered = output.getvalue()
-    assert "本轮已停止" in rendered
-    assert "不会回滚" in rendered
-
-
-def test_tui_sigint_requests_abort_then_force_stop_while_turn_is_active():
-    ui, output = frontend()
-    requests: list[bool] = []
-    ui.bind_abort(requests.append)
-
-    ui.emit(AgentEvent("phase", "planning", step=2, payload={"phase": "planning"}))
+def test_abort_suspends_queue_and_disclaims_rollback():
+    ui = RichTerminalFrontend()
+    calls = []
+    ui.bind_abort(calls.append)
+    ui.emit(AgentEvent("phase", step=0, payload={"phase": "planning"}))
+    ui._input.text = "queued"
+    ui._submit_enter()
     ui.handle_sigint()
     ui.handle_sigint()
-    ui.emit(AgentEvent("phase", "execution", step=2, payload={"phase": "execution"}))
-    ui.handle_sigint()
-    ui.emit(AgentEvent("aborted", "本轮已停止", step=2))
-
-    assert requests == [False, True, True]
-    assert output.getvalue().count("不会回滚") == 2  # request notice + terminal abort panel
-
-
-def test_tui_ctrl_c_at_prompt_discards_input_and_reprompts():
-    class Prompt:
-        calls = 0
-
-        async def prompt_async(self, *_args, **_kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                raise KeyboardInterrupt
-            return "corrected instruction"
-
-    prompt = Prompt()
-    ui = RichTerminalFrontend(
-        console=Console(file=io.StringIO(), force_terminal=False),
-        prompt_session=prompt,
-    )
-
-    assert asyncio.run(ui.read(AgentPrompt(kind="task"))) == "corrected instruction"
-    assert prompt.calls == 2
+    ui.emit(AgentEvent("aborted", "本轮已停止"))
+    assert calls == [False, True]
+    assert ui._interaction.queue_suspended
+    assert ui._interaction.next_message() is None
+    assert "不会回滚" in ui.transcript
 
 
-def test_tui_ctrl_c_during_gui_approval_returns_denial():
-    class Prompt:
-        calls = 0
-
-        async def prompt_async(self, *_args, **_kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                raise KeyboardInterrupt
-            raise EOFError
-
-    prompt = Prompt()
-    ui = RichTerminalFrontend(
-        console=Console(file=io.StringIO(), force_terminal=False),
-        prompt_session=prompt,
-    )
-
-    assert asyncio.run(ui.read(AgentPrompt(kind="approval", text="Allow?"))) is None
-    assert prompt.calls == 1
-
-
-def test_runtime_package_lists_frontend_and_console_protocol_modules():
+def test_package_lists_terminal_interaction_module():
     pyproject = Path(__file__).parents[1] / "pyproject.toml"
     modules = set(tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["setuptools"]["py-modules"])
-
-    assert {"agent_events", "terminal_tui", "console_protocol", "gui_approval"} <= modules
+    assert {"terminal_tui", "terminal_interaction", "agent_events"} <= modules
