@@ -772,6 +772,8 @@ def test_background_ax_action_dispatches_without_approval(monkeypatch):
 
 @pytest.mark.parametrize("app_id,window_id,message", [
     ("app:a", None, {"op": "action", "action": "point_click", "delivery": "foreground"}),
+    ("app:a", None, {"op": "action", "action": "point_click",
+                      "delivery": "foreground", "window_id": "window:7"}),
     ("app:a", "window:7", {"op": "action", "action": "input_text",
                             "delivery": "foreground", "window_id": "window:8"}),
 ])

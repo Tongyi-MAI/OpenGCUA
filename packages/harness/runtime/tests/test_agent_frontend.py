@@ -505,3 +505,26 @@ def test_interactive_wrapper_starts_and_stops_ui_even_on_error(monkeypatch):
     with pytest.raises(RuntimeError, match="failure"):
         asyncio.run(mac_agent.run_interactive_agent(object(), frontend))
     assert frontend.events == ["start", "run", "stop", "close"]
+
+
+def test_interactive_wrapper_reports_terminal_failure(monkeypatch):
+    import mac_agent
+
+    class Frontend:
+        terminal_error = EOFError()
+
+        def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    async def finish(_args, *, frontend):
+        return 0
+
+    monkeypatch.setattr(mac_agent, "run_agent", finish)
+    with pytest.raises(SystemExit, match="terminal closed unexpectedly"):
+        asyncio.run(mac_agent.run_interactive_agent(object(), Frontend()))

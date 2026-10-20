@@ -2346,9 +2346,8 @@ def _instrument_sdk_session(session: Any) -> None:
             app_id, window_id = scope
             attached_app = getattr(device, "_app_id", None)
             attached_window = getattr(device, "_window_id", None)
-            if (not app_id or not window_id
-                    or (attached_app and app_id != attached_app)
-                    or (attached_window and window_id != attached_window)):
+            if (not app_id or not window_id or not attached_app or not attached_window
+                    or app_id != attached_app or window_id != attached_window):
                 raise MuError("INPUT_REFUSED", "GUI approval requires an exact bound app/window target")
             async with control_ack_lock:
                 approved = await _request_gui_approval(app_id, window_id)

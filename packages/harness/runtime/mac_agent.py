@@ -3455,10 +3455,13 @@ async def run_interactive_agent(args: argparse.Namespace, frontend: AgentFronten
     try:
         with patch_stdout(raw=True):
             frontend.start()
-            return await run_agent(args, frontend=frontend)
+            result = await run_agent(args, frontend=frontend)
     finally:
         await frontend.stop()
         frontend.close()
+    if getattr(frontend, "terminal_error", None) is not None:
+        raise SystemExit("OpenGCUA terminal closed unexpectedly; pending work was stopped")
+    return result
 
 
 def boolean_flag(

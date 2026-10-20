@@ -76,6 +76,7 @@ class RichTerminalFrontend:
         self._reasoning_open = False
         self._intent_open = False
         self._exit_requested = False
+        self.terminal_error: BaseException | None = None
 
     @property
     def transcript(self) -> str:
@@ -149,6 +150,7 @@ class RichTerminalFrontend:
         if task.cancelled():
             return
         error = task.exception()
+        self.terminal_error = error
         if self.turn_active and self._abort_callback is not None:
             self._abort_callback(True)
         if self._approval_answer is not None:
