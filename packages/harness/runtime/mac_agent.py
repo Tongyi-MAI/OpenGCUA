@@ -26,6 +26,7 @@ from typing import Any, Awaitable, Callable
 from agent_events import AgentEvent, AgentFrontend, AgentPrompt, ForegroundApprovalPrompt, PlainFrontend, TerminalCommand, emit_safely, model_status_event
 from console_protocol import decode_console_message
 from code_executor import BLOCK_PROGRESS_FIELDS, CodeExecutor
+from mcp_config import load_unique_json
 from gui_approval import GuiGrantStore, request_gui_approval
 from sdk_backend import CuaDesktop, CuaRpcServer, Observation
 from llm_compaction import CompactionConfig, CompactionState, maybe_compact, restore_state
@@ -4007,6 +4008,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
     parser.add_argument("--skills-dir", dest="skills_dirs", action="append", type=Path, default=[],
                         help="add an absolute Skill discovery root (config key: skills_dirs)")
+    parser.add_argument("--mcp-servers", type=load_unique_json, default={},
+                        help="opt-in MCP stdio server configuration (config key: mcp_servers)")
     boolean_flag(parser, "bash", default=True, help_text="allow bash() in model code")
     boolean_flag(parser, "intent", default=True, help_text="require <intent> output")
     boolean_flag(parser, "todo", default=True, help_text="enable persistent TODO ledger")
@@ -4048,14 +4051,14 @@ def main() -> int:
         pre = parser.parse_args()
         cfg_path = _default_config_path(pre.config)
         if cfg_path:
-            cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+            cfg = load_unique_json(Path(cfg_path).read_text(encoding="utf-8"))
             cfg = {k: v for k, v in cfg.items() if not str(k).startswith("_")}
             known = {a.dest for a in parser._actions}
             parser.set_defaults(**{k: v for k, v in cfg.items() if k in known})
         args = parser.parse_args()
         configure_runtime_mode(args)
         if not args.api_key and cfg_path:  # config 里的 api_key 作为兜底（local.json 已 gitignore）
-            cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+            cfg = load_unique_json(Path(cfg_path).read_text(encoding="utf-8"))
             if cfg.get("api_key"):
                 args.api_key = cfg["api_key"]
         from terminal_tui import build_rich_frontend, resolve_ui_mode
