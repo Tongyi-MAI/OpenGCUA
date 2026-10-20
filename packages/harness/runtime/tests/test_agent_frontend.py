@@ -57,6 +57,50 @@ def test_agent_event_is_immutable_and_preserves_payload():
         event.payload["attempt"] = 4  # type: ignore[index]
 
 
+def test_resume_handoff_is_typed_and_tui_supervisor_waits_for_new_message(monkeypatch, tmp_path):
+    import argparse
+    from pathlib import Path
+    import mac_agent
+    from resume_catalog import ResumeCandidate
+
+    old = tmp_path / "old"
+    selected = tmp_path / "saved run"
+    selected.mkdir()
+    calls = []
+
+    async def fake_run(args, *, frontend):
+        calls.append((args.resume, args.task))
+        if len(calls) == 1:
+            return mac_agent.ResumeHandoff(selected, old)
+        return 0
+
+    class Frontend:
+        interactive = True
+        terminal_error = None
+        def __init__(self):
+            self.messages = ["new request"]
+            self.events = []
+        def start(self): self.events.append("start")
+        async def stop(self): self.events.append("stop")
+        def close(self): self.events.append("close")
+        def emit(self, event): self.events.append(event.kind)
+        async def read(self, prompt):
+            self.events.append("read:" + prompt.kind)
+            return self.messages.pop(0)
+        def suspend_queue_for_resume(self): self.events.append("suspend")
+
+    monkeypatch.setattr(mac_agent, "run_agent", fake_run)
+    monkeypatch.setattr(mac_agent, "inspect_resume_run", lambda path, *, ui_api: ResumeCandidate(path, "s", "old task", "success", "now", 1, 0))
+    monkeypatch.setattr("prompt_toolkit.patch_stdout.patch_stdout", lambda **_kw: __import__("contextlib").nullcontext())
+    ui = Frontend()
+    result = asyncio.run(mac_agent.run_interactive_agent(argparse.Namespace(task="original", resume=None), ui))
+    assert result == 0
+    assert calls == [(None, "original"), (str(selected), "new request")]
+    assert ui.events.index("suspend") < ui.events.index("read:task")
+    assert ui.events.count("start") == 1
+    assert ui.events[-2:] == ["stop", "close"]
+
+
 def test_plain_frontend_decodes_framed_multiline_as_one_message():
     frames = [encode_console_message("first line\nsecond line").decode("utf-8")]
 
@@ -254,7 +298,8 @@ def test_frontend_failure_does_not_escape_agent_event_delivery():
 
 
 def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_correct=False,
-                    simulate_gui_approval=False, simulate_question_abort=False):
+                    simulate_gui_approval=False, simulate_question_abort=False,
+                    resume_target=None):
     import llm_entry
     import mac_agent
     from code_executor import CodeExecutionResult, empty_control
@@ -361,15 +406,22 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
     monkeypatch.setattr(mac_agent, "plan_code", plan)
     monkeypatch.setattr(llm_entry, "build_model_client", lambda *_args, **_kwargs: client)
 
-    args = mac_agent.build_parser().parse_args([
+    argv = [
         "hello",
         "--allow-empty-api-key",
         "--countdown", "0",
-        "--disable-multi-task",
         "--startup-observation", "none",
         "--runs-dir", str(tmp_path),
-    ])
+    ]
+    if resume_target is None:
+        argv.append("--disable-multi-task")
+    args = mac_agent.build_parser().parse_args(argv)
     frontend = RecordingFrontend()
+    if resume_target is not None:
+        frontend.interactive = True
+        async def switch(_prompt):
+            return agent_events.TerminalCommand("resume", str(resume_target))
+        frontend.read = switch
     if abort_then_correct:
         frontend.interactive = True
         async def correction(_prompt):
@@ -411,6 +463,62 @@ def test_run_agent_emits_structured_lifecycle_action_and_answer(tmp_path, monkey
     assert kinds[-1] == "finished"
     assert next(event for event in events if event.kind == "action").payload["intent"] == "reply"
     assert next(event for event in events if event.kind == "answer").text == "Verified result"
+
+
+def test_resume_with_new_message_appends_task_without_replaying_old_one(tmp_path, monkeypatch):
+    import mac_agent
+
+    first, _, _ = _run_fake_agent(tmp_path, monkeypatch)
+    assert first == 0
+    run = next(tmp_path.glob("*/traj.json")).parent
+    previous = json.loads((run / "traj.json").read_text(encoding="utf-8"))
+    assert len(previous["tasks"]) == 1 and len(previous["steps"]) == 1
+
+    args = mac_agent.build_parser().parse_args([
+        "new request", "--resume", str(run), "--allow-empty-api-key",
+        "--countdown", "0", "--disable-multi-task", "--startup-observation", "none",
+        "--runs-dir", str(tmp_path),
+    ])
+    result = asyncio.run(mac_agent.run_agent(args, frontend=RecordingFrontend()))
+    assert result == 0
+    restored = json.loads((run / "traj.json").read_text(encoding="utf-8"))
+    assert [item["task"] for item in restored["tasks"]] == ["hello", "new request"]
+    assert [item["first_step"] for item in restored["tasks"]] == [0, 1]
+    assert len(restored["steps"]) == 2
+    assert len(restored["resume_history"]) == 1
+
+
+def test_resume_handoff_closes_current_runtime_without_writing_selected_run(tmp_path, monkeypatch):
+    import mac_agent
+
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    _run_fake_agent(target_root, monkeypatch)
+    target = next(target_root.glob("*/traj.json")).parent
+    target_before = (target / "traj.json").read_bytes()
+    current_root = tmp_path / "current"
+    current_root.mkdir()
+    result, events, _ = _run_fake_agent(current_root, monkeypatch, resume_target=target)
+    assert isinstance(result, mac_agent.ResumeHandoff)
+    assert result.path == target.resolve()
+    assert result.previous_path == next(current_root.glob("*/traj.json")).parent.resolve()
+    assert (target / "traj.json").read_bytes() == target_before
+    assert not any(event.kind == "error" for event in events)
+
+
+def test_legacy_cli_resume_without_new_message_keeps_existing_task(tmp_path, monkeypatch):
+    import mac_agent
+
+    _run_fake_agent(tmp_path, monkeypatch)
+    run = next(tmp_path.glob("*/traj.json")).parent
+    args = mac_agent.build_parser().parse_args([
+        "--resume", str(run), "--allow-empty-api-key", "--countdown", "0",
+        "--disable-multi-task", "--startup-observation", "none", "--runs-dir", str(tmp_path),
+    ])
+    assert asyncio.run(mac_agent.run_agent(args, frontend=RecordingFrontend())) == 0
+    restored = json.loads((run / "traj.json").read_text(encoding="utf-8"))
+    assert [item["task"] for item in restored["tasks"]] == ["hello"]
+    assert len(restored["steps"]) == 2
 
 
 def test_typed_foreground_choice_is_task_scoped_and_cleared_on_completion(tmp_path, monkeypatch):

@@ -21,7 +21,7 @@ from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
-from agent_events import AgentEvent, AgentPrompt, ConsentChoice, ForegroundApprovalPrompt
+from agent_events import AgentEvent, AgentPrompt, ConsentChoice, ForegroundApprovalPrompt, TerminalCommand
 from terminal_interaction import TerminalInteraction
 from resume_catalog import ResumeCandidate
 
@@ -40,6 +40,8 @@ class SlashCommandCompleter(Completer):
         ("/reasoning", "显示或隐藏后续 reasoning", True),
         ("/code", "显示或隐藏后续代码", True),
         ("/clear", "清空可见输出，不清除会话", False),
+        ("/resume", "选择历史会话；可加运行目录", False),
+        ("/compaction", "立即尝试压缩历史上下文", False),
         ("/exit", "退出程序", False),
     )
     _ARGUMENTS = {
@@ -202,7 +204,7 @@ class RichTerminalFrontend:
         self._heartbeat_task: asyncio.Task | None = None
         self._events: asyncio.Queue[AgentEvent | None] | None = None
         self._event_task: asyncio.Task | None = None
-        self._pending_read: asyncio.Future[str | None] | None = None
+        self._pending_read: asyncio.Future[str | TerminalCommand | None] | None = None
         self._pending_kind: str | None = None
         self._saved_draft: str | None = None
         self._approval: ForegroundApprovalPrompt | None = None
@@ -217,7 +219,7 @@ class RichTerminalFrontend:
         self._abort_callback: Callable[[bool], None] | None = None
         self._abort_requested = False
         self._pending_correction: str | None = None
-        self._ready_direct: deque[str] = deque()
+        self._ready_direct: deque[str | TerminalCommand] = deque()
         self._code_open = False
         self._code_step: int | None = None
         self._code_preview: dict[int, str] = {}
@@ -242,7 +244,7 @@ class RichTerminalFrontend:
     @property
     def status_text(self) -> str:
         step = "-" if self.step is None else str(self.step)
-        queued = len(self._interaction.queued_messages()) + len(self._ready_direct)
+        queued = len(self._interaction.queued_items()) + len(self._ready_direct)
         if self._pending_correction:
             queued += 1
         suspended = " (paused)" if self._interaction.queue_suspended else ""
@@ -419,7 +421,7 @@ class RichTerminalFrontend:
             self._finish_resume(None)
         if self._pending_read is not None:
             self._finish_read(None)
-        if (self._interaction.queued_messages() or self._pending_correction or self._ready_direct) and not self._exit_requested:
+        if (self._interaction.queued_items() or self._pending_correction or self._ready_direct) and not self._exit_requested:
             print("OpenGCUA: terminal closed with unsent queued messages.", file=sys.stderr)
         if error is not None:
             self._append(f"\nTerminal unavailable: {type(error).__name__}\n")
@@ -554,7 +556,7 @@ class RichTerminalFrontend:
                 self._finish_resume(None)
 
     def _request_exit(self) -> None:
-        if (self._interaction.queued_messages() or self._pending_correction or self._ready_direct) and not self._exit_requested:
+        if (self._interaction.queued_items() or self._pending_correction or self._ready_direct) and not self._exit_requested:
             self._exit_requested = True
             self._append("\n仍有排队消息未发送；再按 Ctrl-D 或输入 /exit 确认退出。\n")
             return
@@ -574,19 +576,19 @@ class RichTerminalFrontend:
             self._append("\nEnter 发送 · Alt+Enter 换行 · Ctrl-C 中止当前轮 · Ctrl-D 退出\n"
                          "输入 / 可浏览命令；方向键选择，Tab 补全，Enter 选中或执行\n"
                          "/queue 查看 · /queue send 继续队列 · /queue clear 清空队列\n"
-                         "/new <消息> · /status · /reasoning on|off · /code on|off · /clear · /exit\n")
+                         "/new <消息> · /resume [run 目录] · /compaction · /status · /reasoning on|off · /code on|off · /clear · /exit\n")
             return True
         if command == "/status":
             self._append("\nSession: " + (self.session_id or "(not started)")
                          + " · Model: " + (self.model or "(not set)")
                          + " · Step: " + ("-" if self.step is None else str(self.step))
                          + " · Phase: " + self.phase
-                         + " · Queued: " + str(len(self.queued_messages()) + len(self._ready_direct)
+                         + " · Queued: " + str(len(self._interaction.queued_items()) + len(self._ready_direct)
                                                + int(self._pending_correction is not None))
                          + " · Foreground: " + self.foreground_consent + "\n")
             return True
         if command == "/queue":
-            queued = list(self._ready_direct) + list(self._interaction.queued_messages())
+            queued = list(self._ready_direct) + list(self._interaction.queued_items())
             if self._pending_correction:
                 queued.insert(0, self._pending_correction)
             self._append("\nQueued messages:\n" + ("\n".join(f"{i}. {s}" for i, s in enumerate(queued, 1)) if queued else "(empty)") + "\n")
@@ -657,6 +659,25 @@ class RichTerminalFrontend:
         if not value.strip():
             return
         self._input.text = ""
+        stripped = value.strip()
+        control: TerminalCommand | None = None
+        if stripped == "/compaction":
+            control = TerminalCommand("compaction")
+        elif stripped == "/resume":
+            control = TerminalCommand("resume")
+        elif stripped.startswith("/resume "):
+            target = stripped[len("/resume "):].strip()
+            control = TerminalCommand("resume", target) if target else TerminalCommand("resume")
+        if control is not None:
+            route = self._interaction.submit_control(control)
+            self._append(f"\n{stripped}" + (" (queued)" if route == "queued" else "") + "\n")
+            if route == "send":
+                if self._pending_kind == "task" and self._pending_read is not None:
+                    self._finish_read(control)
+                else:
+                    self._ready_direct.append(control)
+            self._invalidate()
+            return
         if self._pending_kind == "question":
             self._finish_read(value)
             return
@@ -678,7 +699,7 @@ class RichTerminalFrontend:
                 self._finish_read(value)
         self._invalidate()
 
-    def _finish_read(self, value: str | None) -> None:
+    def _finish_read(self, value: str | TerminalCommand | None) -> None:
         pending = self._pending_read
         self._pending_read = None
         self._pending_kind = None
@@ -691,11 +712,11 @@ class RichTerminalFrontend:
     def _release_next_queued(self) -> None:
         if self._pending_kind != "task" or self._pending_read is None:
             return
-        next_message = self._interaction.next_message()
-        if next_message is not None:
-            self._finish_read(next_message)
+        next_item = self._interaction.next_item()
+        if next_item is not None:
+            self._finish_read(next_item)
 
-    async def read(self, prompt: AgentPrompt) -> str | None:
+    async def read(self, prompt: AgentPrompt) -> str | TerminalCommand | None:
         if self._closed:
             return None
         if self._app_task is None:
@@ -708,7 +729,7 @@ class RichTerminalFrontend:
                 self._pending_correction = None
                 return correction
             if not self._interaction.queue_suspended:
-                queued = self._interaction.next_message()
+                queued = self._interaction.next_item()
                 if queued is not None:
                     return queued
             if self._ready_direct:
@@ -753,6 +774,19 @@ class RichTerminalFrontend:
 
     def queued_messages(self) -> tuple[str, ...]:
         return self._interaction.queued_messages()
+
+    def suspend_queue_for_resume(self) -> None:
+        held: list[str | TerminalCommand] = []
+        if self._pending_correction is not None:
+            held.append(self._pending_correction)
+            self._pending_correction = None
+        held.extend(self._ready_direct)
+        self._ready_direct.clear()
+        self._interaction.hold_items(tuple(held))
+        self.foreground_consent = "unset"
+        self.phase = "waiting"
+        self._append("\nOld-session queued input is paused. Use /queue send or /queue clear explicitly.\n")
+        self._invalidate()
 
     def emit(self, event: AgentEvent) -> None:
         if self._events is not None:

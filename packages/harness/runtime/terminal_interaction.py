@@ -65,6 +65,11 @@ class TerminalInteraction:
     def suspend_queue(self) -> None:
         self._queue_suspended = True
 
+    def hold_items(self, items: tuple[str | TerminalCommand, ...]) -> None:
+        """Keep unsent old-session input visible but inert after a resume switch."""
+        self._queue.extendleft(reversed(items))
+        self._queue_suspended = True
+
     def resume_queue(self) -> None:
         self._queue_suspended = False
 

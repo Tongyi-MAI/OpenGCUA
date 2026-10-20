@@ -7,7 +7,7 @@ import tomllib
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
-from agent_events import AgentEvent, AgentPrompt, ForegroundApprovalPrompt
+from agent_events import AgentEvent, AgentPrompt, ForegroundApprovalPrompt, TerminalCommand
 from terminal_tui import RichTerminalFrontend, resolve_ui_mode
 
 
@@ -30,11 +30,80 @@ def test_slash_completion_lists_commands_and_filters_prefixes():
 
     assert {item.display_text for item in candidates("/")} >= {
         "/help", "/new", "/queue", "/status", "/clear", "/reasoning", "/code", "/exit",
+        "/resume", "/compaction",
     }
     assert [(item.display_text, item.text) for item in candidates("/sta")] == [("/status", "/status")]
     assert [(item.display_text, item.text) for item in candidates("/reasoning of")] == [("off", "off")]
     assert candidates("hello /sta") == []
     assert candidates("/new find a file") == []
+
+
+def test_resume_and_compaction_commands_are_typed_and_preserve_path_spaces():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui._input.text = "/resume /tmp/a run with spaces"
+        ui._submit_enter()
+        assert await ui.read(AgentPrompt(kind="task")) == TerminalCommand("resume", "/tmp/a run with spaces")
+        ui._input.text = "/compaction"
+        ui._submit_enter()
+        assert await ui.read(AgentPrompt(kind="task")) == TerminalCommand("compaction")
+    asyncio.run(scenario())
+
+
+def test_control_command_waits_behind_question_and_does_not_answer_it():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui._interaction.begin_turn()
+        question = asyncio.create_task(ui.read(AgentPrompt(kind="question", text="Which one?")))
+        await asyncio.sleep(0)
+        ui._input.text = "/resume"
+        ui._submit_enter()
+        assert not question.done()
+        ui._input.text = "answer"
+        ui._submit_enter()
+        assert await question == "answer"
+        ui._interaction.finish_turn(normal=True)
+        assert await ui.read(AgentPrompt(kind="task")) == TerminalCommand("resume")
+    asyncio.run(scenario())
+
+
+def test_resume_selection_preserves_existing_chat_draft():
+    from resume_catalog import ResumeCandidate
+
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui._input.text = "draft stays"
+        candidate = ResumeCandidate(Path("/tmp/a"), "s", "task", "success", "2026-10-20", 1, 0)
+        pending = asyncio.create_task(ui.choose_resume((candidate,)))
+        await asyncio.sleep(0)
+        ui._submit_enter()
+        assert await pending == candidate
+        assert ui._input.text == "draft stays"
+    asyncio.run(scenario())
+
+
+def test_resume_suspends_old_queue_but_accepts_new_message():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui.emit(AgentEvent("phase", step=0, payload={"phase": "execution"}))
+        ui._input.text = "old queued task"
+        ui._submit_enter()
+        ui.emit(AgentEvent("answer", "done", step=0))
+        ui.suspend_queue_for_resume()
+        assert ui.queued_messages() == ("old queued task",)
+        pending = asyncio.create_task(ui.read(AgentPrompt(kind="task")))
+        await asyncio.sleep(0)
+        assert not pending.done()
+        ui._input.text = "new task"
+        ui._submit_enter()
+        assert await pending == "new task"
+        assert ui.queued_messages() == ("old queued task",)
+        assert ui.foreground_consent == "unset"
+    asyncio.run(scenario())
 
 
 def test_bare_slash_enter_does_not_send_a_task():

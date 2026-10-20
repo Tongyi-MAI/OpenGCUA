@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from agent_events import AgentEvent, AgentFrontend, AgentPrompt, ForegroundApprovalPrompt, PlainFrontend, emit_safely, model_status_event
+from agent_events import AgentEvent, AgentFrontend, AgentPrompt, ForegroundApprovalPrompt, PlainFrontend, TerminalCommand, emit_safely, model_status_event
 from console_protocol import decode_console_message
 from code_executor import BLOCK_PROGRESS_FIELDS, CodeExecutor
 from gui_approval import GuiGrantStore, request_gui_approval
@@ -39,13 +39,24 @@ from model_stream import (
     ContextBudgetError, ContextWindowError, ModelOutputTruncated,
     extract_reasoning, parse_code_action,
 )
-from resume_catalog import UI_API_MARKERS, validate_trajectory_ui_api
+from resume_catalog import UI_API_MARKERS, ResumeError, inspect_resume_run, recent_resume_runs, validate_trajectory_ui_api
 
 
 DEFAULT_MODEL_NAME = llm_entry.DEFAULT_MODEL_NAME
 DEFAULT_LLM_BASE_URL = llm_entry.DEFAULT_LLM_BASE_URL
 DEFAULT_API_KEY = None  # set DASHSCOPE_API_KEY / API_KEY in env, or pass --api-key (never commit a key)
 DEFAULT_MAX_STEPS = 0  # 0 means unlimited; stall detection bounds the run
+
+
+@dataclass(frozen=True)
+class ResumeHandoff:
+    path: Path
+    previous_path: Path | None = None
+
+
+class _ResumeSwitch(Exception):
+    def __init__(self, path: Path):
+        self.path = path
 
 
 def _read_local_api_key() -> str | None:
@@ -2102,7 +2113,7 @@ async def read_chat_message(*, empty_exits: bool = False) -> str | None:
 async def run_agent(
     args: argparse.Namespace, *, on_model_event: Callable[[dict[str, Any]], None] | None = None,
     host_control: Any = None, frontend: AgentFrontend | None = None,
-) -> int:
+) -> int | ResumeHandoff:
     configure_runtime_mode(args)
     frontend = frontend or PlainFrontend(
         console_input,
@@ -2144,6 +2155,39 @@ async def run_agent(
     record_model_requests = getattr(args, "record_model_requests", False)
     if ui_api not in UI_API_MARKERS:
         raise SystemExit(f"不支持的 UI API：{ui_api!r}")
+
+    async def read_task_boundary(prompt: AgentPrompt, current_run: Path | None) -> str | None:
+        """Consume host-only commands at a task boundary, never as model text."""
+        while True:
+            value = await frontend.read(prompt)
+            if not isinstance(value, TerminalCommand):
+                return value
+            if value.kind == "compaction":
+                present("notice", "正在准备手动上下文压缩；当前会话尚未进入压缩边界。")
+                continue
+            try:
+                if value.target:
+                    candidate = inspect_resume_run(Path(value.target), ui_api=ui_api)
+                else:
+                    chooser = getattr(frontend, "choose_resume", None)
+                    if not callable(chooser):
+                        present("error", "当前终端不支持历史会话选择；请使用 /resume <run 目录>。")
+                        continue
+                    candidates = recent_resume_runs(
+                        Path(args.runs_dir), current_run=current_run, ui_api=ui_api,
+                    )
+                    candidate = await chooser(candidates)
+                    if candidate is None:
+                        continue
+                    candidate = inspect_resume_run(candidate.path, ui_api=ui_api)
+                if current_run is not None and candidate.path == current_run.resolve():
+                    present("error", "当前会话已在这个运行目录；请选择其他会话。")
+                    continue
+            except ResumeError as exc:
+                present("error", f"Resume failed: {exc}")
+                continue
+            raise _ResumeSwitch(candidate.path)
+
     install_abort_signal()
     active_executor: CodeExecutor | None = None
 
@@ -2181,7 +2225,10 @@ async def run_agent(
         if not interactive:
             raise SystemExit("无首条消息时需要交互终端；请直接在终端启动，或传入消息，或用 --resume 恢复会话")
         present("notice", "Mac Agent · 直接输入消息开始对话，/exit 或 Ctrl-D 退出。")
-        initial_message = await frontend.read(AgentPrompt(kind="task"))
+        try:
+            initial_message = await read_task_boundary(AgentPrompt(kind="task"), None)
+        except _ResumeSwitch as switch:
+            return ResumeHandoff(switch.path)
         if initial_message is None:
             present("notice", "会话已结束。")
             return 0
@@ -2191,14 +2238,12 @@ async def run_agent(
     loaded_tasks: list[dict[str, Any]] = []
     if args.resume:
         resume_dir = Path(args.resume).expanduser().resolve()
-        trajectory_path = resume_dir / "traj.json"
-        if not trajectory_path.is_file():
-            raise SystemExit(f"--resume 目录缺少 traj.json：{resume_dir}")
-        loaded = json.loads(trajectory_path.read_text(encoding="utf-8"))
         try:
-            validate_trajectory_ui_api(loaded, ui_api)
+            inspect_resume_run(resume_dir, ui_api=ui_api)
         except AgentError as exc:
             raise SystemExit(str(exc)) from exc
+        trajectory_path = resume_dir / "traj.json"
+        loaded = json.loads(trajectory_path.read_text(encoding="utf-8"))
         loaded_steps = [
             entry for entry in (loaded.get("steps") or []) if isinstance(entry, dict)
         ]
@@ -2419,7 +2464,7 @@ async def run_agent(
     else:
         resume_step = 0
         resume_task_index = 0
-    if resume_dir is not None and host_control is not None:
+    if resume_dir is not None and initial_message and (host_control is not None or args.task):
         # A history selection is read-only. Native resumption always starts with
         # the user's new message, never reruns the saved task automatically.
         previous = loaded_tasks[-1]
@@ -2429,8 +2474,9 @@ async def run_agent(
             writer.close_task(previous_result["status"], previous_result["answer"])
         resume_task_index = writer.begin_task(initial_message, resume_step)
         context.set_task(initial_message, previous_result=previous_result)
-        host_control.turn_index = resume_task_index - 1
-        host_control.begin_turn(initial_message)
+        if host_control is not None:
+            host_control.turn_index = resume_task_index - 1
+            host_control.begin_turn(initial_message)
     final_status = "failure"
     solicitation_nudged = False
     final_answer = ""
@@ -3236,9 +3282,9 @@ async def run_agent(
                             "继续对话请直接输入；/new <消息> 清空 Python 变量与 UI 依据并开新任务；"
                             "空行或 /exit 结束。",
                         )
-                        raw_follow_up = await host_control.follow_up() if host_control is not None else await frontend.read(AgentPrompt(
-                            kind="task", empty_exits=not interactive,
-                        ))
+                        raw_follow_up = await host_control.follow_up() if host_control is not None else await read_task_boundary(
+                            AgentPrompt(kind="task", empty_exits=not interactive), writer.run_dir,
+                        )
                         if raw_follow_up is None:
                             present("notice", "会话已结束。")
                             break
@@ -3249,9 +3295,9 @@ async def run_agent(
                             parts = raw_follow_up.strip().split(None, 1)
                             follow_up = parts[1] if len(parts) > 1 else ""
                             if not follow_up.strip():
-                                follow_up = await host_control.follow_up() if host_control is not None else await frontend.read(AgentPrompt(
-                                    kind="task", empty_exits=not interactive,
-                                )) or ""
+                                follow_up = await host_control.follow_up() if host_control is not None else await read_task_boundary(
+                                    AgentPrompt(kind="task", empty_exits=not interactive), writer.run_dir,
+                                ) or ""
                             if not follow_up.strip():
                                 present("notice", "会话已结束。")
                                 break
@@ -3333,9 +3379,9 @@ async def run_agent(
                     writer.data.setdefault("aborts", []).append(
                         {"step": step, "task_index": task_index, "timestamp": now_iso()})
                     writer.flush()
-                    follow_up = await host_control.follow_up() if host_control is not None else await frontend.read(AgentPrompt(
-                        kind="task", empty_exits=not interactive,
-                    ))
+                    follow_up = await host_control.follow_up() if host_control is not None else await read_task_boundary(
+                        AgentPrompt(kind="task", empty_exits=not interactive), writer.run_dir,
+                    )
                     if follow_up is None:
                         present("notice", "会话已结束。")
                         break
@@ -3348,7 +3394,7 @@ async def run_agent(
                         new_task = parts[1] if len(parts) > 1 else ""
                         if not new_task.strip():
                             reply = (await host_control.follow_up() if host_control is not None
-                                     else await frontend.read(AgentPrompt(kind="task")))
+                                     else await read_task_boundary(AgentPrompt(kind="task"), writer.run_dir))
                             new_task = reply or ""
                         if not new_task.strip():
                             present("notice", "会话已结束。")
@@ -3375,6 +3421,13 @@ async def run_agent(
                     current_lifecycle_observation = False
                     step += 1
                     continue
+    except _ResumeSwitch as switch:
+        handoff_path = switch.path
+        if final_status == "failure" and not writer.data["tasks"][-1].get("status"):
+            final_status = "aborted"
+            final_answer = "Stopped at a user-requested resume boundary."
+            writer.close_task(final_status, final_answer)
+        logger.info("switching to saved run %s", handoff_path)
     except asyncio.CancelledError:
         final_status = "cancelled"
         final_answer = "Cancelled by user."
@@ -3429,6 +3482,10 @@ async def run_agent(
             # 每次 run 结束都摘掉 FileHandler，避免跨 run 句柄泄漏。
             close_run_logger(logger)
 
+    if "handoff_path" in locals():
+        present("notice", f"Current run closed. Switching to: {handoff_path}")
+        return ResumeHandoff(handoff_path, writer.run_dir)
+
     present(
         "finished",
         final_status,
@@ -3455,7 +3512,80 @@ async def run_interactive_agent(args: argparse.Namespace, frontend: AgentFronten
     try:
         with patch_stdout(raw=True):
             frontend.start()
-            result = await run_agent(args, frontend=frontend)
+            current_args = copy.copy(args)
+            previous_handoff: ResumeHandoff | None = None
+            while True:
+                try:
+                    result = await run_agent(current_args, frontend=frontend)
+                except SystemExit as exc:
+                    if not current_args.resume:
+                        raise
+                    frontend.emit(AgentEvent("error", f"Resume failed: {exc}"))
+                    if previous_handoff is not None and previous_handoff.previous_path is not None:
+                        frontend.emit(AgentEvent("notice", f"原会话仍可通过 /resume {previous_handoff.previous_path} 选择；历史任务不会自动重跑。"))
+                    frontend.emit(AgentEvent("notice", "会话保持打开；请选择其他轨迹或发送新消息。"))
+                    current_args = copy.copy(args)
+                    current_args.task = None
+                    current_args.resume = None
+                    continue
+                if not isinstance(result, ResumeHandoff):
+                    break
+                previous_handoff = result
+                suspend = getattr(frontend, "suspend_queue_for_resume", None)
+                if callable(suspend):
+                    suspend()
+                try:
+                    preview = inspect_resume_run(result.path, ui_api=getattr(args, "ui_api", "mai-ui"))
+                except ResumeError as exc:
+                    frontend.emit(AgentEvent("error", f"Resume target changed: {exc}"))
+                    if result.previous_path is not None:
+                        frontend.emit(AgentEvent("notice", f"Previous run remains available: {result.previous_path}"))
+                    current_args = copy.copy(args)
+                    current_args.task = None
+                    current_args.resume = None
+                    continue
+                frontend.emit(AgentEvent(
+                    "notice", f"Resume selected: {preview.path}\n"
+                    f"Session: {preview.session_id} · Last task: {preview.last_task} · Status: {preview.status}\n"
+                    f"Restored turns: {preview.turns} · TODOs: {preview.todos}",
+                ))
+                frontend.emit(AgentEvent("notice", "历史任务不会重跑。Python 内存、SDK/UI 句柄与前台授权不恢复；请输入新消息继续。"))
+                while True:
+                    next_task = await frontend.read(AgentPrompt(kind="task"))
+                    if next_task is None:
+                        result = 0
+                        break
+                    if isinstance(next_task, TerminalCommand):
+                        if next_task.kind == "resume":
+                            try:
+                                if next_task.target:
+                                    candidate = inspect_resume_run(Path(next_task.target), ui_api=getattr(args, "ui_api", "mai-ui"))
+                                else:
+                                    candidates = recent_resume_runs(
+                                        Path(args.runs_dir), current_run=result.path,
+                                        ui_api=getattr(args, "ui_api", "mai-ui"),
+                                    )
+                                    chooser = getattr(frontend, "choose_resume", None)
+                                    candidate = await chooser(candidates) if callable(chooser) else None
+                                    if candidate is None:
+                                        continue
+                                    candidate = inspect_resume_run(candidate.path, ui_api=getattr(args, "ui_api", "mai-ui"))
+                            except ResumeError as exc:
+                                frontend.emit(AgentEvent("error", f"Resume failed: {exc}"))
+                                continue
+                            result = ResumeHandoff(candidate.path, result.previous_path)
+                            frontend.emit(AgentEvent("notice", f"Resume selected: {result.path}"))
+                            continue
+                        frontend.emit(AgentEvent("notice", "请先输入新消息，恢复会话后才能压缩上下文。"))
+                        continue
+                    if not next_task.strip():
+                        continue
+                    current_args = copy.copy(args)
+                    current_args.resume = str(result.path)
+                    current_args.task = next_task
+                    break
+                if next_task is None:
+                    break
     finally:
         await frontend.stop()
         frontend.close()

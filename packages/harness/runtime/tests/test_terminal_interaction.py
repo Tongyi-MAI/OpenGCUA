@@ -74,3 +74,17 @@ def test_abort_suspends_mixed_queue_until_explicit_release_or_clear():
     state.submit_control(command)
     state.clear_queue()
     assert state.queued_items() == ()
+
+
+def test_resume_holds_old_direct_input_ahead_of_later_queue_items():
+    state = TerminalInteraction()
+    state.begin_turn()
+    state.submit("later queued")
+    state.finish_turn(normal=True)
+    state.hold_items(("old draft", agent_events.TerminalCommand("compaction")))
+    assert state.next_item() is None
+    assert state.queued_items() == (
+        "old draft", agent_events.TerminalCommand("compaction"), "later queued",
+    )
+    state.resume_queue()
+    assert state.next_item() == "old draft"
