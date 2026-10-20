@@ -35,6 +35,7 @@ py-modules = [
   "model_stream",
   "mcp_config",
   "mcp_broker",
+  "mcp_smoke",
   "model_metrics",
   "llm_compaction",
   "rollout_data",

@@ -417,6 +417,32 @@ account. If a task requires acting “as me,” use an appropriately authenticat
 route or the user's GUI session; do not substitute the app identity. The MCP host makes no
 automatic install, login, credential request, or write call.
 
+To check one explicitly allowlisted query without printing its returned data, run:
+
+```bash
+.venv/bin/python packages/harness/runtime/mcp_smoke.py \
+  --config packages/harness/configs/local.json \
+  --server dingtalk --tool EXACT_READ_TOOL \
+  --args-json '{}'
+```
+
+Replace `EXACT_READ_TOOL` and its JSON arguments with a query tool verified in your
+server catalog; keep the allowlist exact and use only harmless test arguments. The
+command summarizes the schema's argument names, then reports `OK` or a category such as
+`CONFIG_ERROR`, `MCP_TOOL_DENIED`, `MCP_SERVER_UNAVAILABLE`, `MCP_TIMEOUT`, or
+`MCP_TOOL_ERROR`. It never prints the tool's contact data or credential values. A
+successful handshake or tool listing does not mean a read call is authorized by DingTalk.
+For a credential-free check of the broker itself, use the local test fixture:
+
+```bash
+PYTHONPATH=packages/harness/runtime .venv/bin/python -m pytest \
+  packages/harness/runtime/tests/test_mcp_smoke.py -q
+```
+
+This local fixture is not a live DingTalk verification. If the launching environment lacks
+`DINGTALK_Client_ID`, `DINGTALK_Client_Secret`, or the required enterprise scope, do not
+interpret it as one.
+
 Common setup failures: an absent/relative command or missing named variable is rejected before
 the task starts; an unavailable server reports `MCP_SERVER_UNAVAILABLE`; a slow call reports
 `MCP_TIMEOUT` without replay; a tool outside the exact allowlist reports `MCP_TOOL_DENIED`;
