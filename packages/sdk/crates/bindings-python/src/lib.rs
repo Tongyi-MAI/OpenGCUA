@@ -79,7 +79,6 @@ impl RuntimeCore {
         let v=self.host.state(serde_json::json!({"op":"resolve_index","scope":scope,"index":index,"in_turn":in_turn})).map_err(|e|PyValueError::new_err(serde_json::to_string(&e).unwrap()))?;
         Ok(v.to_string())
     }
-    #[allow(clippy::too_many_arguments)]
     fn point(
         &self,
         scope: &str,
@@ -88,9 +87,8 @@ impl RuntimeCore {
         x: f64,
         y: f64,
         space: &str,
-        max_age: u64,
     ) -> PyResult<String> {
-        let v=self.host.state(serde_json::json!({"op":"point","scope":scope,"id":id,"token":token,"x":x,"y":y,"space":space,"max_age":max_age})).map_err(|e|PyValueError::new_err(serde_json::to_string(&e).unwrap()))?;
+        let v=self.host.state(serde_json::json!({"op":"point","scope":scope,"id":id,"token":token,"x":x,"y":y,"space":space})).map_err(|e|PyValueError::new_err(serde_json::to_string(&e).unwrap()))?;
         Ok(v.to_string())
     }
     #[allow(clippy::too_many_arguments)]

@@ -426,10 +426,10 @@ class Vision(ActionBase):
         a, b = (low + delta, low) if sign < 0 else (low, low + delta)
         captured = self._handle._backend._observations[point.observation_id]
         start = captured.point(
-            a if horizontal else point.x, point.y if horizontal else a, max_age_ms=120000
+            a if horizontal else point.x, point.y if horizontal else a
         )
         end = captured.point(
-            b if horizontal else point.x, point.y if horizontal else b, max_age_ms=120000
+            b if horizontal else point.x, point.y if horizontal else b
         )
         return await self.swipe(
             start, end, timeout_ms=timeout_ms, action_id=action_id, delivery=delivery

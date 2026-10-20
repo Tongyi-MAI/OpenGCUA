@@ -138,9 +138,9 @@ class Image:
             self._handle._session._runtime._core.image_bytes, self._handle._scope, self._captured.id
         )
 
-    def point(self, x, y, *, space="pixels", max_age_ms=120000):
+    def point(self, x, y, *, space="pixels"):
         self._handle._check()
-        return self._captured.point(x, y, space=space, max_age_ms=max_age_ms)
+        return self._captured.point(x, y, space=space)
 
 
 class VisionObservation:

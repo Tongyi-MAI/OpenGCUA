@@ -370,7 +370,7 @@ _CAPABILITY_METADATA = {
     "metadata.name", "metadata.text", "metadata.missing", "metadata.last_verified_at", "metadata.dirty_if_unknown",
 }
 _CAPABILITY_CONTEXT = ("scope", "permissions", "readiness", "permission_enforcement")
-_CAPABILITY_COORDINATES = ("coordinate_space", "latest_only", "same_scope", "max_age_ms", "bounds")
+_CAPABILITY_COORDINATES = ("coordinate_space", "latest_only", "same_scope", "bounds")
 _CAPABILITY_POINT = (
     "explicit_image_same_turn", "bare_coordinates_require_prior_emit",
     "image_id_requires_prior_emit", "point_accepts_extra_image_or_y",

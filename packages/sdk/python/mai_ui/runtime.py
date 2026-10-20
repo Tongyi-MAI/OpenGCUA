@@ -64,8 +64,6 @@ class PointRef:
     _owner: object = dataclasses.field(repr=False)
     _revision: str = dataclasses.field(repr=False)
     _scope: str = dataclasses.field(repr=False)
-    _created: float = dataclasses.field(repr=False)
-    _max_age_ms: int = dataclasses.field(default=2000, repr=False)
 
 
 def _node(row, at, revision, dirty):
@@ -334,12 +332,10 @@ class Observation:
             else full_text
         )
 
-    def point(self, x, y, *, space="pixels", image_size=None, max_age_ms=2000):
+    def point(self, x, y, *, space="pixels", image_size=None):
         frame = self.image.frame
         if frame is None:
             raise MuError("INVALID_ARGUMENT", "point requires a screenshot")
-        if type(max_age_ms) is not int or not 1 <= max_age_ms <= 120000:
-            raise MuError("INVALID_ARGUMENT", "max_age_ms must be 1..120000")
         if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in (x, y)):
             raise MuError("INVALID_ARGUMENT", "coordinates must be numbers")
         basis = image_size if image_size is not None else (frame.width, frame.height)
@@ -368,8 +364,6 @@ class Observation:
             self._ui._session,
             self._tree.revision,
             self.surface.id,
-            self._received,
-            max_age_ms,
         )
         self._ui._session._refs[id(ref)] = ref
         return ref
@@ -437,7 +431,7 @@ class UI(_Unsupported):
         return target
 
 
-    def _point(self, x, y, space, max_age_ms):
+    def _point(self, x, y, space):
         s = self._session
         obs = s._turn_image if s._in_turn else s._presented_image
         if obs is None:
@@ -449,7 +443,7 @@ class UI(_Unsupported):
                 "TARGET_NOT_FOREGROUND",
                 "The emitted screenshot belongs to a different foreground app",
             )
-        point = obs.point(x, y, space=space or s.coordinate_space, max_age_ms=max_age_ms)
+        point = obs.point(x, y, space=space or s.coordinate_space)
         # Android captures full-display images, including for app.ui.observe().
         point = dataclasses.replace(point, _scope=self.surface.id)
         s._refs[id(point)] = point
@@ -470,11 +464,6 @@ class UI(_Unsupported):
                 "INVALID_ARGUMENT",
                 f"Target scope {getattr(target, '_scope', None)!r} does not match {self.surface.id!r}, or reference is foreign. Use the UI that captured the observation (obs._ui), or ui.click(index) with AX emitted for this scope",
             )
-        if (
-            isinstance(target, PointRef)
-            and (time.monotonic() - target._created) * 1000 > target._max_age_ms
-        ):
-            raise MuError("STALE_TARGET", "frame exceeds the requested age budget")
         if isinstance(target, _NodeRef):
             wire = dict(revision=target._revision, node_id=target.id)
             obs = s._observations[target.observation_id]
@@ -508,7 +497,6 @@ class UI(_Unsupported):
         x=None,
         y=None,
         space=None,
-        max_age_ms=120000,
         button="primary",
         count=1,
         mode="auto",
@@ -520,7 +508,7 @@ class UI(_Unsupported):
                 raise MuError(
                     "INVALID_ARGUMENT", "Use either click(target) or click(x=..., y=...), not both"
                 )
-            target = self._point(x, y, space, max_age_ms)
+            target = self._point(x, y, space)
         if target is None:
             raise MuError("INVALID_ARGUMENT", "click requires a target or x and y")
         if button != "primary" or count != 1:
@@ -545,7 +533,7 @@ class UI(_Unsupported):
 
     async def input_text(
         self, text, target=None, *, x=None, y=None, space=None,
-        max_age_ms=120000, timeout_ms=5000, action_id=None,
+        timeout_ms=5000, action_id=None,
     ):
         """ADBKeyboard insertion; optional grounded click, then a 500 ms focus wait."""
         if not isinstance(text, str):
@@ -553,7 +541,7 @@ class UI(_Unsupported):
         if x is not None or y is not None:
             if target is not None or x is None or y is None:
                 raise MuError("INVALID_ARGUMENT", "Use target or both x and y, not both")
-            target = self._point(x, y, space, max_age_ms)
+            target = self._point(x, y, space)
         target = self._resolve(target)
         if target is not None and not isinstance(target, (_NodeRef, PointRef)):
             raise MuError("INVALID_ARGUMENT", "target must be an emitted AX index or screenshot point")
@@ -588,7 +576,6 @@ class UI(_Unsupported):
         end_y=None,
         duration_ms=500,
         space=None,
-        max_age_ms=120000,
         amount=1,
         unit="steps",
         timeout_ms=3000,
@@ -630,8 +617,8 @@ class UI(_Unsupported):
                 raise MuError(
                     "INVALID_ARGUMENT", "duration_ms must be 50..5000 and less than timeout_ms"
                 )
-            start = self._point(coords[0], coords[1], space, max_age_ms)
-            end = self._point(coords[2], coords[3], space, max_age_ms)
+            start = self._point(coords[0], coords[1], space)
+            end = self._point(coords[2], coords[3], space)
             return await self._action(
                 "point_scroll",
                 start,

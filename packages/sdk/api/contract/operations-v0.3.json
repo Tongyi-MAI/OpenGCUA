@@ -1682,12 +1682,6 @@
               "type": "string",
               "keyword": true,
               "default": "pixels"
-            },
-            {
-              "name": "max_age_ms",
-              "type": "number",
-              "keyword": true,
-              "default": 120000
             }
           ],
           "returns": "PointRef"

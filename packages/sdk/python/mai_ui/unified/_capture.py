@@ -102,21 +102,19 @@ class Captured:
     def _ref(self, node):
         return NodeRef(node, self.id, self._handle)
 
-    def point(self, x, y, *, space="pixels", max_age_ms=120000):
+    def point(self, x, y, *, space="pixels"):
         if (
             type(x) not in (int, float)
             or type(y) not in (int, float)
-            or type(max_age_ms) is not int
-            or not 1 <= max_age_ms <= 120000
         ):
             raise MuError(
-                "INVALID_ARGUMENT", "provide numeric coordinates and an age in 1..120000 ms"
+                "INVALID_ARGUMENT", "provide numeric coordinates"
             )
         token = uid()
         h = self._handle
         wire = json.loads(
             native(
-                h._session._runtime._core.point, h._scope, self.id, token, x, y, space, max_age_ms
+                h._session._runtime._core.point, h._scope, self.id, token, x, y, space
             )
         )
         return PointRef(self.id, wire["x"], wire["y"], h, token)

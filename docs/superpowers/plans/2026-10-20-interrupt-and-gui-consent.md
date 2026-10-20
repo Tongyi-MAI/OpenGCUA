@@ -1,5 +1,7 @@
 # Interrupt and GUI Consent Implementation Plan
 
+> User change during implementation: do not invalidate old screenshot points at `ask_user` or Ctrl-C. Remove only the wall-clock expiry; existing identity, scope, and geometry checks remain. The Task 4 boundary-invalidation steps below are superseded.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Ctrl-C safely interrupt one turn while preserving task context and GUI approval, require one scoped approval before visual or foreground SDK actions, remove point time expiry, and correct AX completeness guidance.

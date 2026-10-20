@@ -31,6 +31,29 @@ def test_checked_subprocess_failure_sets_cell_status_and_shows_child_stderr(caps
     assert "exit status 7" in captured.err
 
 
+def test_point_api_does_not_accept_wall_clock_expiry_keyword():
+    import inspect
+    from mai_ui.unified.observations import Image
+    from mai_ui.unified._capture import Captured
+    from mai_ui.runtime import Observation, UI
+
+    for method in (Image.point, Captured.point, Observation.point, UI.click, UI.input_text, UI.scroll):
+        assert "max_age_ms" not in inspect.signature(method).parameters
+
+
+def test_legacy_point_remains_valid_without_age_or_user_boundary_expiry():
+    from mai_ui.runtime import PointRef, Session
+
+    session = Session(object())
+    ui = session._device.ui
+    point = PointRef("image:1", 10, 20, session, "revision:1", ui.surface.id)
+    session._refs[id(point)] = point
+    assert ui._validate(point)["x"] == 10
+    session.begin_turn()
+    session.end_turn()
+    assert ui._validate(point)["x"] == 10
+
+
 def test_checked_subprocess_error_limits_child_stderr():
     try:
         raise subprocess.CalledProcessError(3, ["child"], stderr="x" * 10000)

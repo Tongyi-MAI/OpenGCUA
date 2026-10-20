@@ -300,7 +300,6 @@ impl Host {
                     q["y"].as_f64().ok_or_else(|| err("INVALID_ARGUMENT"))?,
                 ),
                 s(&q, "space")?,
-                n(&q, "max_age")?,
             ))?,
             "point_wire" => legacy(core.observations.point_wire(scope, s(&q, "token")?))?,
             "image_bytes" => {

@@ -1,7 +1,7 @@
 //! Runtime-owned capture identities, indices, artifacts and acknowledged output history.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
 
 #[derive(Default)]
 struct Scope {
@@ -22,7 +22,6 @@ struct Capture {
     rows: Vec<Value>,
     tree: bool,
     sequence: u64,
-    received: Instant,
 }
 impl Capture {
     fn stable_with(&self, other: &Self) -> bool {
@@ -42,7 +41,6 @@ struct Point {
     capture: String,
     x: f64,
     y: f64,
-    max_age_ms: u64,
 }
 #[derive(Default)]
 pub struct ObservationStore {
@@ -163,7 +161,6 @@ impl ObservationStore {
                 rows,
                 tree,
                 sequence: self.sequence,
-                received: Instant::now(),
             },
         );
         if tree {
@@ -235,9 +232,8 @@ impl ObservationStore {
         token: &str,
         point: (f64, f64),
         space: &str,
-        max_age: u64,
     ) -> Result<Value, &'static str> {
-        if !(1..=120000).contains(&max_age) || self.points.contains_key(token) {
+        if self.points.contains_key(token) {
             return Err("INVALID_ARGUMENT");
         }
         let c = self.get(scope, id)?;
@@ -256,7 +252,6 @@ impl ObservationStore {
                 capture: id.into(),
                 x,
                 y,
-                max_age_ms: max_age,
             },
         );
         self.point_wire(scope, token)
@@ -264,9 +259,6 @@ impl ObservationStore {
     pub fn point_wire(&self, scope: &str, token: &str) -> Result<Value, &'static str> {
         let p = self.points.get(token).ok_or("INVALID_ARGUMENT")?;
         let c = self.get(scope, &p.capture)?;
-        if c.received.elapsed().as_millis() > p.max_age_ms as u128 {
-            return Err("STALE_TARGET");
-        }
         let mut wire = json!({"_based_on":p.capture,"x":p.x,"y":p.y,"frame_width":c.data["width"],"frame_height":c.data["height"],"frame_rotation":c.data["rotation"].as_u64().unwrap_or(0)});
         if let Some(target) = c.data["target"].as_object() {
             for (key, value) in target {
@@ -418,7 +410,7 @@ mod tests {
         assert!(s.resolve_index("a", 1, true).is_ok());
         s.capture("a", "image", data("2"), false, None).unwrap();
         s.acknowledge("a", "image", true).unwrap();
-        s.point("a", "image", "point", (10.0, 20.0), "pixels", 120000)
+        s.point("a", "image", "point", (10.0, 20.0), "pixels")
             .unwrap();
         let mut next = data("3");
         next["identity_epoch"] = json!("e2");
@@ -432,6 +424,18 @@ mod tests {
             .is_none());
         assert_eq!(s.point_wire("b", "point"), Err("INVALID_ARGUMENT"));
         assert_eq!(s.views("a")["image"], "image");
+    }
+    #[test]
+    fn image_point_has_no_time_or_user_boundary_expiry() {
+        let mut s = ObservationStore::default();
+        s.capture("a", "before", data("1"), false, None).unwrap();
+        s.point("a", "before", "old", (10.0, 20.0), "pixels").unwrap();
+        assert!(s.point_wire("a", "old").is_ok());
+        s.capture("a", "after", data("2"), false, None).unwrap();
+        assert!(s.point_wire("a", "old").is_ok());
+        s.point("a", "before", "reused", (10.0, 20.0), "pixels").unwrap();
+        s.point("a", "after", "fresh", (10.0, 20.0), "pixels").unwrap();
+        assert!(s.point_wire("a", "fresh").is_ok());
     }
     #[test]
     fn partial_and_historical_views_cannot_rewind_live_indices() {

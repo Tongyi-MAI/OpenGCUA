@@ -1,5 +1,7 @@
 # Interrupts, GUI consent, and observation validity
 
+> User change during implementation: screenshot points have no time-based or user-boundary expiry. Existing identity, scope, and geometry checks remain.
+
 Date: 2026-10-20
 
 ## Goal and observed failure
@@ -16,7 +18,7 @@ This design covers the interactive CLI/TUI, the harness worker lifecycle, SDK ca
 
 The selected design uses a host-owned task/window grant enforced before SDK dispatch. Prompt-only approval is rejected because the observed agent ignored the existing instruction. A driver-wide OS input policy would cover more bypasses, but requires changes to CuaDriver outside this repository and could block legitimate independent clients. SDK enforcement is an immediate, testable improvement with the stated arbitrary-code limitation.
 
-There is no wall-clock point expiry in the selected design. The retained safeguards are observation ownership, scope/window identity, snapshot invalidation, and geometry checks. An old screenshot can still become semantically wrong if an application changes without a new observation; the agent must observe again after any user pause and before a visual action based on a pre-pause image.
+There is no wall-clock or user-interaction-boundary point expiry in the selected design. The retained safeguards are observation ownership, scope/window identity, SDK session validity, and geometry checks. An old screenshot can still become semantically wrong if an application changes without a new observation; the agent should observe again after a user pause and before a visual action based on a pre-pause image.
 
 ## Ctrl-C behavior
 
@@ -34,7 +36,7 @@ The prompt will describe the same rule as guidance, but runtime enforcement is a
 
 ## Point-reference validity
 
-Remove `max_age_ms` from public point APIs, Python validation, Rust point storage/validation, legacy runtime validation, internal callers, API stubs, docs, and tests. This is a deliberate public API change; callers using that keyword must be updated. Time elapsed alone no longer yields `STALE_TARGET`. Existing scope, capture ownership, window/geometry, and snapshot checks continue to reject mismatches. After `ask_user` or Ctrl-C, the harness invalidates prior screenshot point references and tells the agent to refresh its observation before visual action; this does not revoke GUI approval or clear conversation context. Error feedback must distinguish an invalid screenshot reference from a stale window handle and never recommend rebind for point-only invalidation.
+Remove `max_age_ms` from public point APIs, Python validation, Rust point storage/validation, legacy runtime validation, internal callers, API stubs, docs, and tests. This is a deliberate public API change; callers using that keyword must be updated. Neither elapsed time nor `ask_user`/Ctrl-C alone yields `STALE_TARGET`. Existing scope, capture ownership, window/geometry, and SDK session checks continue to reject mismatches. The prompt should recommend reobservation when a page may have changed, but the harness does not invalidate a point merely because the user interacted.
 
 ## DingTalk AX findings and correction
 
@@ -42,6 +44,6 @@ Direct CuaDriver `get_window_state` on the current DingTalk window returned stru
 
 ## Verification
 
-Automated tests must cover: Ctrl-C during model planning, a responsive worker, and a cancellation-resistant worker; repeated Ctrl-C; prompt-time Ctrl-C; no follow-up dispatch before worker stop; no zombie child process; the next plain user message retaining the same task identity and context; one approval for multiple visual/foreground actions; approval surviving `ask_user` and Ctrl-C; revocation on `terminate`, explicit `/new`, and session end; a different window requiring its own grant; rejection before any native action; focus-change refusal without grant revocation; background AX operations without approval; point use after 120 seconds without an age failure; point invalidation by scope/snapshot/geometry and after `ask_user` or Ctrl-C; and truthful AX completeness plus `AXTextArea` discovery.
+Automated tests must cover: Ctrl-C during model planning, a responsive worker, and a cancellation-resistant worker; repeated Ctrl-C; prompt-time Ctrl-C; no follow-up dispatch before worker stop; no zombie child process; the next plain user message retaining the same task identity and context; one approval for multiple visual/foreground actions; approval surviving `ask_user` and Ctrl-C; revocation on `terminate`, explicit `/new`, and session end; a different window requiring its own grant; rejection before any native action; focus-change refusal without grant revocation; background AX operations without approval; point use without an age failure and survival across a user boundary; point rejection for mismatched scope or geometry; and truthful AX completeness plus `AXTextArea` discovery.
 
 Manual CLI verification should run a harmless task that loops in the worker, interrupt it, confirm the input prompt returns promptly and the old process is gone, then try a scoped visual action against a test window and confirm approval happens once. No real DingTalk messages or documents are modified during verification.
