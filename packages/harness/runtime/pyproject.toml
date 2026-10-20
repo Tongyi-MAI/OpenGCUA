@@ -34,6 +34,7 @@ py-modules = [
   "llm_entry",
   "model_stream",
   "mcp_config",
+  "mcp_broker",
   "model_metrics",
   "llm_compaction",
   "rollout_data",

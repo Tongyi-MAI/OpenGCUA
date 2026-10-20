@@ -34,7 +34,7 @@ def test_valid_server_keeps_variable_names_not_secret_values():
         {"DINGTALK_Client_ID": "app-key", "DINGTALK_Client_Secret": secret},
     )
     assert spec.name == "dingtalk"
-    assert spec.command == Path(sys.executable).resolve()
+    assert spec.command == Path(sys.executable)
     assert spec.args == ("/tmp/dingtalk-mcp/index.js",)
     assert spec.env_from_host == ("DINGTALK_Client_ID", "DINGTALK_Client_Secret")
     assert spec.read_only_tools == frozenset({"getUser", "getCalendarView"})

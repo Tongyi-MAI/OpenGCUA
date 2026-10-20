@@ -92,6 +92,6 @@ def parse_mcp_servers(value: object, environ: Mapping[str, str]) -> tuple[McpSer
                 or not math.isfinite(timeout) or not 1 <= timeout <= 120):
             raise ValueError(f"MCP server {name} timeout_seconds must be between 1 and 120")
         result.append(McpServerSpec(
-            name, executable.resolve(), args, env_names, frozenset(tools), float(timeout)
+            name, executable, args, env_names, frozenset(tools), float(timeout)
         ))
     return tuple(result)
