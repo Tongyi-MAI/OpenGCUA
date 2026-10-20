@@ -81,6 +81,10 @@ class RichTerminalFrontend:
         self._last_phase: tuple[int | None, str] | None = None
         self._reasoning_open = False
         self._intent_open = False
+        self._code_open = False
+        self._code_step: int | None = None
+        self._code_block: int | None = None
+        self._code_preview: dict[int, str] = {}
         self._abort_callback: Callable[[], None] | None = None
         self._abort_requested = False
 
@@ -169,12 +173,48 @@ class RichTerminalFrontend:
                 self.console.print()
             self._intent_open = False
             return
+        if kind == "code_reset":
+            if self._code_open and not self._code_preview.get(self._code_block or 1, "").endswith("\n"):
+                self.console.print()
+            self._code_open = False
+            self._code_step = event.step
+            self._code_block = None
+            self._code_preview.clear()
+            return
+        if kind == "code_start":
+            if not self.show_code:
+                return
+            if self._code_open and not self._code_preview.get(self._code_block or 1, "").endswith("\n"):
+                self.console.print()
+            if self._code_step != event.step:
+                self._code_preview.clear()
+            self._code_step = event.step
+            self._code_block = int(event.payload.get("block_index") or 1)
+            self._code_preview[self._code_block] = ""
+            self._code_open = True
+            self.console.print("[dim]Code preview[/dim]")
+            return
+        if kind == "code_delta":
+            if self.show_code and self._code_open and self._code_step == event.step:
+                block = self._code_block or 1
+                self._code_preview[block] = self._code_preview.get(block, "") + event.text
+                self.console.print(Text(event.text), end="", soft_wrap=True)
+            return
+        if kind == "code_end":
+            if self._code_open and not self._code_preview.get(self._code_block or 1, "").endswith("\n"):
+                self.console.print()
+            self._code_open = False
+            self._code_block = None
+            return
         if kind == "action":
             intent = str(event.payload.get("intent") or event.text or "Action")
             self.console.print(Panel(intent, title=f"Step {event.step or 0} · Action", border_style="magenta"))
             code = str(event.payload.get("code") or "")
-            if self.show_code and code:
+            streamed_code = "\n".join(self._code_preview[index].strip()
+                                      for index in sorted(self._code_preview))
+            if self.show_code and code and (self._code_step != event.step or streamed_code != code):
                 self.console.print(Syntax(code, "python", line_numbers=False, word_wrap=True))
+            self._code_preview.clear()
             return
         if kind == "execution":
             status = event.payload.get("status") or {}

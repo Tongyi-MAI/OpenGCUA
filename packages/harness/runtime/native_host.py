@@ -54,6 +54,8 @@ def task_arguments(config: dict, runs_dir: Path):
         if action.choices is not None and value not in action.choices:
             raise ValueError(f"配置项 {name} 的选项无效。")
         setattr(args, name, value)
+    if args.demo_mode and "background_mode" not in config:
+        args.background_mode = False
     args.llm_base_url = validate_endpoint(str(config.get("llm_base_url") or ""))
     args.model_name = str(config.get("model_name") or "").strip()
     if not args.model_name:

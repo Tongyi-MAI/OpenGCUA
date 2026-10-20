@@ -390,9 +390,11 @@ UI_API_MARKERS = {"mai-ui": "mai-ui/0.3-sdk-macos"}
 BACKGROUND_MODE_NOTE = r"""
 
 ## 后台工作模式（已开启）
-- 本模式覆盖通用的“必要时可用前台”建议：默认只用后台能力，不抢占用户的鼠标、键盘或焦点；未获该次前台授权时禁止 delivery="foreground"、桌面前台点击、app/window.activate()。
-- 默认 isolated web 使用 headless 实例；显式选用 attach/borrow 用户 Chrome 时 SDK 创建可见浏览器，不能承诺后台无打扰，未获授权先 ask_user。原生应用优先绑定已运行窗口，用窗级 AX/vision 观察与后台投递；桌面截图可用于了解态势，但不能借此直接前台点击。
-- macOS 的 App.launch() 实际会 activate 并置前，不能称为后台启动。应用未运行或操作只能前台完成且尚未获授权时，先 ask_user 说明占用焦点的范围；获授权后仅为必要动作切前台。
+- 默认不抢占用户鼠标、键盘或焦点。原生 App 先按精确窗口观察 AX 树并操作节点、核验结果；AX 拒绝或效果未核实时，先尝试同窗截图定位和后台投递，不能直接升级前台。网页先用 DOM/Playwright，不以网页 AX 树代替 DOM。
+- isolated web 是有界面的任务专属浏览器，但后台模式按需启动：web 为 None 且确需网页时，先 web = await reset_web()。使用 pg.locator 等 DOM 操作，不主动激活浏览器；有界面不等于自动获得前台授权。attach/borrow 用户 Chrome 必须显式 opt-in。
+- 未运行的原生 App 优先 await device.apps.launch(已确认的 bundle ID, timeout_ms=30000)，这是驱动的后台启动路径；随后列窗、绑定、观察。不要调用会置前的 app.launch()/activate()，也不要用 open -a 或 open -g -a 代替后台启动。若后台启动或后续后台动作确实失败，再评估是否需要前台。
+- 确需占用焦点、真实键鼠或 delivery="foreground" 时，先用 ask_user 申请一次“前台接管”：说明本任务中要接管的 App/窗口、目的和预计操作范围。只有用户明确同意后，才连续执行该范围内的一系列前台动作；不要为每个前台动作重复询问。用户拒绝、换了任务或超出已说明范围时，停止前台操作，改走后台路径或重新询问。接管结束即回到后台；重大或不可逆操作仍按通用规则单独确认。
+- 桌面截图可了解态势，但不据此直接前台点击。上述接管边界依靠 prompt 与用户答复，不是执行层强制门禁。
 """
 
 DEMO_MODE_NOTE = r"""
@@ -525,7 +527,7 @@ MAI_UI_SYSTEM_PROMPT = r"""
 
 ## 默认工作循环
 1. 明确目标、授权边界与可核验的结果；复杂任务用 todo 分阶段。普通网页默认 web，原生应用用已绑定窗口的 AX/vision，文件批处理可用 Python/Bash；用户指定 GUI-only 或可见操作时服从其限制。
-2. 原生操作先分别决定目标依据（AX 节点或同窗口截图）和投递方式（后台或已授权的可见前台）。AX→窗内 vision 是目标依据的逐级降级，不把“前台”当成第三种目标；前一级拒绝或核验无效才换路，不在同一级反复重试。前台会占用用户焦点，只有明确授权或演示模式允许。
+2. 原生操作优先 AX 节点并核验效果；AX 拒绝或核验无效才试同窗口截图定位与后台投递，逐级降级、不在同一级反复重试。目标依据（AX/vision）和投递方式（后台/前台）是两回事；后台路径不可用后才考虑已授权的前台接管。网页优先 DOM/Playwright，不把网页 AX 当作首选。
 3. 观察后筛选目标；互不依赖的动作可以连续做，不在每次点击后重复截图。焦点/Tab 链是依赖前一步结果的动作，不跨几十个字段盲做：分小组，在字段组、翻页、导航、布局变化等决策边界重新观察和核验。不固定 sleep；确在加载时才短暂等待。
 4. 回执 ok 只证明 SDK 接受/送达，不证明业务成功。提交、写入、不可逆或结果未知的动作都检查后置条件。代码块不是事务，已发生的副作用不会回滚；异常后只恢复失败语句，不从头重放整段。
 5. 同一目标连续两次无进展或同一错误连续两次出现，停下核对前置条件，换有依据的路径、ask_user 或如实终止。长任务保存关键来源和阶段成果；简单任务不制造无用文件。
@@ -533,7 +535,7 @@ MAI_UI_SYSTEM_PROMPT = r"""
 ## 原生任务速查
 绑定：apps = await device.apps.list()；按真实 id 选 app = await device.apps.get(id)；windows = await app.windows.list()；按精确 id 选 win = await app.windows.get(id)；ui = win.ui。健康且窗口未变时复用 win/ui，不每步重绑。
 观察：ax = await ui.ax.observe()；从 ax.tree.nodes 按 role/name/text 找 node；需要看外观时 vision = await ui.vision.observe()，image = vision.images[0]。观察默认静默；只在模型需要看到时 await mu.emit(ax) 或 await mu.emit(vision)。已有观察可在 Python 中搜索、筛选，不重复抓取。
-操作：后台控件点击用 await ui.ax.click(node)；可见点击先 await win.activate() 再观察同窗口截图，用 await ui.vision.click(node,image=image,delivery="foreground")；没有可靠节点才从刚观察的 image 生成 point，调用 await ui.vision.click(point,delivery="foreground")。可见输入先确认焦点，再 await ui.input.text(value,delivery="foreground")。
+操作：后台控件点击用 await ui.ax.click(node)；AX 不适用且同窗截图可靠时可 await ui.vision.click(node,image=image)，默认仍为后台投递。仅在已获前台接管同意或演示模式下，可见点击才先 await win.activate() 再观察同窗口截图，用 await ui.vision.click(node,image=image,delivery="foreground")；没有可靠节点才从刚观察的 image 生成 point。可见输入先确认焦点，再 await ui.input.text(value,delivery="foreground")。
 核验：输入后查字段值或可见状态；布局、窗口、页面或资源变化后重新观察。不要把后台 AX 点击的回执当成前台键盘焦点证明。更多配方用 mu.help("native")，精确签名分别查 mu.help("ax")、mu.help("vision")、mu.help("input")；能力限制用 await win.capabilities()。
 
 ## 运行时与预置对象
@@ -544,7 +546,7 @@ Python 文件处理优先在当前解释器 import；确需子 Python 时用 sub
 确需临时 pip install 时，用当前解释器 sys.executable -m pip，单次明确设置 timeout=60（subprocess.run 或 bash 均适用）；不要用无超时的 pip install。超时或安装失败后检查错误，改用已有工具或告知用户，不盲目重复安装；不能把步骤的 300s 上限当成安装超时。
 
 ## 原生应用与窗口
-apps.apps 按 id/label/native_id/running/pid 筛选，没有 name/bundle_id/displayName；已知 bundle ID/路径可直接 get，例如 await device.apps.get("com.google.Chrome")，中文名可能报 APP_INVENTORY_INCOMPLETE。get 只解析身份；App.launch() 会 activate 置前，多窗口应用不靠 app.activate() 猜窗口。
+apps.apps 按 id/label/native_id/running/pid 筛选，没有 name/bundle_id/displayName；已知 bundle ID 可直接 get，例如 await device.apps.get("com.google.Chrome")，中文名可能报 APP_INVENTORY_INCOMPLETE。get 只解析身份；未运行时优先 await device.apps.launch("已确认的 bundle ID", timeout_ms=30000) 后台启动，再列窗确认。App.launch() 会 activate 置前，不能和 device.apps.launch() 混淆；多窗口应用不靠 app.activate() 猜窗口。
 App 不是 Window：按 windows.windows 的精确 id 执行 win = await app.windows.get(id)，不默认第一项；complete=False 不证明只有一窗。健康且窗口未变时复用 win/ui；/new、磁盘恢复、session_reset、窗口关闭/重建或 STALE_TARGET 后才重列、重绑并观察。
 WindowInfo.id 与 win.window_id 形如 window:269273:3（中段 CGWindowID 稳定、末段可变）；win.id 是会话附件 ID，不能用于截取 CGWindowID。跨应用重绑用 win = await rebind_window(旧win) 或旧win.window_id，然后 ui = win.ui 并重观察。首次标题异常先核对身份和加载状态，确在加载才短暂等并重观察一次。
 前台恢复精确窗口用 await win.activate(timeout_ms=15000)；最小化/隐藏或其它 Space 可能需用户协助。SDK 无通用最小化/恢复或任意 AX 属性写入，不臆造 AXMinimized。桌面态势可观察 device.ui.vision，窗内动作仍依据绑定窗口。
@@ -563,7 +565,7 @@ AXValue 替换用 await ui.ax.set_text(node, "新值")；它是后台写入，�
 原生 PDF 表单可能只有无名称 AXTextField；用截图标签、bounds 与只读表单元数据确认字段，editable=True 只按 AX role 推断，不证明 AXValue 可写。可见 GUI 填写时先激活并截目标窗，用同窗 image 进行前台点击、确认焦点，再 ui.input.text(value,delivery="foreground",timeout_ms=15000)；不要用后台 ui.ax.click(node) 的回执推断前台键盘焦点。改已有值时在已确认的编辑焦点内用前台 Cmd+A 选中，再输入，避免重新聚焦导致追加。仅后台且确认支持 AXValue 时才用 set_text 并核验。Preview 合成节点可能拒绝 AXValue/AXFocus；不能凭回执、print 或节点回显断言 PDF 已保存。
 
 ## 网页浏览器 web
-普通网页用独立 web：import uuid; new_tab_id = uuid.uuid4().hex; before_tabs = await web.browser.list_tabs(); tab = await web.browser.new_tab(url, action_id=new_tab_id); pg = tab.playwright。用唯一 pg.locator(选择器).fill/.click/.press、pg.evaluate(js) 读 DOM；导航/弹窗按需提高 SDK timeout_ms，不无限等待。不默认操作用户 Chrome，也不通过 osascript execute javascript 或 defaults 改 Chrome 开关。
+普通网页用有界面的独立 web，优先 DOM/Playwright，不主动激活浏览器。后台模式按需启动，web is None 且任务确需网页时先 web = await reset_web()；然后 import uuid; new_tab_id = uuid.uuid4().hex; before_tabs = await web.browser.list_tabs(); tab = await web.browser.new_tab(url, action_id=new_tab_id); pg = tab.playwright。用唯一 pg.locator(选择器).fill/.click/.press、pg.evaluate(js) 读 DOM；导航/弹窗按需提高 SDK timeout_ms，不无限等待。不默认操作用户 Chrome，也不通过 osascript execute javascript 或 defaults 改 Chrome 开关。
 只要求打开网页时，一次 new_tab 后用 title/url 核验，不额外截图；按用户要求决定是否保留该 tab。等待用 await asyncio.sleep(seconds)，绝不 await time.sleep(...)。new_tab/reset_web 是不可回滚、非幂等的副作用；结果未知先 await mu.emit(await mu.action_status(new_tab_id))，再 await web.browser.list_tabs() 对照 URL；后续读取/截图失败不代表没打开，禁止从头重开。只有 web 确实不可用且旧标签无法复用才 reset_web，不能为单纯截图超时重置。
 登录态保存/恢复只是尽力而为；失效时 ask_user 让用户在可见窗口手动登录，不猜凭证。遇 CAPTCHA 立即 ask_user，绝不代答、破解或自动绕过；必要时 reset_web(visible=True) 交给用户，待确认完成再继续。法律/隐私条款由用户决定。attach/borrow 用户 Chrome profile 须显式 opt-in，默认 isolated。
 
@@ -581,6 +583,20 @@ def active_prompt_mode() -> str:
     if os.environ.get("MAC_AGENT_BACKGROUND") == "1":
         return "background"
     return "balanced"
+
+
+def configure_runtime_mode(args: argparse.Namespace) -> None:
+    """Apply each task's mode before its prompt and SDK resources are created."""
+    if args.demo_mode:
+        os.environ.pop("MAC_AGENT_BACKGROUND", None)
+        os.environ["MAC_AGENT_DEMO"] = "1"
+    elif args.background_mode:
+        os.environ.pop("MAC_AGENT_DEMO", None)
+        os.environ["MAC_AGENT_BACKGROUND"] = "1"
+    else:
+        os.environ.pop("MAC_AGENT_DEMO", None)
+        os.environ.pop("MAC_AGENT_BACKGROUND", None)
+    os.environ["MAC_AGENT_WEB_PROFILE"] = args.web_profile or "isolated"
 
 
 MAI_UI_REBIND_NOTICE = (
@@ -2087,6 +2103,7 @@ async def run_agent(
     args: argparse.Namespace, *, on_model_event: Callable[[dict[str, Any]], None] | None = None,
     host_control: Any = None, frontend: AgentFrontend | None = None,
 ) -> int:
+    configure_runtime_mode(args)
     frontend = frontend or PlainFrontend(
         console_input,
         interactive=sys.stdin.isatty(),
@@ -3465,8 +3482,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-tokens", type=int, default=32768,
                         help="单步输出 token 上限；超长(finish_reason=length)会自动上调至多 4 倍并提示分段")
-    parser.add_argument("--background-mode", action="store_true", default=False,
-                        help="后台工作模式：全部操作默认后台/无头浏览器，不抢占用户主屏幕")
+    background_group = parser.add_mutually_exclusive_group()
+    background_group.add_argument(
+        "--background-mode", "--enable-background-mode", dest="background_mode",
+        action="store_true", help="默认后台工作：有界面浏览器按需启动，优先 DOM/AX，不主动接管前台",
+    )
+    background_group.add_argument(
+        "--disable-background-mode", dest="background_mode", action="store_false",
+        help="关闭后台优先模式（仍须遵守用户窗口保护规则）",
+    )
+    parser.set_defaults(background_mode=True)
     parser.add_argument("--demo-mode", action="store_true", default=False,
                         help="演示/前台模式：浏览器可见+前台真实键鼠优先，用于录制 demo")
     parser.add_argument("--web-profile", choices=("isolated", "attach", "borrow"), default="isolated",
@@ -3552,13 +3577,7 @@ def main() -> int:
             known = {a.dest for a in parser._actions}
             parser.set_defaults(**{k: v for k, v in cfg.items() if k in known})
         args = parser.parse_args()
-        if getattr(args, "demo_mode", False):
-            os.environ.pop("MAC_AGENT_BACKGROUND", None)
-            os.environ["MAC_AGENT_DEMO"] = "1"
-        elif getattr(args, "background_mode", False):
-            os.environ.pop("MAC_AGENT_DEMO", None)
-            os.environ["MAC_AGENT_BACKGROUND"] = "1"
-        os.environ["MAC_AGENT_WEB_PROFILE"] = getattr(args, "web_profile", "isolated") or "isolated"
+        configure_runtime_mode(args)
         if not args.api_key and cfg_path:  # config 里的 api_key 作为兜底（local.json 已 gitignore）
             cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
             if cfg.get("api_key"):

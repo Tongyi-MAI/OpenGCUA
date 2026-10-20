@@ -576,8 +576,7 @@ async def create_web(*, storage_state: Optional[str] = None,
 
     cdp = os.environ.get("MAC_AGENT_WEB_CDP")
     if headless is None:
-        headless = (os.environ.get("MAC_AGENT_BACKGROUND") == "1"
-                    and os.environ.get("MAC_AGENT_DEMO") != "1")
+        headless = False
     if visible:
         headless = False
     if (not cdp and not headless and sys.platform.startswith("linux")

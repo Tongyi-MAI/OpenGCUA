@@ -82,6 +82,44 @@ def test_tui_hides_reasoning_and_code_by_default():
     assert "PRIVATE_CODE" not in rendered
 
 
+def test_tui_ignores_streamed_code_when_code_view_is_off():
+    ui, output = frontend()
+    ui.emit(AgentEvent("code_start", step=0, payload={"block_index": 1}))
+    ui.emit(AgentEvent("code_delta", "terminate", step=0, payload={"block_index": 1}))
+    ui.emit(AgentEvent("code_end", step=0, payload={"block_index": 1}))
+
+    assert output.getvalue() == ""
+
+
+def test_tui_streamed_code_preserves_model_line_breaks_without_duplication():
+    ui, output = frontend()
+    ui.show_code = True
+    code = 'terminate(status="success", answer="你好！有什么我可以帮你的吗？")'
+    ui.emit(AgentEvent("code_start", step=0, payload={"block_index": 1}))
+    ui.emit(AgentEvent("code_delta", "terminate", step=0, payload={"block_index": 1}))
+    ui.emit(AgentEvent("code_delta", code[len("terminate"):], step=0,
+                       payload={"block_index": 1}))
+    ui.emit(AgentEvent("code_end", step=0, payload={"block_index": 1}))
+    ui.emit(AgentEvent("action", step=0, payload={"intent": "问候用户并终止", "code": code}))
+
+    rendered = output.getvalue()
+    assert code in rendered
+    assert rendered.count(code) == 1
+    assert "terminate\n(status" not in rendered
+
+
+def test_tui_does_not_repeat_validated_code_after_trailing_stream_newline():
+    ui, output = frontend()
+    ui.show_code = True
+    code = 'terminate(status="success", answer="你好！")'
+    ui.emit(AgentEvent("code_start", step=0, payload={"block_index": 1}))
+    ui.emit(AgentEvent("code_delta", code + "\n", step=0, payload={"block_index": 1}))
+    ui.emit(AgentEvent("code_end", step=0, payload={"block_index": 1}))
+    ui.emit(AgentEvent("action", step=0, payload={"intent": "问候", "code": code}))
+
+    assert output.getvalue().count(code) == 1
+
+
 def test_tui_toggles_apply_only_to_future_events():
     ui, output = frontend("/reasoning on", "continue")
     ui.emit(AgentEvent("reasoning_delta", "HIDDEN_EARLIER", step=1))

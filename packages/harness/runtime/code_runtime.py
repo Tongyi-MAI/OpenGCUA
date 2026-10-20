@@ -2340,13 +2340,13 @@ async def _add_web_factory(runtime: Any) -> None:
                     "MAC_AGENT_WEB_PROFILE_DIR",
                     str(Path.home() / "Library/Application Support/Google/Chrome")))
         else:
-            # isolated：临时 profile + 启动时注入登录态快照（会话级 cookie 靠快照复活）。
+            # isolated：有界面任务专属 profile；DOM 操作无需前台焦点。
             await runtime.add_browser_factory(
-                "web", engine="chromium", headless=(os.environ.get("MAC_AGENT_BACKGROUND") == "1" and os.environ.get("MAC_AGENT_DEMO") != "1"),
+                "web", engine="chromium", headless=False,
                 channel="chrome")
     except Exception:
         await runtime.add_browser_factory(
-            "web", engine="chromium", headless=(os.environ.get("MAC_AGENT_BACKGROUND") == "1" and os.environ.get("MAC_AGENT_DEMO") != "1"))
+            "web", engine="chromium", headless=False)
 
 
 async def _create_web_resource(runtime: Any, session: Any, visible: bool = False) -> Any:
@@ -2421,7 +2421,9 @@ async def _open_sdk_session() -> tuple[Any, Any, Any, Any]:
         # Warm native inventory with a budget allowing first driver startup.
         await device.apps.list(timeout_ms=30000)
         _instrument_sdk_session(session)
-        _SDK_WEB = await _create_web_resource(runtime, session)
+        # A headed browser may show a window. Do not launch it for non-web tasks.
+        _SDK_WEB = (None if os.environ.get("MAC_AGENT_BACKGROUND") == "1"
+                    else await _create_web_resource(runtime, session))
         return runtime, resource, session, device
     except BaseException:
         # Release every acquired endpoint, including Android's writer lease,
@@ -2554,7 +2556,7 @@ async def _reset_sdk_session() -> tuple[Any, Any]:
     _instrument_sdk_session(session)
     # The local shim owns its browser independently of the Mac SDK session.
     # Reusing it avoids an orphan browser and a second launch after GUI reconnect.
-    if getattr(_SDK_WEB, "resource_id", None) != "browser:web-shim":
+    if _SDK_WEB is not None and getattr(_SDK_WEB, "resource_id", None) != "browser:web-shim":
         _SDK_WEB = await _create_web_resource(_SDK_RUNTIME, session)
     _MAI_SESSION, _SDK_DEVICE = session, device
     if _EXEC_NAMESPACE is not None:
@@ -2612,8 +2614,8 @@ async def rebind_window(
 async def reset_web(visible: bool = False) -> Any:
     """Recreate the dedicated automation browser (e.g. after a human quit it).
 
-    visible=True relaunches it non-headless even in background mode, so a human can
-    take over a tab (e.g. complete a CAPTCHA); the persistent profile keeps logins.
+    The isolated browser is headed in all modes. ``visible=True`` additionally
+    requests the explicitly visible recovery path for human intervention.
     """
     global _SDK_WEB, _SDK_NATIVE_WEB_FAILURE
     if _SDK_RUNTIME is None or _MAI_SESSION is None:

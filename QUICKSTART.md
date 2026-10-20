@@ -252,6 +252,11 @@ If you explicitly disable compaction, `history_turns` becomes the raw-history li
 | `driver_timeout` | `30.0` | Timeout, in seconds, for one CuaDriver call. | Raise it for unusually slow app launches or observations. It does not control model requests. |
 | `coordinate_range` | `1000` | Normalized coordinate scale exposed to the model (`0..1000` by default). | Normally leave unchanged; prompts and coordinate conversion must agree with it. |
 | `startup_observation` | `none` | Initial visual observation policy: `none` defers observation to agent code; `desktop` captures the full desktop; `auto` follows the selected UI backend. | Use `desktop` only when the model needs an immediate overview and the launching process has Screen Recording permission. |
+| `background_mode` | `true` | Prefer DOM actions in an isolated, headed browser and AX actions in native apps without taking over your mouse or keyboard. The browser starts only when needed. | Set `false` (or pass `--disable-background-mode`) for the older foreground-oriented workflow. Some apps and browser launches can still bring a window forward briefly; this is not a focus-isolation guarantee. |
+
+When an operation really requires foreground focus or global mouse/keyboard input, the agent is instructed to
+ask once before taking over the specified app/window for a series of actions, then return to background work.
+This is currently an agent instruction, not a host-level permission gate for arbitrary Python/Bash code.
 
 The GUI-only baseline uses `history` (default `5`) for its screenshot window rather than
 `history_turns`. Its token threshold is named `compact_trigger_tokens`. Run either script with

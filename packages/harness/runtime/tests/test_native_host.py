@@ -47,6 +47,14 @@ def test_background_and_demo_modes_are_exclusive(tmp_path):
                         "background_mode": True, "demo_mode": True}, tmp_path)
 
 
+def test_native_task_defaults_to_background_but_demo_mode_opts_out(tmp_path):
+    base = {"llm_base_url": "https://example.com/v1", "model_name": "fixture"}
+    normal = task_arguments(base, tmp_path)
+    assert normal.background_mode is True and normal.demo_mode is False
+    demo = task_arguments({**base, "demo_mode": True}, tmp_path)
+    assert demo.background_mode is False and demo.demo_mode is True
+
+
 def start_command(task_id="a"):
     return {"command": "start", "task_id": task_id, "text": "test", "config": {
         "endpoint": "http://127.0.0.1:9999/v1", "model": "fixture", "api_key": "private-test-key"}}

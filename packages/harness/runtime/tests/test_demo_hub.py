@@ -113,6 +113,22 @@ def test_hub_reasoning_cli_does_not_override_config_by_default():
     assert parser.parse_args(["--reasoning-effort", "none"]).reasoning_effort == "none"
 
 
+def test_hub_reports_background_default_and_transmits_explicit_opt_out():
+    default_hub = demo_hub.Hub({})
+    assert default_hub.state()["background_mode"] is True
+    assert "--enable-background-mode" in default_hub.session._config_args()
+
+    opted_out = demo_hub.Hub({"background_mode": False})
+    assert opted_out.state()["background_mode"] is False
+    assert "--disable-background-mode" in opted_out.session._config_args()
+
+
+def test_background_hub_start_does_not_announce_recording_mode(hub):
+    session = hub[0].session
+    session.submit("任务")
+    assert not any(event.get("type") == "space" for event in session.backlog)
+
+
 def test_events_are_broadcast_to_every_subscriber(hub):
     session = hub[0].session
     backlog_a, subscriber_a = session.subscribe_events()

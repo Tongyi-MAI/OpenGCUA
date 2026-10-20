@@ -178,6 +178,14 @@ or `/code on` to show future output, `/help` for shortcuts, and Alt/Option+Enter
 newline. Ctrl-C during an active step aborts that turn; operations already sent to applications
 or the shell are not rolled back.
 
+The macOS agent defaults to background-first operation. Its dedicated browser has a visible
+window but starts only when a web task needs it; webpage actions use DOM/Playwright first.
+Native apps use accessibility controls before window-scoped background input. If a task needs
+the real pointer, keyboard, or a foreground window, the agent asks once before a series of
+foreground actions. Use `--disable-background-mode` to opt out, or enable demo mode when
+recording deliberately visible foreground actions. This is agent guidance, not an execution-layer
+permission boundary; a headed browser may briefly take focus when it is first launched.
+
 If you see `PERMISSION_DENIED`, `DEVICE_OFFLINE`, a native-extension import error, or a recording
 problem, use the [error-indexed troubleshooting guide](QUICKSTART.md#troubleshooting). For SDK-only
 installation and wheel builds, see the [SDK guide](packages/sdk/README.md#install). The standalone

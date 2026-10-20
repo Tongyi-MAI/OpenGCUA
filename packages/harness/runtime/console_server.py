@@ -42,7 +42,7 @@ BOOL_FLAGS = {
     "micro_compaction": "启用 micro compaction",
     "multi_task": "启用多任务（/new 切换）",
     "record_model_requests": "录制完整模型请求（含图片，占磁盘）",
-    "background_mode": "后台工作模式（无头 web + 禁前台操作）",
+    "background_mode": "后台工作模式（有界面 web 按需启动 + 优先后台操作）",
     "demo_mode": "演示/前台模式（可见 web + 前台真实键鼠优先，用于录制）",
 }
 NUM_FLAGS = {
@@ -230,7 +230,8 @@ class Session:
             # O_RDWR 持有写端（不阻塞），保证 fifo 常驻；再开读端给子进程作 stdin。
             self._fifo_fd = os.open(self.fifo, os.O_RDWR)
             read_fd = os.open(self.fifo, os.O_RDONLY)
-            self._create_space_anchor()
+            if not self.config.get("background_mode", True):
+                self._create_space_anchor()
             cmd = [sys.executable, str(REPO / "mac_agent.py"), "--startup-observation", "none",
                    self.first_message]
             cmd += self._config_args()

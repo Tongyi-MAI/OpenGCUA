@@ -24,5 +24,6 @@
   "coordinate_range": 1000,
   "max_tokens": 32768,
   "startup_observation": "none",
+  "background_mode": true,
   "mobile_serial": "emulator-5554"
 }

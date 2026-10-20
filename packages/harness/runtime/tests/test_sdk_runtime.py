@@ -310,6 +310,90 @@ def test_context_prompt_never_combines_background_and_demo_modes(monkeypatch):
     assert "后台工作模式（已开启" not in context.system_prompt
 
 
+def test_background_mode_is_default_and_can_be_disabled(monkeypatch):
+    monkeypatch.delenv("MAC_AGENT_BACKGROUND", raising=False)
+    monkeypatch.delenv("MAC_AGENT_DEMO", raising=False)
+    parser = mac_agent.build_parser()
+    assert parser.parse_args([]).background_mode is True
+    assert parser.parse_args(["--disable-background-mode"]).background_mode is False
+    assert parser.parse_args(["--background-mode"]).background_mode is True
+
+
+def test_background_prompt_uses_ax_first_and_one_consented_takeover(monkeypatch):
+    monkeypatch.setenv("MAC_AGENT_BACKGROUND", "1")
+    monkeypatch.delenv("MAC_AGENT_DEMO", raising=False)
+    context = mac_agent.ContextManager(
+        task="test", coordinate_range=1000, img_keep_n=1, img_interval=1,
+        history_turns=1, micro_compaction=False, micro_trigger_steps=1,
+        micro_keep_turns=1, micro_interval=1, todo_diff_snapshot=False,
+        max_image_dimension=1000, jpeg_quality=80,
+    )
+    prompt = context.system_prompt
+    assert "device.apps.launch" in prompt
+    assert "AX" in prompt and "后台投递" in prompt
+    assert "前台接管" in prompt and "ask_user" in prompt
+    assert "每个前台动作" in prompt
+    assert "无头" not in mac_agent.BACKGROUND_MODE_NOTE
+
+
+def test_background_isolated_browser_is_headed_and_uses_sdk_factory(monkeypatch):
+    monkeypatch.setenv("MAC_AGENT_BACKGROUND", "1")
+    monkeypatch.delenv("MAC_AGENT_DEMO", raising=False)
+    monkeypatch.setenv("MAC_AGENT_WEB_PROFILE", "isolated")
+    calls = []
+
+    class Runtime:
+        async def add_browser_factory(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    asyncio.run(code_runtime._add_web_factory(Runtime()))
+    assert calls == [(("web",), {"engine": "chromium", "headless": False,
+                                 "channel": "chrome"})]
+
+
+def test_background_session_defers_browser_until_web_is_needed(monkeypatch):
+    monkeypatch.setenv("MAC_AGENT_BACKGROUND", "1")
+    install_fake_sdk(monkeypatch)
+    cleanup_runtime_globals()
+    launches = []
+
+    async def create_web(*_args, **_kwargs):
+        launches.append(1)
+        return object()
+
+    monkeypatch.setattr(code_runtime, "_create_web_resource", create_web)
+    try:
+        runtime, resource, session, device = asyncio.run(code_runtime._open_sdk_session())
+        assert code_runtime._SDK_WEB is None
+        assert launches == []
+        code_runtime._SDK_RUNTIME = runtime
+        code_runtime._SDK_RESOURCE = resource
+        code_runtime._MAI_SESSION = session
+        code_runtime._SDK_DEVICE = device
+        asyncio.run(code_runtime._reset_sdk_session())
+        assert launches == []
+        asyncio.run(code_runtime.reset_web())
+        assert launches == [1]
+    finally:
+        asyncio.run(code_runtime._close_sdk_session(close_runtime=True))
+        cleanup_runtime_globals()
+
+
+def test_runtime_mode_follows_each_task_in_native_host(monkeypatch):
+    monkeypatch.delenv("MAC_AGENT_BACKGROUND", raising=False)
+    monkeypatch.delenv("MAC_AGENT_DEMO", raising=False)
+    args = mac_agent.build_parser().parse_args([])
+    mac_agent.configure_runtime_mode(args)
+    assert mac_agent.active_prompt_mode() == "background"
+    args.demo_mode = True
+    mac_agent.configure_runtime_mode(args)
+    assert mac_agent.active_prompt_mode() == "demo"
+    args.demo_mode = False
+    args.background_mode = False
+    mac_agent.configure_runtime_mode(args)
+    assert mac_agent.active_prompt_mode() == "balanced"
+
+
 def test_legacy_prompt_does_not_receive_sdk_mode_instructions(monkeypatch):
     monkeypatch.delenv("MAC_AGENT_BACKGROUND", raising=False)
     monkeypatch.setenv("MAC_AGENT_DEMO", "1")
@@ -438,7 +522,7 @@ def test_web_recreation_uses_timeout_accepted_by_sdk_host(monkeypatch, tmp_path)
     monkeypatch.setattr(code_runtime, "_start_keepalive", lambda: None)
     monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
     cleanup_runtime_globals()
-    code_runtime._SDK_WEB = None
+    code_runtime._SDK_WEB = types.SimpleNamespace(resource_id="browser:web")
     code_runtime._EXEC_NAMESPACE = None
     code_runtime._SDK_RUNTIME = FakeRuntime()
     code_runtime._SDK_RESOURCE = types.SimpleNamespace(id="mac-resource")

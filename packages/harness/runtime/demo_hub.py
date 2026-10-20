@@ -64,7 +64,8 @@ class HubSession(console_server.Session):
             os.mkfifo(self.fifo)
             self._fifo_fd = os.open(self.fifo, os.O_RDWR)
             read_fd = os.open(self.fifo, os.O_RDONLY)
-            self._create_space_anchor()
+            if not self.config.get("background_mode", True):
+                self._create_space_anchor()
             if str(getattr(self, "hub_config", {}).get("agent_mode")) == "gui-only":
                 # GUI-only 基线 agent（原生 pyautogui，无 SDK/无 shell）：常驻 stdin 多轮会话。
                 cmd = [sys.executable, str(REPO / "gui_agent.py"), "--countdown", "0",
@@ -170,7 +171,8 @@ class HubSession(console_server.Session):
 class Hub:
     def __init__(self, config: dict) -> None:
         self.schema = console_server.build_schema()
-        self.session = HubSession("hub", "demo", config, "")
+        defaults = {"background_mode": not bool(config.get("demo_mode"))}
+        self.session = HubSession("hub", "demo", {**defaults, **config}, "")
         self.session.hub_config = {}
         self.mobile_bridge = None
         self._target_lock = threading.Lock()
@@ -1010,7 +1012,7 @@ fetch('/api/state', {cache: 'no-store'}).then(r => r.json()).then(s => {
 $('bgmode').onchange = () => { $('demomode').checked = false;
   fetch('/api/bgmode', {method: 'POST', headers: {'Content-Type': 'application/json'},
   body: JSON.stringify({on: $('bgmode').checked})}).then(r => r.json())
-  .then(j => bubble('sys', '后台工作模式：' + (j.background_mode ? '开启（全部后台/无头浏览器，不抢主屏幕；新会话生效）' : '关闭（新会话生效）'))); };
+  .then(j => bubble('sys', '后台工作模式：' + (j.background_mode ? '开启（任务浏览器有界面、按需启动；优先 DOM/AX；新会话生效）' : '关闭（新会话生效）'))); };
 $('agentmode').onchange = () => { window.__guiOnly = $('agentmode').value === 'gui-only';
   fetch('/api/agentmode', {method: 'POST', headers: {'Content-Type': 'application/json'},
   body: JSON.stringify({mode: $('agentmode').value})}).then(r => r.json())
