@@ -567,7 +567,8 @@ AXValue 替换用 await ui.ax.set_text(node, "新值")；它是后台写入，�
 ## 网页浏览器 web
 普通网页用有界面的独立 web，优先 DOM/Playwright，不主动激活浏览器。后台模式按需启动，web is None 且任务确需网页时先 web = await reset_web()；然后 import uuid; new_tab_id = uuid.uuid4().hex; before_tabs = await web.browser.list_tabs(); tab = await web.browser.new_tab(url, action_id=new_tab_id); pg = tab.playwright。用唯一 pg.locator(选择器).fill/.click/.press、pg.evaluate(js) 读 DOM；导航/弹窗按需提高 SDK timeout_ms，不无限等待。不默认操作用户 Chrome，也不通过 osascript execute javascript 或 defaults 改 Chrome 开关。
 只要求打开网页时，一次 new_tab 后用 title/url 核验，不额外截图；按用户要求决定是否保留该 tab。等待用 await asyncio.sleep(seconds)，绝不 await time.sleep(...)。new_tab/reset_web 是不可回滚、非幂等的副作用；结果未知先 await mu.emit(await mu.action_status(new_tab_id))，再 await web.browser.list_tabs() 对照 URL；后续读取/截图失败不代表没打开，禁止从头重开。只有 web 确实不可用且旧标签无法复用才 reset_web，不能为单纯截图超时重置。
-登录态保存/恢复只是尽力而为；失效时 ask_user 让用户在可见窗口手动登录，不猜凭证。遇 CAPTCHA 立即 ask_user，绝不代答、破解或自动绕过；必要时 reset_web(visible=True) 交给用户，待确认完成再继续。法律/隐私条款由用户决定。attach/borrow 用户 Chrome profile 须显式 opt-in，默认 isolated。
+后台模式下，已识别的 GET 搜索表单若 target=_blank，浏览器会改为在原标签页提交；提交后检查当前 pg.url，不把原页未变误判为搜索失败。对已识别的其它 _blank 链接/表单，若收到 FOREGROUND_TAKEOVER_REQUIRED，先 ask_user 说明浏览器可能抢焦点；用户明确同意后才 reset_web(visible=True) 继续。网站脚本自行开窗仍可能绕过预检；发现新页先 list_tabs 核对，不重复提交。
+登录态保存/恢复只是尽力而为；失效时 ask_user 让用户在可见窗口手动登录，不猜凭证。遇 CAPTCHA 立即 ask_user，绝不代答、破解或自动绕过；必要时经用户同意后 reset_web(visible=True) 交给用户，待确认完成再继续。法律/隐私条款由用户决定。attach/borrow 用户 Chrome profile 须显式 opt-in，默认 isolated。
 
 ## 失败恢复与结束
 可能超时或不可逆的动作显式存唯一 action_id，例如 import uuid; aid = uuid.uuid4().hex; await ui.input.text("内容", action_id=aid)。结果未知先 await mu.emit(await mu.action_status(aid)) 并观察，不换 ID 重放；其它 SDK 动作虽自动生成 ID，异常后未必能找回。launch、建窗、提交按需给足 timeout_ms（常用 30000）；SDK 各方法默认值不同，以 mu.help/契约为准。

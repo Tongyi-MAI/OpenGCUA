@@ -255,6 +255,49 @@ def _uid() -> str:
 _TIMEOUT_OK: dict[tuple[str, str], bool] = {}
 
 
+async def _press_background_search(locator, press, args, kwargs):
+    needs_foreground = await locator.evaluate("""element => {
+      if (!(element instanceof HTMLInputElement)) return false;
+      const form = element.form;
+      if (!form || form.target.toLowerCase() !== '_blank') return false;
+      const path = new URL(form.action, location.href).pathname;
+      const search = form.method.toLowerCase() === 'get' &&
+        ['text', 'search'].includes(element.type) &&
+        (/(^|\\/)search(\\/|$)/i.test(path) || form.getAttribute('role') === 'search');
+      if (!search) return true;
+      form.target = '_self';
+      return false;
+    }""")
+    if needs_foreground:
+        raise MuError("ACTION_REJECTED",
+                      "FOREGROUND_TAKEOVER_REQUIRED: This form opens a new tab and may activate Chrome. Ask the user "
+                      "before foreground takeover, then use a visible browser.")
+    return await press(*args, **kwargs)
+
+
+async def _click_background_link(locator, click, args, kwargs):
+    needs_foreground = await locator.evaluate("""element => {
+      const link = element.closest('a');
+      if (link?.target.toLowerCase() === '_blank') return true;
+      const submitter = element.closest('button, input[type=submit], input[type=image]');
+      if (!submitter || (submitter instanceof HTMLButtonElement &&
+          submitter.type !== 'submit')) return false;
+      const form = submitter.form;
+      if (!form || form.target.toLowerCase() !== '_blank') return false;
+      const path = new URL(form.action, location.href).pathname;
+      const search = form.method.toLowerCase() === 'get' &&
+        (/(^|\\/)search(\\/|$)/i.test(path) || form.getAttribute('role') === 'search');
+      if (!search) return true;
+      form.target = '_self';
+      return false;
+    }""")
+    if needs_foreground:
+        raise MuError("ACTION_REJECTED",
+                      "FOREGROUND_TAKEOVER_REQUIRED: This action opens a new tab and may activate Chrome. Ask the user "
+                      "before foreground takeover, then use a visible browser.")
+    return await click(*args, **kwargs)
+
+
 def _accepts_timeout(fn: Any) -> bool:
     """Only inject Playwright's own `timeout=` where the method really takes it.
 
@@ -338,7 +381,16 @@ class _Proxy:
                 # with a deadline instead of hanging the worker
                 kwargs["timeout"] = min(default_ms, 45_000)
             try:
-                coro = attr(*args, **kwargs)
+                if (name == "press" and args and args[0] in ("Enter", "NumpadEnter")
+                        and tab is not None and tab._browser._background_tabs
+                        and type(target).__name__ == "Locator"):
+                    coro = _press_background_search(target, attr, args, kwargs)
+                elif (name == "click" and tab is not None
+                      and tab._browser._background_tabs
+                      and type(target).__name__ == "Locator"):
+                    coro = _click_background_link(target, attr, args, kwargs)
+                else:
+                    coro = attr(*args, **kwargs)
             except TypeError:
                 # e.g. a method whose first positional parameter IS `timeout`
                 if not inject:
@@ -390,6 +442,9 @@ async def _run(coro, action_id: Optional[str], deadline_ms: int, is_read: bool,
     try:
         value = task.result()
     except Exception as exc:  # noqa: BLE001 - surfaced as a receipt error, like the SDK
+        if (isinstance(exc, MuError) and getattr(exc, "code", None) == "ACTION_REJECTED"
+                and "FOREGROUND_TAKEOVER_REQUIRED" in str(exc)):
+            raise
         err = {"code": type(exc).__name__.upper(), "message": str(exc)[:400]}
         if is_read:
             raise

@@ -185,8 +185,10 @@ the real pointer, keyboard, or a foreground window, the agent asks once before a
 foreground actions. Use `--disable-background-mode` to opt out, or enable demo mode when
 recording deliberately visible foreground actions. This is agent guidance, not an execution-layer
 permission boundary. On macOS, the isolated Chromium browser is launched without activation and
-new tabs are created without requesting focus. Site pop-ups, system dialogs, and explicitly
-foreground actions may still interrupt you; demo mode intentionally uses the foreground.
+new tabs are created without requesting focus. In background mode, recognized GET search forms
+that target a new tab submit in the existing tab; recognized other new-tab links/forms stop
+before activation and ask for foreground permission. Script-created pop-ups and system dialogs
+can still interrupt you; demo mode intentionally uses the foreground.
 
 If you see `PERMISSION_DENIED`, `DEVICE_OFFLINE`, a native-extension import error, or a recording
 problem, use the [error-indexed troubleshooting guide](QUICKSTART.md#troubleshooting). For SDK-only

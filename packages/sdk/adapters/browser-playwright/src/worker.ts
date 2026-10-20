@@ -740,7 +740,9 @@ async function browserOperation(q: Request) {
       return { ...complete(), value: encodeValue(created), tabs: await Promise.all([...tabs.values()].filter(t => !t.page.isClosed()).map(async t => ({ ...await inventory(t), viewport: t.page.viewportSize(), closed: false }))) };
     }
     const bound = getTab(q.tab_id);
-    const value = await executePlaywright(bound.page, q);
+    const value = await executePlaywright(bound.page, {
+      ...q, background_launch: !!backgroundCdp,
+    });
     return { ...complete(), value, page: { id: bound.id, url: bound.page.url(), viewport: bound.page.viewportSize(), closed: bound.page.isClosed() } };
   }
   const tab = q.tab_id

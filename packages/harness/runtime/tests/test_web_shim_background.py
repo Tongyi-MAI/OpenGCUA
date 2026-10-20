@@ -248,6 +248,139 @@ def test_web_shim_new_tab_uses_background_target_instead_of_new_page():
     asyncio.run(run())
 
 
+def test_web_shim_background_search_stays_in_original_tab():
+    async def run():
+        from playwright.async_api import async_playwright
+
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True, channel="chrome")
+        context, cdp, context_id = await web_shim._isolated_background_context(browser)
+
+        async def search_result(route):
+            await route.fulfill(content_type="text/html", body="<title>Search results</title>")
+
+        await context.route("https://shop.test/search?**", search_result)
+        shim = web_shim._Browser(
+            pw, browser, context, background_cdp=cdp,
+            background_context_id=context_id, background_tabs=True)
+        try:
+            tab = await shim.new_tab()
+            await tab.playwright.set_content(
+                '<form method="get" action="https://shop.test/search" target="_blank">'
+                '<input id="q" name="q" value="tablet"></form>')
+            await tab.playwright.locator("#q").press("Enter")
+            await tab.playwright.wait_for_url(
+                "https://shop.test/search?q=tablet", timeout=2000)
+            assert len(context.pages) == 1
+            assert await tab.playwright.title() == "Search results"
+        finally:
+            await shim.close()
+
+    asyncio.run(run())
+
+
+def test_web_shim_background_login_form_requests_foreground_before_popup():
+    async def run():
+        from playwright.async_api import async_playwright
+
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True, channel="chrome")
+        context, cdp, context_id = await web_shim._isolated_background_context(browser)
+        shim = web_shim._Browser(
+            pw, browser, context, background_cdp=cdp,
+            background_context_id=context_id, background_tabs=True)
+        try:
+            tab = await shim.new_tab()
+            await tab.playwright.set_content(
+                '<form method="post" action="https://shop.test/login" target="_blank">'
+                '<input id="username" name="username" value="someone"></form>')
+            with pytest.raises(web_shim.MuError, match="FOREGROUND_TAKEOVER_REQUIRED"):
+                await tab.playwright.locator("#username").press("Enter")
+            assert len(context.pages) == 1
+        finally:
+            await shim.close()
+
+    asyncio.run(run())
+
+
+def test_web_shim_background_blank_link_requests_foreground_before_click():
+    async def run():
+        from playwright.async_api import async_playwright
+
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True, channel="chrome")
+        context, cdp, context_id = await web_shim._isolated_background_context(browser)
+        shim = web_shim._Browser(
+            pw, browser, context, background_cdp=cdp,
+            background_context_id=context_id, background_tabs=True)
+        try:
+            tab = await shim.new_tab()
+            await tab.playwright.set_content(
+                '<a id="login" href="https://shop.test/login" target="_blank">Log in</a>')
+            with pytest.raises(web_shim.MuError, match="FOREGROUND_TAKEOVER_REQUIRED"):
+                await tab.playwright.locator("#login").click()
+            assert len(context.pages) == 1
+        finally:
+            await shim.close()
+
+    asyncio.run(run())
+
+
+def test_web_shim_background_search_button_stays_in_original_tab():
+    async def run():
+        from playwright.async_api import async_playwright
+
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True, channel="chrome")
+        context, cdp, context_id = await web_shim._isolated_background_context(browser)
+
+        async def search_result(route):
+            await route.fulfill(content_type="text/html", body="<title>Search results</title>")
+
+        await context.route("https://shop.test/search?**", search_result)
+        shim = web_shim._Browser(
+            pw, browser, context, background_cdp=cdp,
+            background_context_id=context_id, background_tabs=True)
+        try:
+            tab = await shim.new_tab()
+            await tab.playwright.set_content(
+                '<form method="get" action="https://shop.test/search" target="_blank">'
+                '<input name="q" value="tablet"><button id="go" type="submit">Search</button></form>')
+            await tab.playwright.locator("#go").click()
+            await tab.playwright.wait_for_url(
+                "https://shop.test/search?q=tablet", timeout=2000)
+            assert len(context.pages) == 1
+        finally:
+            await shim.close()
+
+    asyncio.run(run())
+
+
+def test_web_shim_background_login_button_requests_foreground_before_click():
+    async def run():
+        from playwright.async_api import async_playwright
+
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True, channel="chrome")
+        context, cdp, context_id = await web_shim._isolated_background_context(browser)
+        shim = web_shim._Browser(
+            pw, browser, context, background_cdp=cdp,
+            background_context_id=context_id, background_tabs=True)
+        try:
+            tab = await shim.new_tab()
+            await tab.playwright.set_content(
+                '<form method="post" action="https://shop.test/login" target="_blank">'
+                '<input name="username" value="someone">'
+                '<button id="go" type="submit">Log in</button></form>')
+            with pytest.raises(web_shim.MuError, match="FOREGROUND_TAKEOVER_REQUIRED"):
+                await tab.playwright.locator("#go").click()
+            assert len(context.pages) == 1
+        finally:
+            await shim.close()
+
+    asyncio.run(run())
+
+
 def test_web_shim_rebuild_preserves_background_tab_creation():
     async def run():
         from playwright.async_api import async_playwright

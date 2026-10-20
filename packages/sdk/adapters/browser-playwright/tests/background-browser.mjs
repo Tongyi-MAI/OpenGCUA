@@ -8,6 +8,7 @@ import {
   createIsolatedBackgroundContext,
   launchBackgroundChromium,
 } from "../dist/background.js";
+import { executePlaywright } from "../dist/playwright.js";
 
 test("new tabs are created in their own context without requesting focus", async () => {
   const browser = await chromium.launch({ headless: true, channel: "chrome" });
@@ -41,6 +42,102 @@ test("new tabs are created in their own context without requesting focus", async
         background: true, focus: false,
       } },
     ]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("background search submits a blank-target GET form in the same tab", async () => {
+  const browser = await chromium.launch({ headless: true, channel: "chrome" });
+  try {
+    const context = await browser.newContext();
+    await context.route("https://shop.test/search?**", route => route.fulfill({
+      contentType: "text/html", body: "<title>Search results</title>",
+    }));
+    const page = await context.newPage();
+    await page.setContent('<form method="get" action="https://shop.test/search" target="_blank"><input id="q" name="q" value="tablet"></form>');
+    await executePlaywright(page, {
+      kind: "locator", method: "press", query: [
+        { method: "locator", args: [{ t: "value", v: "#q" }] },
+      ], args: [{ t: "value", v: "Enter" }], timeout_ms: 10000,
+      background_launch: true,
+    });
+    await page.waitForURL("https://shop.test/search?q=tablet", { timeout: 2000 });
+    assert.equal(context.pages().length, 1);
+    assert.equal(await page.title(), "Search results");
+  } finally {
+    await browser.close();
+  }
+});
+
+test("background login form refuses a blank-target popup before pressing Enter", async () => {
+  const browser = await chromium.launch({ headless: true, channel: "chrome" });
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.setContent('<form method="post" action="https://shop.test/login" target="_blank"><input id="username" name="username" value="someone"></form>');
+    await assert.rejects(executePlaywright(page, {
+      kind: "locator", method: "press", query: [
+        { method: "locator", args: [{ t: "value", v: "#username" }] },
+      ], args: [{ t: "value", v: "Enter" }], timeout_ms: 10000,
+      background_launch: true,
+    }), { code: "ACTION_REJECTED", message: /FOREGROUND_TAKEOVER_REQUIRED/ });
+    assert.equal(context.pages().length, 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("background link click refuses a blank-target popup", async () => {
+  const browser = await chromium.launch({ headless: true, channel: "chrome" });
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.setContent('<a id="login" href="https://shop.test/login" target="_blank">Log in</a>');
+    await assert.rejects(executePlaywright(page, {
+      kind: "locator", method: "click", query: [
+        { method: "locator", args: [{ t: "value", v: "#login" }] },
+      ], args: [], timeout_ms: 10000, background_launch: true,
+    }), { code: "ACTION_REJECTED", message: /FOREGROUND_TAKEOVER_REQUIRED/ });
+    assert.equal(context.pages().length, 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("background search button submits a blank-target GET form in the same tab", async () => {
+  const browser = await chromium.launch({ headless: true, channel: "chrome" });
+  try {
+    const context = await browser.newContext();
+    await context.route("https://shop.test/search?**", route => route.fulfill({
+      contentType: "text/html", body: "<title>Search results</title>",
+    }));
+    const page = await context.newPage();
+    await page.setContent('<form method="get" action="https://shop.test/search" target="_blank"><input name="q" value="tablet"><button id="go" type="submit">Search</button></form>');
+    await executePlaywright(page, {
+      kind: "locator", method: "click", query: [
+        { method: "locator", args: [{ t: "value", v: "#go" }] },
+      ], args: [], timeout_ms: 10000, background_launch: true,
+    });
+    await page.waitForURL("https://shop.test/search?q=tablet", { timeout: 2000 });
+    assert.equal(context.pages().length, 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("background login button refuses a blank-target POST form", async () => {
+  const browser = await chromium.launch({ headless: true, channel: "chrome" });
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.setContent('<form method="post" action="https://shop.test/login" target="_blank"><input name="username" value="someone"><button id="go" type="submit">Log in</button></form>');
+    await assert.rejects(executePlaywright(page, {
+      kind: "locator", method: "click", query: [
+        { method: "locator", args: [{ t: "value", v: "#go" }] },
+      ], args: [], timeout_ms: 10000, background_launch: true,
+    }), { code: "ACTION_REJECTED", message: /FOREGROUND_TAKEOVER_REQUIRED/ });
+    assert.equal(context.pages().length, 1);
   } finally {
     await browser.close();
   }

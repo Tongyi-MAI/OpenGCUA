@@ -119,6 +119,29 @@ export async function executePlaywright(page, q) {
         });
         return encodeValue(undefined);
     }
+    if (q.background_launch && q.kind === "locator" && q.method === "click") {
+        const needsForeground = await target.evaluate((element) => {
+            const link = element.closest("a");
+            if (link?.target.toLowerCase() === "_blank")
+                return true;
+            const submitter = element.closest("button, input[type=submit], input[type=image]");
+            if (!submitter ||
+                (submitter instanceof HTMLButtonElement && submitter.type !== "submit"))
+                return false;
+            const form = submitter.form;
+            if (!form || form.target.toLowerCase() !== "_blank")
+                return false;
+            const path = new URL(form.action, location.href).pathname;
+            const search = form.method.toLowerCase() === "get" &&
+                (/(^|\/)search(\/|$)/i.test(path) || form.getAttribute("role") === "search");
+            if (!search)
+                return true;
+            form.target = "_self";
+            return false;
+        });
+        if (needsForeground)
+            throw new ProviderError("ACTION_REJECTED", "FOREGROUND_TAKEOVER_REQUIRED: This action opens a new tab and may activate Chrome. Ask the user before foreground takeover, then use a visible browser.");
+    }
     if (q.kind === "page" && ["evaluate", "waitForFunction"].includes(q.method)) {
         requireValue(typeof args[0] === "string", "Provide a JavaScript function-expression source");
         const evaluate = ({ source, arg }) => {
@@ -137,6 +160,26 @@ export async function executePlaywright(page, q) {
         }
     }
     if (q.kind === "locator" && q.method === "press") {
+        if (q.background_launch && ["Enter", "NumpadEnter"].includes(args[0])) {
+            const needsForeground = await target.evaluate((element) => {
+                if (!(element instanceof HTMLInputElement))
+                    return false;
+                const form = element.form;
+                if (!form || form.target.toLowerCase() !== "_blank")
+                    return false;
+                const path = new URL(form.action, location.href).pathname;
+                const search = form.method.toLowerCase() === "get" &&
+                    ["text", "search"].includes(element.type) &&
+                    (/(^|\/)search(\/|$)/i.test(path) || form.getAttribute("role") === "search");
+                if (!search)
+                    return true;
+                // Native submission of a search form may otherwise create a foreground tab.
+                form.target = "_self";
+                return false;
+            });
+            if (needsForeground)
+                throw new ProviderError("ACTION_REJECTED", "FOREGROUND_TAKEOVER_REQUIRED: This form opens a new tab and may activate Chrome. Ask the user before foreground takeover, then use a visible browser.");
+        }
         await target.focus({ timeout: q.timeout_ms });
         return encodeValue(await browserInput(page, "keyboard", "press", args, q.signal));
     }
