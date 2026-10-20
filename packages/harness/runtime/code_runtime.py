@@ -2316,7 +2316,19 @@ def _instrument_sdk_session(session: Any) -> None:
         pass
 
 
-async def _add_web_factory(runtime: Any) -> None:
+def _prefer_local_browser_worker() -> None:
+    """Use the rebuilt worker in an editable checkout when its npm deps exist."""
+    if "MAI_UI_PLAYWRIGHT_WORKER" in os.environ:
+        return
+    root = Path(__file__).resolve().parents[3]
+    adapter = root / "packages/sdk/adapters/browser-playwright"
+    worker = adapter / "dist/worker.js"
+    dependency = adapter / "node_modules/playwright/package.json"
+    if worker.is_file() and dependency.is_file():
+        os.environ["MAI_UI_PLAYWRIGHT_WORKER"] = str(worker)
+
+
+async def _add_web_factory(runtime: Any, *, visible: bool = False) -> None:
     """Register the browser factory, preferring the user's installed Google Chrome.
 
     channel="chrome" launches the real Google Chrome app as a separate temp-profile
@@ -2343,10 +2355,14 @@ async def _add_web_factory(runtime: Any) -> None:
             # isolated：有界面任务专属 profile；DOM 操作无需前台焦点。
             await runtime.add_browser_factory(
                 "web", engine="chromium", headless=False,
-                channel="chrome")
+                channel="chrome",
+                background_launch=(os.environ.get("MAC_AGENT_BACKGROUND") == "1"
+                                   and not visible))
     except Exception:
         await runtime.add_browser_factory(
-            "web", engine="chromium", headless=False)
+            "web", engine="chromium", headless=False,
+            background_launch=(os.environ.get("MAC_AGENT_BACKGROUND") == "1"
+                               and not visible))
 
 
 async def _create_web_resource(runtime: Any, session: Any, visible: bool = False) -> Any:
@@ -2362,7 +2378,8 @@ async def _create_web_resource(runtime: Any, session: Any, visible: bool = False
     require_native = os.environ.get("MAC_AGENT_REQUIRE_NATIVE_WEB") == "1"
     if require_native or _SDK_NATIVE_WEB_FAILURE is None:
         try:
-            await _add_web_factory(runtime)
+            _prefer_local_browser_worker()
+            await _add_web_factory(runtime, visible=visible)
             web = await session.browsers.create(
                 name="web", provider="web", storage_state=state,
                 timeout_ms=_WEB_CREATE_TIMEOUT_MS,

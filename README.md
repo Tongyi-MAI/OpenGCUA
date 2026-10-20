@@ -184,7 +184,9 @@ Native apps use accessibility controls before window-scoped background input. If
 the real pointer, keyboard, or a foreground window, the agent asks once before a series of
 foreground actions. Use `--disable-background-mode` to opt out, or enable demo mode when
 recording deliberately visible foreground actions. This is agent guidance, not an execution-layer
-permission boundary; a headed browser may briefly take focus when it is first launched.
+permission boundary. On macOS, the isolated Chromium browser is launched without activation and
+new tabs are created without requesting focus. Site pop-ups, system dialogs, and explicitly
+foreground actions may still interrupt you; demo mode intentionally uses the foreground.
 
 If you see `PERMISSION_DENIED`, `DEVICE_OFFLINE`, a native-extension import error, or a recording
 problem, use the [error-indexed troubleshooting guide](QUICKSTART.md#troubleshooting). For SDK-only

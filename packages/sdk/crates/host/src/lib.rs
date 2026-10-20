@@ -249,7 +249,7 @@ impl Host {
                 if let Some(proxy) = q.get("proxy").filter(|v| !v.is_null()) {
                     if !proxy["server"].is_string() || !proxy.as_object().is_some_and(|o| o.iter().all(|(k,v)| ["server","bypass","username","password"].contains(&k.as_str()) && v.is_string())) { return Err(err("INVALID_ARGUMENT")); }
                 }
-                for key in ["headless"] {
+                for key in ["headless", "background_launch"] {
                     if q.get(key).is_some_and(|v| !v.is_boolean()) {
                         return Err(err("INVALID_ARGUMENT"));
                     }
@@ -715,12 +715,15 @@ pub fn browser_worker() -> Result<PathBuf, Error> {
             dir.ancestors()
                 .any(|root| root.join("node_modules/playwright/package.json").is_file())
         });
-        if worker.is_file() && has_playwright {
+        let has_background_module = worker
+            .parent()
+            .is_some_and(|dir| dir.join("background.js").is_file());
+        if worker.is_file() && has_playwright && has_background_module {
             Ok(worker)
         } else {
             Err(Error::new(
                 "UNSUPPORTED_CAPABILITY",
-                "Browser worker is missing its Playwright dependency; run mu setup browser",
+                "Browser worker is missing Playwright or its background-browser module; run mu setup browser",
             ))
         }
     };
@@ -766,6 +769,8 @@ mod browser_worker_tests {
         let playwright = dist.join("node_modules/playwright");
         std::fs::create_dir_all(&playwright).unwrap();
         std::fs::write(playwright.join("package.json"), "{}").unwrap();
+        let outdated = browser_worker();
+        std::fs::write(dist.join("background.js"), "").unwrap();
         let installed = browser_worker();
         if let Some(value) = previous {
             std::env::set_var("MAI_UI_PLAYWRIGHT_WORKER", value);
@@ -775,6 +780,9 @@ mod browser_worker_tests {
         let error = missing.unwrap_err();
         assert_eq!(error.code, "UNSUPPORTED_CAPABILITY");
         assert!(error.message.contains("mu setup browser"));
+        let outdated_error = outdated.unwrap_err();
+        assert_eq!(outdated_error.code, "UNSUPPORTED_CAPABILITY");
+        assert!(outdated_error.message.contains("mu setup browser"));
         assert_eq!(installed.unwrap(), worker);
     }
 }

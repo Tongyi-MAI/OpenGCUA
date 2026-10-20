@@ -38,16 +38,10 @@ async fn run(program: &str, args: &[String], cwd: &std::path::Path) -> Result<St
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
-pub async fn admin(operation: &str, engine: &str) -> Result<Value, Error> {
-    if !["all", "chromium", "firefox", "webkit"].contains(&engine) {
-        return Err(Error::new("INVALID_ARGUMENT", "Unknown engine"));
-    }
-    let cache = cache()?;
-    let node = std::env::var("MAI_UI_NODE").unwrap_or("node".into());
-    if operation == "setup" {
-        std::fs::create_dir_all(cache.join("dist"))
-            .map_err(|e| Error::new("SETUP_FAILED", e.to_string()))?;
-        for (name, content) in [
+fn write_embedded_worker_files(cache: &std::path::Path) -> Result<(), Error> {
+    std::fs::create_dir_all(cache.join("dist"))
+        .map_err(|e| Error::new("SETUP_FAILED", e.to_string()))?;
+    for (name, content) in [
             (
                 "package.json",
                 include_str!("../../../adapters/browser-playwright/package.json"),
@@ -59,6 +53,10 @@ pub async fn admin(operation: &str, engine: &str) -> Result<Value, Error> {
             (
                 "dist/worker.js",
                 include_str!("../../../adapters/browser-playwright/dist/worker.js"),
+            ),
+            (
+                "dist/background.js",
+                include_str!("../../../adapters/browser-playwright/dist/background.js"),
             ),
             (
                 "dist/identity.js",
@@ -80,10 +78,21 @@ pub async fn admin(operation: &str, engine: &str) -> Result<Value, Error> {
                 "dist/input.js",
                 include_str!("../../../adapters/browser-playwright/dist/input.js"),
             ),
-        ] {
-            std::fs::write(cache.join(name), content)
-                .map_err(|e| Error::new("SETUP_FAILED", e.to_string()))?;
-        }
+    ] {
+        std::fs::write(cache.join(name), content)
+            .map_err(|e| Error::new("SETUP_FAILED", e.to_string()))?;
+    }
+    Ok(())
+}
+
+pub async fn admin(operation: &str, engine: &str) -> Result<Value, Error> {
+    if !["all", "chromium", "firefox", "webkit"].contains(&engine) {
+        return Err(Error::new("INVALID_ARGUMENT", "Unknown engine"));
+    }
+    let cache = cache()?;
+    let node = std::env::var("MAI_UI_NODE").unwrap_or("node".into());
+    if operation == "setup" {
+        write_embedded_worker_files(&cache)?;
         let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
         run(
             npm,
@@ -122,4 +131,15 @@ pub async fn admin(operation: &str, engine: &str) -> Result<Value, Error> {
         "needs_setup"
     });
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn setup_writes_background_browser_module() {
+        let cache = tempfile::tempdir().unwrap();
+        super::write_embedded_worker_files(cache.path()).unwrap();
+        assert!(cache.path().join("dist/worker.js").is_file());
+        assert!(cache.path().join("dist/background.js").is_file());
+    }
 }

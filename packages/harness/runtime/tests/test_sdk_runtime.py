@@ -348,7 +348,32 @@ def test_background_isolated_browser_is_headed_and_uses_sdk_factory(monkeypatch)
 
     asyncio.run(code_runtime._add_web_factory(Runtime()))
     assert calls == [(("web",), {"engine": "chromium", "headless": False,
-                                 "channel": "chrome"})]
+                                 "channel": "chrome", "background_launch": True})]
+
+    calls.clear()
+    asyncio.run(code_runtime._add_web_factory(Runtime(), visible=True))
+    assert calls == [(("web",), {"engine": "chromium", "headless": False,
+                                 "channel": "chrome", "background_launch": False})]
+
+
+def test_source_checkout_prefers_its_current_browser_worker(monkeypatch, tmp_path):
+    runtime_file = tmp_path / "packages/harness/runtime/code_runtime.py"
+    runtime_file.parent.mkdir(parents=True)
+    worker = tmp_path / "packages/sdk/adapters/browser-playwright/dist/worker.js"
+    worker.parent.mkdir(parents=True)
+    worker.write_text("// compiled worker")
+    playwright = worker.parent.parent / "node_modules/playwright/package.json"
+    playwright.parent.mkdir(parents=True)
+    playwright.write_text("{}")
+    monkeypatch.setattr(code_runtime, "__file__", str(runtime_file))
+    monkeypatch.delenv("MAI_UI_PLAYWRIGHT_WORKER", raising=False)
+
+    code_runtime._prefer_local_browser_worker()
+    assert code_runtime.os.environ["MAI_UI_PLAYWRIGHT_WORKER"] == str(worker)
+
+    monkeypatch.setenv("MAI_UI_PLAYWRIGHT_WORKER", "/explicit/worker.js")
+    code_runtime._prefer_local_browser_worker()
+    assert code_runtime.os.environ["MAI_UI_PLAYWRIGHT_WORKER"] == "/explicit/worker.js"
 
 
 def test_background_session_defers_browser_until_web_is_needed(monkeypatch):
@@ -417,7 +442,7 @@ def test_web_creation_uses_timeout_accepted_by_sdk_host(monkeypatch, tmp_path):
     calls = []
     expected_web = object()
 
-    async def add_factory(_runtime):
+    async def add_factory(_runtime, *, visible=False):
         pass
 
     class Browsers:
@@ -436,7 +461,7 @@ def test_web_creation_uses_timeout_accepted_by_sdk_host(monkeypatch, tmp_path):
 
 
 def test_required_native_web_does_not_fall_back_to_incompatible_shim(monkeypatch, tmp_path):
-    async def add_factory(_runtime):
+    async def add_factory(_runtime, *, visible=False):
         pass
 
     class Browsers:
@@ -461,7 +486,7 @@ def test_web_fallback_skips_repeated_native_start_during_sdk_reset(monkeypatch, 
             attempts.append(1)
             raise RuntimeError("browser worker exited")
 
-    async def add_factory(_runtime):
+    async def add_factory(_runtime, *, visible=False):
         pass
 
     async def create_shim(**_kwargs):
@@ -514,7 +539,7 @@ def test_web_recreation_uses_timeout_accepted_by_sdk_host(monkeypatch, tmp_path)
         session.browsers = Browsers()
         return session
 
-    async def add_factory(_runtime):
+    async def add_factory(_runtime, *, visible=False):
         pass
 
     monkeypatch.setattr(FakeRuntime, "session", session_with_browser)

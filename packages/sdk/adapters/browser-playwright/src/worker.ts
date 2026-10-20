@@ -18,6 +18,12 @@ import { Identity } from "./identity.js";
 import { ProviderError, requireValue } from "./errors.js";
 import { executePlaywright, encodeValue } from "./playwright.js";
 import { browserInput, releaseInput, buttonHeld, pause } from "./input.js";
+import {
+  createBackgroundPage,
+  createIsolatedBackgroundContext,
+  launchBackgroundChromium,
+} from "./background.js";
+import type { CDPSession } from "playwright";
 
 type Request = Record<string, any>;
 type Tab = {
@@ -30,6 +36,9 @@ type Tab = {
 };
 let browser: Browser | undefined;
 let context: BrowserContext | undefined;
+let backgroundCdp: CDPSession | undefined;
+let backgroundContextId: string | undefined;
+let closeBackgroundBrowser: (() => Promise<void>) | undefined;
 let contextId = "";
 let artifacts = "";
 let networkRules: Request[] = [];
@@ -56,6 +65,12 @@ const complete = (extra: Request = {}) => ({
 function getContext(): BrowserContext {
   if (!context) throw new ProviderError("DEVICE_OFFLINE");
   return context;
+}
+async function newPage(timeoutMs = 30000): Promise<Page> {
+  const ctx = getContext();
+  if (backgroundCdp && backgroundContextId)
+    return createBackgroundPage(ctx, backgroundCdp, backgroundContextId, timeoutMs);
+  return ctx.newPage();
 }
 function getTab(id: unknown): Tab {
   const tab = typeof id === "string" ? tabs.get(id) : undefined;
@@ -720,7 +735,7 @@ async function browserOperation(q: Request) {
       requireValue(!q.tab_id && Array.isArray(q.args) && q.args.length === 0, "Invalid context request");
       if (q.method === "close") { await ctx.close(); return { ...complete(), value: encodeValue(undefined), tabs: [] }; }
       let created;
-      if (q.method === "newPage") created = addTab(await ctx.newPage()).id;
+      if (q.method === "newPage") created = addTab(await newPage(q.timeout_ms)).id;
       else requireValue(q.method === "pages", "Unsupported context method");
       return { ...complete(), value: encodeValue(created), tabs: await Promise.all([...tabs.values()].filter(t => !t.page.isClosed()).map(async t => ({ ...await inventory(t), viewport: t.page.viewportSize(), closed: false }))) };
     }
@@ -742,7 +757,7 @@ async function browserOperation(q: Request) {
     };
   if (operation === "get_tab") return inventory(getTab(q.id));
   if (operation === "new_tab") {
-    const newTab = addTab(await ctx.newPage());
+    const newTab = addTab(await newPage(q.timeout_ms));
     try {
       if (q.url && q.url !== "about:blank")
         await newTab.page.goto(q.url, {
@@ -759,7 +774,8 @@ async function browserOperation(q: Request) {
   if (operation === "destroy") {
     await Promise.all([...downloadTasks]);
     await ctx.close();
-    await browser?.close();
+    if (closeBackgroundBrowser) await closeBackgroundBrowser();
+    else await browser?.close();
     return complete();
   }
   if (operation === "cookies_read")
@@ -965,12 +981,7 @@ async function request(q: Request) {
     artifacts =
       q.artifact_directory ??
       (await mkdtemp(join(tmpdir(), "mai-ui-browser-")));
-    browser = await engine.launch({
-      headless: q.headless ?? true,
-      channel: q.channel ?? undefined,
-      timeout: q.timeout_ms ?? 30000,
-    });
-    context = await browser.newContext({
+    const contextOptions = {
       viewport: q.viewport ?? { width: 1280, height: 720 },
       deviceScaleFactor: q.device_scale_factor ?? 1,
       serviceWorkers: q.service_workers ?? "block",
@@ -979,7 +990,33 @@ async function request(q: Request) {
       userAgent: q.user_agent ?? undefined,
       acceptDownloads: true,
       storageState: q.storage_state ?? undefined,
-    });
+    };
+    const backgroundTabs = q.background_launch === true && q.engine === "chromium";
+    try {
+      if (backgroundTabs && process.platform === "darwin" && q.headless === false) {
+        const launched = await launchBackgroundChromium(q.channel, q.timeout_ms ?? 30000);
+        browser = launched.browser;
+        closeBackgroundBrowser = launched.close;
+      } else {
+        browser = await engine.launch({
+          headless: q.headless ?? true,
+          channel: q.channel ?? undefined,
+          timeout: q.timeout_ms ?? 30000,
+        });
+      }
+      if (backgroundTabs) {
+        const isolated = await createIsolatedBackgroundContext(browser, contextOptions);
+        context = isolated.context;
+        backgroundCdp = isolated.cdp;
+        backgroundContextId = isolated.contextId;
+      } else {
+        context = await browser.newContext(contextOptions);
+      }
+    } catch (error) {
+      if (closeBackgroundBrowser) await closeBackgroundBrowser().catch(() => {});
+      else await browser?.close().catch(() => {});
+      throw error;
+    }
     context.on("page", (page) => addTab(page));
     context.on("request", (r) =>
       event("network_request", {
@@ -1021,7 +1058,8 @@ async function request(q: Request) {
 async function shutdown() {
   if (stopping) return;
   stopping = true;
-  await browser?.close().catch(() => {});
+  if (closeBackgroundBrowser) await closeBackgroundBrowser().catch(() => {});
+  else await browser?.close().catch(() => {});
   await Promise.all([...downloadTasks]);
   if (artifacts && ownsArtifactDirectory)
     await rm(artifacts, { recursive: true, force: true });

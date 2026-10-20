@@ -245,12 +245,14 @@ class Runtime:
         service_workers=None,
         connect_url=None,
         user_data_dir=None,
+        background_launch=False,
     ):
         options = dict(
             op="add_browser_factory",
             name=name,
             engine=engine,
             headless=headless,
+            background_launch=background_launch,
             device_scale_factor=device_scale_factor,
         )
         if viewport is not None:

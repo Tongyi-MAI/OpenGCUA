@@ -40,6 +40,10 @@ import asyncio
 import inspect
 import itertools
 import os
+from pathlib import Path
+import signal
+import shutil
+import tempfile
 import sys
 import time
 from typing import Any, Optional
@@ -99,6 +103,137 @@ _NAV = frozenset({"goto", "new_tab", "go_back", "go_forward", "reload",
 # block inside the budget while still matching the SDK's own defaults (30s normal,
 # 45s navigation).
 _MAX_DEADLINE_MS = int(os.environ.get("MAC_AGENT_WEB_MAX_DEADLINE_MS", "60000"))
+
+
+async def _remove_owned_profile(profile: Path):
+    for _ in range(21):
+        shutil.rmtree(profile, ignore_errors=True)
+        if not profile.exists():
+            return
+        await asyncio.sleep(0.1)
+    raise RuntimeError(f"background browser profile is still in use: {profile}")
+
+
+async def _stop_owned_profile_processes(profile: Path):
+    """Stop only Chrome processes carrying this launch's unique profile argument."""
+    proc = await asyncio.create_subprocess_exec(
+        "/bin/ps", "-axo", "pid=,command=", stdout=asyncio.subprocess.PIPE)
+    output, _ = await proc.communicate()
+    argument = f"--user-data-dir={profile}"
+    for line in output.decode(errors="replace").splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        if argument not in parts[1].split():
+            continue
+        try:
+            os.kill(int(parts[0]), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+async def _launch_background_chromium(playwright, timeout_ms: int):
+    """Start a dedicated headed Chromium app without activating it on macOS."""
+    executable = playwright.chromium.executable_path
+    marker = ".app/Contents/MacOS/"
+    if marker not in executable:
+        raise RuntimeError("Playwright Chromium is not a macOS app bundle")
+    bundled_app = executable.split(marker, 1)[0] + ".app"
+    profile = Path(tempfile.mkdtemp(prefix="mai-ui-background-chrome-"))
+    try:
+        for app in ("Google Chrome", bundled_app):
+            proc = await asyncio.create_subprocess_exec(
+                "/usr/bin/open", "-g", "-n", "-a", app, "--args",
+                "--remote-debugging-port=0", f"--user-data-dir={profile}",
+                "--no-first-run", "--no-default-browser-check", "--no-startup-window",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            if await asyncio.wait_for(proc.wait(), timeout=timeout_ms / 1000) == 0:
+                break
+        else:
+            raise RuntimeError("macOS could not launch background Chromium")
+        deadline = time.monotonic() + timeout_ms / 1000
+        port = 0
+        while time.monotonic() < deadline:
+            try:
+                port = int((profile / "DevToolsActivePort").read_text().splitlines()[0])
+                if port > 0:
+                    break
+            except (FileNotFoundError, IndexError, ValueError):
+                pass
+            await asyncio.sleep(0.05)
+        if not port:
+            raise RuntimeError("background Chromium did not publish a CDP endpoint")
+        browser = await playwright.chromium.connect_over_cdp(
+            f"http://127.0.0.1:{port}", timeout=max(1, int(
+                (deadline - time.monotonic()) * 1000)))
+        return browser, profile
+    except Exception:
+        try:
+            await _stop_owned_profile_processes(profile)
+        finally:
+            await _remove_owned_profile(profile)
+        raise
+
+
+async def _close_owned_background_chromium(browser, profile: Path):
+    try:
+        session = await browser.new_browser_cdp_session()
+        await session.send("Browser.close")
+    except Exception:  # shutdown normally disconnects the CDP request
+        pass
+    try:
+        await browser.close()
+    finally:
+        try:
+            await _stop_owned_profile_processes(profile)
+        finally:
+            await _remove_owned_profile(profile)
+
+
+async def _isolated_background_context(browser, **options):
+    """Create a Playwright context and retain its CDP id for background tabs."""
+    cdp = await browser.new_browser_cdp_session()
+    before = set((await cdp.send("Target.getBrowserContexts"))["browserContextIds"])
+    context = await browser.new_context(**options)
+    created = set((await cdp.send("Target.getBrowserContexts"))["browserContextIds"]) - before
+    if len(created) != 1:
+        await context.close()
+        await cdp.detach()
+        raise RuntimeError(f"expected one browser context, got {len(created)}")
+    return context, cdp, created.pop()
+
+
+async def _new_background_page(context, cdp, context_id: str, timeout_ms: int):
+    result = await cdp.send("Target.createTarget", {
+        "url": "about:blank", "browserContextId": context_id,
+        "background": True, "focus": False,
+    })
+    target_id = result["targetId"]
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        for page in context.pages:
+            if page.is_closed():
+                continue
+            session = None
+            try:
+                session = await context.new_cdp_session(page)
+                info = await session.send("Target.getTargetInfo")
+                if info["targetInfo"]["targetId"] == target_id:
+                    return page
+            except Exception:  # page may close while being inspected
+                pass
+            finally:
+                if session is not None:
+                    try:
+                        await session.detach()
+                    except Exception:
+                        pass
+        await asyncio.sleep(0.025)
+    try:
+        await cdp.send("Target.closeTarget", {"targetId": target_id})
+    except Exception:
+        pass
+    raise RuntimeError(f"background tab {target_id} did not attach within {timeout_ms} ms")
 
 
 def _deadline(name: str, requested: Optional[int], default_ms: int) -> int:
@@ -295,12 +430,18 @@ class _Unsupported:
 
 
 class _Browser:
-    def __init__(self, playwright, browser, ctx, name="web", launch_kwargs=None, cdp=None):
+    def __init__(self, playwright, browser, ctx, name="web", launch_kwargs=None, cdp=None,
+                 background_cdp=None, background_context_id=None, background_tabs=False,
+                 owned_profile=None):
         self._pw = playwright
         self._browser = browser
         self._ctx = ctx
         self._launch_kwargs = dict(launch_kwargs or {})
         self._cdp = cdp            # when set, the browser lives in the guest (do not kill)
+        self._background_cdp = background_cdp
+        self._background_context_id = background_context_id
+        self._background_tabs = background_tabs
+        self._owned_profile = owned_profile
         self._wedged = False       # a cancelled call desynced the pipe; rebuild on next use
         self.name = name
         self.cookies = _Cookies(ctx)
@@ -326,21 +467,43 @@ class _Browser:
         kw = dict(self._launch_kwargs)
         state = kw.pop("storage_state", None)
         headless = kw.pop("headless", True)
+        channel = kw.pop("channel", None)
+        if self._owned_profile is not None:
+            try:
+                await _close_owned_background_chromium(self._browser, self._owned_profile)
+            except Exception:
+                pass
+            self._owned_profile = None
         try:
             await self._pw.stop()
         except Exception:  # noqa: BLE001
             pass
         pw = await async_playwright().start()
-        if self._cdp:
-            browser = await pw.chromium.connect_over_cdp(self._cdp)
-            ctx = await self._fresh_context(browser, state)
-        else:
-            browser = await pw.chromium.launch(
-                headless=headless, args=["--disable-blink-features=AutomationControlled"])
-            ctx_kwargs = {"viewport": {"width": 1440, "height": 900}, "locale": "zh-CN"}
-            if state and os.path.isfile(state):
-                ctx_kwargs["storage_state"] = state
-            ctx = await browser.new_context(**ctx_kwargs)
+        ctx_kwargs = {"viewport": {"width": 1440, "height": 900}, "locale": "zh-CN"}
+        if state and os.path.isfile(state):
+            ctx_kwargs["storage_state"] = state
+        try:
+            if self._cdp:
+                browser = await pw.chromium.connect_over_cdp(self._cdp)
+            elif self._background_tabs and not headless and sys.platform == "darwin":
+                browser, self._owned_profile = await _launch_background_chromium(pw, 30000)
+            else:
+                browser = await pw.chromium.launch(
+                    headless=headless, channel=channel,
+                    args=["--disable-blink-features=AutomationControlled"])
+            if self._background_tabs:
+                ctx, self._background_cdp, self._background_context_id = (
+                    await _isolated_background_context(browser, **ctx_kwargs))
+            elif self._cdp:
+                ctx = await self._fresh_context(browser, state)
+            else:
+                ctx = await browser.new_context(**ctx_kwargs)
+        except Exception:
+            if self._owned_profile is not None:
+                await _close_owned_background_chromium(browser, self._owned_profile)
+                self._owned_profile = None
+            await pw.stop()
+            raise
         self._pw, self._browser = pw, browser
         self._ctx = ctx
         self.cookies = _Cookies(self._ctx)
@@ -369,7 +532,11 @@ class _Browser:
         # deadline we stopped waiting on, an unbounded new_page() hangs and costs the
         # whole 300s step (observed: step timed out with empty stdout).
         try:
-            page = await _run(self._ctx.new_page(), action_id,
+            create = (_new_background_page(
+                self._ctx, self._background_cdp, self._background_context_id,
+                timeout_ms) if self._background_cdp and self._background_context_id
+                else self._ctx.new_page())
+            page = await _run(create, action_id,
                               _deadline("new_page", timeout_ms, _NAV_DEADLINE_MS),
                               True, "new_page", None)
         except MuError:
@@ -419,7 +586,10 @@ class _Browser:
         dispatcher task stays pending and the harness's end-of-block drain fails
         ("后台任务未在截止时间内结束"), resetting the worker.
         """
-        for step in (self._ctx.close(), self._browser.close(), self._pw.stop()):
+        browser_close = (_close_owned_background_chromium(
+            self._browser, self._owned_profile) if self._owned_profile
+            else self._browser.close())
+        for step in (self._ctx.close(), browser_close, self._pw.stop()):
             task = asyncio.ensure_future(step)
             await asyncio.wait({task}, timeout=max(1.0, timeout_ms / 1000))
             if not task.done():
@@ -575,6 +745,8 @@ async def create_web(*, storage_state: Optional[str] = None,
     from playwright.async_api import async_playwright
 
     cdp = os.environ.get("MAC_AGENT_WEB_CDP")
+    background_tabs = (os.environ.get("MAC_AGENT_BACKGROUND") == "1"
+                       and not visible and sys.platform == "darwin")
     if headless is None:
         headless = False
     if visible:
@@ -585,24 +757,45 @@ async def create_web(*, storage_state: Optional[str] = None,
         print("[web-shim] no DISPLAY on linux; forcing headless chromium")
         headless = True
     pw = await async_playwright().start()
+    background_cdp = background_context_id = owned_profile = None
+    ctx_kwargs = {"viewport": {"width": 1440, "height": 900}, "locale": "zh-CN"}
+    if storage_state and os.path.isfile(storage_state):
+        ctx_kwargs["storage_state"] = storage_state
     try:
         if cdp:
             # Drive the guest's real Chrome: sites such as Amazon/IHG block by client
             # fingerprint, and a real Chrome is the only client that gets through from
             # this network (measured 4/4 vs 1/3 for a locally launched chromium).
             browser = await pw.chromium.connect_over_cdp(cdp)
-            ctx = await _Browser._fresh_context(browser, storage_state)
+            if background_tabs:
+                ctx, background_cdp, background_context_id = (
+                    await _isolated_background_context(browser, **ctx_kwargs))
+            else:
+                ctx = await _Browser._fresh_context(browser, storage_state)
             print(f"[web-shim] attached to guest chrome over CDP: {cdp}")
         else:
-            browser = await pw.chromium.launch(
-                headless=headless, args=["--disable-blink-features=AutomationControlled"])
-            ctx_kwargs = {"viewport": {"width": 1440, "height": 900}, "locale": "zh-CN"}
-            if storage_state and os.path.isfile(storage_state):
-                ctx_kwargs["storage_state"] = storage_state
-            ctx = await browser.new_context(**ctx_kwargs)
+            if background_tabs and not headless:
+                browser, owned_profile = await _launch_background_chromium(pw, 30000)
+            else:
+                browser = await pw.chromium.launch(
+                    headless=headless, args=["--disable-blink-features=AutomationControlled"])
+            if background_tabs:
+                ctx, background_cdp, background_context_id = (
+                    await _isolated_background_context(browser, **ctx_kwargs))
+            else:
+                ctx = await browser.new_context(**ctx_kwargs)
     except Exception:
+        if owned_profile is not None:
+            try:
+                await _close_owned_background_chromium(browser, owned_profile)
+            except Exception:
+                pass
         await pw.stop()
         raise
     return _Web(_Browser(pw, browser, ctx, cdp=cdp,
+                         background_cdp=background_cdp,
+                         background_context_id=background_context_id,
+                         background_tabs=background_tabs,
+                         owned_profile=owned_profile,
                          launch_kwargs={"headless": headless,
                                         "storage_state": storage_state}))
