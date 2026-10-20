@@ -226,8 +226,11 @@ the stability-focused version, with a more conservative update cadence.
 The macOS harness can use local `SKILL.md` workflows on demand. It advertises each Skill's name
 and short description first; the full instructions enter the model context only after you select
 one or the agent calls `skills.load("name")`. The source checkout includes a
-[PDF-form example](packages/harness/skills/pdf-form/SKILL.md); the macOS app bundles the same
-built-ins. Skills do not grant computer permissions or automatically run scripts.
+[PDF-form workflow](packages/harness/skills/pdf-form/SKILL.md) and a
+[DingTalk workflow](packages/harness/skills/dingtalk-workflow/SKILL.md); the macOS app bundles the
+same built-ins. The DingTalk Skill can guide an already available MCP tool, authenticated `dws`
+CLI, or GUI session; it does not connect a server or log you in. Skills do not grant computer
+permissions or automatically run scripts.
 
 In the visual TUI, `/skills` lists available workflows, `/skill pdf-form` selects one for your
 next message, `/skill new my-workflow` creates a personal starter, and `/skills reload` picks up

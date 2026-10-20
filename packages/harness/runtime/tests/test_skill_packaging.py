@@ -11,10 +11,11 @@ from skill_registry import SkillRegistry, default_skill_roots
 ROOT = Path(__file__).resolve().parents[4]
 
 
-def test_builtin_pdf_form_is_discoverable_from_source_and_app_layout(tmp_path):
+def test_builtin_skills_are_discoverable_from_source_and_app_layout(tmp_path):
     source_runtime = ROOT / "packages/harness/runtime/mac_agent.py"
     source_bundle, _ = default_skill_roots(source_runtime)
-    assert any(info.name == "pdf-form" for info in SkillRegistry(source_bundle, tmp_path / "personal").discover())
+    names = {info.name for info in SkillRegistry(source_bundle, tmp_path / "personal").discover()}
+    assert {"pdf-form", "dingtalk-workflow"} <= names
 
     script = ROOT / "packages/macos/scripts/build.py"
     sys.path.insert(0, str(script.parent))
@@ -28,7 +29,8 @@ def test_builtin_pdf_form_is_discoverable_from_source_and_app_layout(tmp_path):
     module.copy_bundled_skills(source_bundle, resources / "skills")
     app_runtime = resources / "runtime/mac_agent.py"
     app_bundle, _ = default_skill_roots(app_runtime)
-    assert (app_bundle / "pdf-form/SKILL.md").is_file()
+    for name in ("pdf-form", "dingtalk-workflow"):
+        assert (app_bundle / name / "SKILL.md").is_file()
     assert not (resources / "skills/personal").exists()
 
 
