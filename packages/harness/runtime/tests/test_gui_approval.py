@@ -39,6 +39,8 @@ def test_one_explicit_yes_grants_repeated_actions_but_not_another_window():
         assert len(questions) == 1
         assert "app:a" in questions[0] and "window:7" in questions[0]
         assert "前台" in questions[0] and "视觉" in questions[0]
+        assert "输入 no" in questions[0]
+        assert "未答复期间" in questions[0]
         assert await request_gui_approval(
             grants, 4, {**first, "window_id": "window:8"}, ask,
         )
@@ -146,6 +148,55 @@ print('continued after approval response')
             assert seen == [("approval-1", "app:a", "window:7")]
             assert "continued after approval response" in result.stdout
         finally:
+            await executor.close()
+
+    asyncio.run(scenario())
+
+
+def test_pending_gui_approval_does_not_consume_code_timeout_or_auto_deny(tmp_path):
+    async def scenario():
+        worker = tmp_path / "approval_worker.py"
+        worker.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(Path(__file__).parents[1])!r})\n"
+            "import code_runtime as rt\n"
+            "rt._bootstrap = lambda loop: {}\n"
+            "raise SystemExit(rt.main(sys.argv))\n", encoding="utf-8",
+        )
+        asked = asyncio.Event()
+        answer = asyncio.Event()
+
+        async def approve(_event):
+            asked.set()
+            await answer.wait()
+            return True
+
+        executor = CodeExecutor(
+            runtime_path=worker, work_dir=tmp_path,
+            rpc_socket=tmp_path / "unused.sock", timeout=0.5, rpc_timeout=3,
+            coordinate_range=1000, pyautogui_pause=0, enable_bash=False,
+            ui_api="legacy-cua", approval_handler=approve,
+        )
+        try:
+            running = asyncio.create_task(executor.run("""import code_runtime as rt
+import json
+rt._emit({'type':'gui_approval_request','request_id':'approval-1','app_id':'app:a','window_id':'window:7'})
+reply = b''
+while not reply.endswith(b'\\n'):
+    reply += rt._CONTROL_SOCKET.recv(1)
+assert json.loads(reply)['approved'] is True
+print('approved')
+""", []))
+            await asyncio.wait_for(asked.wait(), 2)
+            await asyncio.sleep(0.65)
+            assert not running.done(), "an unanswered permission prompt must remain pending"
+            answer.set()
+            result = await asyncio.wait_for(running, 2)
+            assert result.returncode == 0, result.stderr
+            assert result.stdout == "approved"
+            assert not result.timed_out
+        finally:
+            answer.set()
             await executor.close()
 
     asyncio.run(scenario())

@@ -1106,7 +1106,7 @@ class CodeExecutor:
             returncode = -1
             error = ""
             try:
-                async with asyncio.timeout(self.timeout):
+                async with asyncio.timeout(self.timeout) as execution_deadline:
                     if self._process is None:
                         await self._start_worker()
                     assert self._writer is not None and self._reader is not None
@@ -1165,12 +1165,16 @@ class CodeExecutor:
                                     )
                                     approved = False
                                     if scope_valid and self.approval_handler is not None:
+                                        # Human decision time is not worker execution time.
+                                        loop = asyncio.get_running_loop()
+                                        remaining = max(0.0, execution_deadline.when() - loop.time())
+                                        execution_deadline.reschedule(None)
                                         try:
-                                            approved = await asyncio.wait_for(
-                                                self.approval_handler(event), timeout=120,
-                                            ) is True
-                                        except (Exception, TimeoutError):
+                                            approved = await self.approval_handler(event) is True
+                                        except Exception:
                                             approved = False
+                                        finally:
+                                            execution_deadline.reschedule(loop.time() + remaining)
                                     self._writer.write(json.dumps({
                                         "kind": "gui_approval_ack",
                                         "request_id": approval_id,

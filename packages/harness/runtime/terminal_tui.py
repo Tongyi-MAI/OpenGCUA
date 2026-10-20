@@ -335,6 +335,8 @@ class RichTerminalFrontend:
         if prompt.kind in {"question", "approval"}:
             title = "GUI permission" if prompt.kind == "approval" else "Agent needs input"
             self.console.print(Panel(prompt.text, title=title, border_style="yellow"))
+            if prompt.kind == "approval":
+                self.console.print("[yellow]请输入 yes 同意或 no 拒绝，然后按回车；等待期间 Agent 不会继续。Ctrl-C 中止当前轮。[/yellow]")
         elif prompt.kind == "retry":
             self.console.print(Panel(prompt.text, title="Model request failed", border_style="red"))
 
@@ -362,6 +364,11 @@ class RichTerminalFrontend:
                 self._approval_pending = False
                 return None
             if self._local_command(value):
+                continue
+            if prompt.kind == "approval" and command not in {
+                "yes", "y", "同意", "允许", "可以", "no", "n", "拒绝", "不同意",
+            }:
+                self.console.print("[yellow]请输入 yes 或 no；不会自动替你选择。[/yellow]")
                 continue
             if command:
                 self._approval_pending = False

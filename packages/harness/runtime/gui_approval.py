@@ -39,7 +39,8 @@ async def request_gui_approval(
         "本任务可能使用视觉点击（定向操作不一定移动真实鼠标），"
         "必要时还会短暂接管前台焦点、鼠标和键盘。"
         "同意后，该任务在此窗口可连续执行这些操作，直到任务结束；"
-        "切换 App/窗口会重新询问。是否同意？请输入 yes 或 同意；其他回答均拒绝。"
+        "切换 App/窗口会重新询问。是否同意？输入 yes 或 同意授权，输入 no 或 拒绝不授权；"
+        "未答复期间该动作不会执行。"
     )
     answer = await ask(question)
     if not isinstance(answer, str) or answer.strip().casefold() not in {

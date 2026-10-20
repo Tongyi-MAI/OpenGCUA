@@ -262,13 +262,13 @@ def _emit(event: dict[str, Any]) -> None:
         output.at_line_start = True
 
 
-def _recv_host_ack(kind: str, id_key: str, request_id: str, timeout: float) -> dict[str, Any] | None:
+def _recv_host_ack(kind: str, id_key: str, request_id: str, timeout: float | None) -> dict[str, Any] | None:
     """Read one fenced host reply. Callers serialize reads for each SDK session."""
     if _CONTROL_SOCKET is None:
         return None
     data = bytearray()
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and len(data) < 4096:
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    while (deadline is None or time.monotonic() < deadline) and len(data) < 4096:
         try:
             part = _CONTROL_SOCKET.recv(1)
         except socket.timeout:
@@ -297,7 +297,7 @@ async def _request_gui_approval(
         "needs_vision": needs_vision, "needs_foreground": needs_foreground,
     })
     reply = await asyncio.to_thread(
-        _recv_host_ack, "gui_approval_ack", "request_id", request_id, 120,
+        _recv_host_ack, "gui_approval_ack", "request_id", request_id, None,
     )
     return reply is not None and reply.get("approved") is True
 

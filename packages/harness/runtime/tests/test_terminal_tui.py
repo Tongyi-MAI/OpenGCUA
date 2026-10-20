@@ -176,6 +176,14 @@ def test_tui_retry_keeps_empty_enter_as_retry():
     ))) == ""
 
 
+def test_gui_permission_requires_explicit_yes_or_no_and_reprompts_invalid_input():
+    ui, output = frontend("", "maybe", "yes")
+
+    assert asyncio.run(ui.read(AgentPrompt(kind="approval", text="Allow window?"))) == "yes"
+    assert "yes" in output.getvalue().lower()
+    assert "no" in output.getvalue().lower()
+
+
 def test_tui_toolbar_renders_model_and_session_as_literal_text():
     ui, _output = frontend()
     ui.model = "model<a>&b"
