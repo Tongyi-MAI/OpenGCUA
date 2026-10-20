@@ -218,6 +218,8 @@ problem, use the [error-indexed troubleshooting guide](QUICKSTART.md#troubleshoo
 installation and wheel builds, see the [SDK guide](packages/sdk/README.md#install). The standalone
 [native macOS app](packages/macos/README.md) is a separate distribution path with its runtime bundled.
 
+The terminal TUI receives new features more frequently and may change faster. The macOS app is
+the stability-focused version, with a more conservative update cadence.
 
 ## Native macOS app
 
