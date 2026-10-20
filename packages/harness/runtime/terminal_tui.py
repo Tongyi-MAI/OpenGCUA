@@ -886,6 +886,15 @@ class RichTerminalFrontend:
             self._model_status = ""
             self._append("\nAgent: " + event.text + "\n")
             self._release_next_queued()
+        elif kind == "control_result":
+            normal = event.payload.get("status") != "cancelled"
+            self._interaction.finish_turn(normal=normal)
+            self._abort_requested = False
+            self.phase = "waiting"
+            self._model_status = ""
+            self._append("\n" + event.text + "\n")
+            if normal:
+                self._release_next_queued()
         elif kind == "aborted":
             self._interaction.finish_turn(normal=False)
             self._abort_requested = False

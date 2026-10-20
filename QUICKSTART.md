@@ -298,6 +298,9 @@ that is cleared on exit; saved run trajectories remain on disk.
 | `/code on\|off` | Show or hide generated code emitted after the command. It is hidden by default. |
 | `/clear` | Clear visible terminal output without clearing the agent session or trajectory. |
 | `/new <message>` | Start a fresh task boundary and invalidate old UI observations while keeping the healthy interpreter session. |
+| `/resume` | List up to ten recent compatible runs; ↑/↓ selects, Enter confirms, and Esc or Ctrl-C cancels. The old task is not replayed: enter a **new message** after the restored session details appear. |
+| `/resume <run directory>` | Select that saved run directly. The entire remainder is the path, so spaces are allowed. Invalid or incompatible runs are rejected before the current runtime closes. |
+| `/compaction` | Attempt one LLM summary of eligible completed history regardless of the automatic token threshold. At least two uncompacted turns and a strictly shorter next input are required; failure leaves the old summary and history in place. |
 | `/exit`, `/quit`, or Ctrl-D | End the program. During an active turn, the current work is stopped; use Ctrl-C instead to interrupt only the turn and keep chatting. |
 | Ctrl-C during an active step | Abort this turn but keep its task context and foreground consent. A second Ctrl-C force-stops a resistant worker. Already-issued actions are not rolled back. |
 | Foreground consent choice | When an SDK action requires foreground focus, mouse, or keyboard, use arrows/Tab to select Allow or Reject and Enter to confirm. Reject is selected by default; permission lasts only for this task. Background AX/visual clicks do not trigger it. |
@@ -306,6 +309,16 @@ that is cleared on exit; saved run trajectories remain on disk.
 studio. After an abort, a correction continues the same task and the model is told to verify
 the current application state before continuing. The permission gate covers only SDK actions
 through this harness, not arbitrary model-authored Python/Bash or behavior initiated by an App or website.
+
+`/resume` and `/compaction` are visual-TUI controls, not messages to the model. If entered while the
+agent is running, they wait for the next safe task boundary; neither command answers `ask_user` or
+grants GUI permission. After a session switch, the TUI keeps old unsent input visible but paused:
+use `/queue send` or `/queue clear` deliberately. Restored context and TODOs come from `traj.json`,
+but Python memory, live windows/SDK handles, and foreground consent do not restore. An explicit
+`/compaction` can succeed even with `llm_compaction: false`; that setting still disables automatic
+compaction. A successful manual summary is used on later turns and after `/resume`. Ctrl-C during
+manual summarization cancels it and pauses queued input; it does not leave the chat or roll back
+earlier computer actions.
 
 ### One-shot / scripted: pass the first task as an argument
 

@@ -186,6 +186,17 @@ control the display. A second Ctrl-C during interruption force-stops the current
 turn and keeps the conversation open.
 Already-sent application or shell operations are not rolled back.
 
+`/resume` opens a selector for up to ten recent compatible runs (↑/↓, Enter, Esc); `/resume <run directory>`
+uses the full path directly, including spaces. The TUI shows the saved session, last task, status, and
+restored turn/TODO counts, then waits for a **new message**. It never reruns the saved task by selecting it.
+The old runtime closes before the selected run starts; Python variables, SDK/UI handles, and foreground
+permission do not survive. Old queued messages remain paused until `/queue send` or `/queue clear`.
+`/compaction` attempts one LLM history summary now, even below the automatic threshold or when automatic
+compaction is disabled. It needs at least two eligible completed turns and commits only a valid summary
+that shortens the next model input. Ctrl-C cancels the attempt without replacing prior history. Commands
+entered during an active turn wait in the same queue as messages; they do not answer agent questions or
+approve foreground access. These slash controls require the visual TUI; `--ui plain` remains line-oriented.
+
 The macOS agent defaults to background-first operation. Its dedicated browser has a visible
 window but starts only when a web task needs it; webpage actions use DOM/Playwright first.
 Native apps use accessibility controls before window-scoped background input. Background SDK

@@ -9,7 +9,7 @@ import json
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from model_metrics import TokenEstimator, estimate_messages_tokens
 from model_stream import ContextWindowError
@@ -209,6 +209,7 @@ class SimpleContext:
 async def maybe_compact(
     context: Any, client: Any, *, current: dict, action_max_tokens: int,
     trigger: Literal["auto", "server_limit", "manual"] = "auto",
+    commit_guard: Callable[[], bool] | None = None,
 ) -> dict | None:
     """仅按动作总预算超限尝试至多提交一份摘要；取消传播，失败可落盘。
 
@@ -407,6 +408,9 @@ async def maybe_compact(
             # digest 绑定实际发送的原始快照，不能把等待期间的新数据误配给旧摘要。
             if records_digest(_records(context, 0, cutoff)) != digest:
                 attempt["error"] = "摘要期间原始记录发生变化，未提交摘要"
+                return finish(attempt["error"])
+            if commit_guard is not None and not commit_guard():
+                attempt["error"] = "摘要请求已取消，未提交摘要"
                 return finish(attempt["error"])
             candidate = CompactionState(
                 summary=summary, cutoff=cutoff, revision=old.revision + 1,

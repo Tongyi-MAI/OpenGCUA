@@ -299,7 +299,8 @@ def test_frontend_failure_does_not_escape_agent_event_delivery():
 
 def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_correct=False,
                     simulate_gui_approval=False, simulate_question_abort=False,
-                    resume_target=None):
+                    resume_target=None, manual_command=False, manual_cancel=False,
+                    return_model_inputs=False):
     import llm_entry
     import mac_agent
     from code_executor import CodeExecutionResult, empty_control
@@ -356,9 +357,9 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
             control = empty_control()
             if simulate_question_abort and self.calls == 1:
                 control["ask_user"] = {"question": "Which file?"}
-            else:
+            elif not manual_command or self.calls >= 3:
                 control["terminate"] = {"status": "success", "answer": "Verified result"}
-            return CodeExecutionResult("", "", 0, False, control)
+            return CodeExecutionResult("long result " * 500 if manual_command else "", "", 0, False, control)
 
         async def close(self):
             pass
@@ -376,6 +377,12 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
 
         async def __aexit__(self, *_args):
             pass
+
+        async def complete(self, *_args, **_kwargs):
+            if manual_cancel:
+                await asyncio.sleep(2)
+            return ("<summary><constraints>c</constraints><progress>p</progress>"
+                    "<findings>f</findings><state>s</state></summary>", "", {})
 
     client = Client()
 
@@ -413,7 +420,7 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
         "--startup-observation", "none",
         "--runs-dir", str(tmp_path),
     ]
-    if resume_target is None:
+    if resume_target is None and not manual_command:
         argv.append("--disable-multi-task")
     args = mac_agent.build_parser().parse_args(argv)
     frontend = RecordingFrontend()
@@ -422,6 +429,24 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
         async def switch(_prompt):
             return agent_events.TerminalCommand("resume", str(resume_target))
         frontend.read = switch
+    if manual_command:
+        frontend.interactive = True
+        args.llm_compaction = False
+        received = 0
+        async def manual(_prompt):
+            nonlocal received
+            received += 1
+            return agent_events.TerminalCommand("compaction") if received == 1 else None
+        frontend.read = manual
+        if manual_cancel:
+            frontend.bind_abort = lambda callback: setattr(frontend, "_abort_callback", callback)
+            frontend.handle_sigint = lambda: frontend._abort_callback(False)
+            original_emit = frontend.emit
+            def emit_and_cancel(event):
+                original_emit(event)
+                if event.kind == "phase" and event.payload.get("phase") == "compaction":
+                    asyncio.get_running_loop().call_later(.01, frontend._abort_callback, False)
+            frontend.emit = emit_and_cancel
     if abort_then_correct:
         frontend.interactive = True
         async def correction(_prompt):
@@ -446,6 +471,8 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
     if abort_then_correct or simulate_question_abort:
         trajectory = json.loads(next(tmp_path.glob("*/traj.json")).read_text(encoding="utf-8"))
         return result, frontend.events, observer_events, model_inputs, trajectory
+    if return_model_inputs:
+        return result, frontend.events, observer_events, model_inputs
     return result, frontend.events, observer_events
 
 
@@ -504,6 +531,53 @@ def test_resume_handoff_closes_current_runtime_without_writing_selected_run(tmp_
     assert result.previous_path == next(current_root.glob("*/traj.json")).parent.resolve()
     assert (target / "traj.json").read_bytes() == target_before
     assert not any(event.kind == "error" for event in events)
+
+
+def test_manual_compaction_runs_at_safe_boundary_without_action_or_auto_trigger(tmp_path, monkeypatch):
+    result, events, _ = _run_fake_agent(tmp_path, monkeypatch, manual_command=True)
+    data = json.loads(next(tmp_path.glob("*/traj.json")).read_text(encoding="utf-8"))
+    assert result == 0
+    assert len(data["steps"]) == 3
+    assert len(data["compactions"]) == 1
+    assert data["compactions"][0]["status"] == "completed"
+    assert data["compactions"][0]["trigger_reasons"] == ["manual"]
+    assert data["llm_compaction"]["revision"] == 1
+    assert any(event.kind == "phase" and event.payload.get("phase") == "compaction" for event in events)
+    assert any(event.kind == "control_result" and event.payload.get("status") == "completed" for event in events)
+
+
+def test_successful_manual_summary_survives_resume_with_auto_disabled(tmp_path, monkeypatch):
+    import mac_agent
+
+    _result, _events, _observer, model_inputs = _run_fake_agent(
+        tmp_path, monkeypatch, manual_command=True, return_model_inputs=True,
+    )
+    run = next(tmp_path.glob("*/traj.json")).parent
+    prior = json.loads((run / "traj.json").read_text(encoding="utf-8"))
+    assert prior["llm_compaction"]["source_digest"]
+    before = len(model_inputs)
+    args = mac_agent.build_parser().parse_args([
+        "new request", "--resume", str(run), "--allow-empty-api-key",
+        "--disable-llm-compaction", "--disable-multi-task", "--countdown", "0",
+        "--startup-observation", "none", "--runs-dir", str(tmp_path),
+    ])
+    assert asyncio.run(mac_agent.run_agent(args, frontend=RecordingFrontend())) == 0
+    assert len(model_inputs) > before
+    assert "# Previous summary" in str(model_inputs[before])
+    restored = json.loads((run / "traj.json").read_text(encoding="utf-8"))
+    assert restored["llm_compaction"]["source_digest"] == prior["llm_compaction"]["source_digest"]
+    assert restored["tasks"][-1]["task"] == "new request"
+
+
+def test_manual_compaction_ctrl_c_cancels_without_committing_or_new_action(tmp_path, monkeypatch):
+    result, events, _ = _run_fake_agent(tmp_path, monkeypatch,
+                                        manual_command=True, manual_cancel=True)
+    data = json.loads(next(tmp_path.glob("*/traj.json")).read_text(encoding="utf-8"))
+    assert result == 0
+    assert len(data["steps"]) == 3
+    assert not data.get("llm_compaction")
+    assert not data.get("compactions")
+    assert any(event.kind == "control_result" and event.payload.get("status") == "cancelled" for event in events)
 
 
 def test_legacy_cli_resume_without_new_message_keeps_existing_task(tmp_path, monkeypatch):

@@ -106,6 +106,24 @@ def test_resume_suspends_old_queue_but_accepts_new_message():
     asyncio.run(scenario())
 
 
+def test_manual_compaction_result_closes_running_state_and_cancel_pauses_queue():
+    ui = RichTerminalFrontend()
+    ui.emit(AgentEvent("phase", step=3, payload={"phase": "compaction", "manual": True}))
+    assert ui.turn_active and "RUNNING" in "".join(text for _, text in ui._header_text())
+    ui.emit(AgentEvent("control_result", "summary revision 1", step=3,
+                       payload={"status": "completed"}))
+    assert not ui.turn_active
+    assert "summary revision 1" in ui.transcript
+    ui.emit(AgentEvent("phase", step=4, payload={"phase": "compaction", "manual": True}))
+    ui._input.text = "queued"
+    ui._submit_enter()
+    ui.emit(AgentEvent("control_result", "summary cancelled", step=4,
+                       payload={"status": "cancelled"}))
+    assert not ui.turn_active
+    assert ui._interaction.queue_suspended
+    assert ui.queued_messages() == ("queued",)
+
+
 def test_bare_slash_enter_does_not_send_a_task():
     ui = RichTerminalFrontend()
     ui._input.text = "/"

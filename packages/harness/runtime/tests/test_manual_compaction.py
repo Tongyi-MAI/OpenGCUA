@@ -93,6 +93,18 @@ def test_manual_cancellation_restores_previous_state():
     assert state.micro_cutoff == 1
 
 
+def test_late_model_response_after_cancel_cannot_commit_summary():
+    state = context(micro=True)
+    old = state.compaction_state
+    client = SummaryClient()
+    result = asyncio.run(maybe_compact(state, client, current={}, action_max_tokens=128,
+                                       trigger="manual", commit_guard=lambda: False))
+    assert result["status"] == "failed"
+    assert "取消" in result["error"]
+    assert state.compaction_state is old
+    assert state.micro_cutoff == 1
+
+
 def test_manual_does_not_commit_when_summary_fails_to_shorten_next_input():
     state = context()
     state._build_step_input = lambda **_kwargs: [{"role": "user", "content": "same input " * 1000}]

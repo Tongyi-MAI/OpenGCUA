@@ -2154,6 +2154,7 @@ async def run_agent(
     record_model_requests = getattr(args, "record_model_requests", False)
     if ui_api not in UI_API_MARKERS:
         raise SystemExit(f"不支持的 UI API：{ui_api!r}")
+    manual_compact_callback: Callable[[], Awaitable[None]] | None = None
 
     async def read_task_boundary(prompt: AgentPrompt, current_run: Path | None) -> str | None:
         """Consume host-only commands at a task boundary, never as model text."""
@@ -2162,7 +2163,10 @@ async def run_agent(
             if not isinstance(value, TerminalCommand):
                 return value
             if value.kind == "compaction":
-                present("notice", "正在准备手动上下文压缩；当前会话尚未进入压缩边界。")
+                if manual_compact_callback is None:
+                    present("notice", "当前没有可压缩的会话历史；先发送一条任务消息。")
+                else:
+                    await manual_compact_callback()
                 continue
             try:
                 if value.target:
@@ -2189,8 +2193,12 @@ async def run_agent(
 
     install_abort_signal()
     active_executor: CodeExecutor | None = None
+    manual_running = False
+    manual_cancel_requested = asyncio.Event()
 
     def on_turn_interrupt(force: bool) -> None:
+        if manual_running:
+            manual_cancel_requested.set()
         _abort_event().set()
         if active_executor is not None:
             interrupt = getattr(active_executor, "interrupt_active", None)
@@ -2745,6 +2753,79 @@ async def run_agent(
             client.on_attempt = model_attempt
             client.on_parse_event = parse_event
             client.on_compaction_event = parse_event
+
+            async def manual_compact_run() -> None:
+                nonlocal manual_running
+                manual_cancel_requested.clear()
+                manual_running = True
+                old_state = context.compaction_state
+                old_micro = context.micro_cutoff
+                old_archive = writer.data.get("llm_compaction")
+                old_micro_archive = writer.data.get("micro_compact_cutoff")
+                old_attempt_callback = client.on_attempt
+                old_compaction_callback = client.on_compaction_event
+                # Manual summary attempts have their own trajectory record, not the
+                # already-completed action step's usage/retry counters.
+                client.on_attempt = None
+                client.on_compaction_event = None
+                present("phase", "compaction", step=step,
+                        payload={"phase": "compaction", "manual": True})
+                try:
+                    current = {
+                        "current_feedback": "", "current_screenshot": None,
+                        "current_user_response": "", "current_step": step + 1,
+                    }
+                    try:
+                        attempt = await with_abort(maybe_compact(
+                            context, client, current=current, action_max_tokens=args.max_tokens,
+                            trigger="manual", commit_guard=lambda: not manual_cancel_requested.is_set(),
+                        ))
+                    except StepAborted:
+                        context.compaction_state = old_state
+                        context.micro_cutoff = old_micro
+                        present("control_result", "上下文压缩已取消；原历史与待发队列保持不变。",
+                                step=step, payload={"status": "cancelled"})
+                        return
+                    if attempt is None:
+                        present("control_result", "没有可压缩的完整历史。", step=step,
+                                payload={"status": "insufficient_history"})
+                        return
+                    if attempt["status"] == "completed":
+                        appended = False
+                        try:
+                            writer.data["llm_compaction"] = context.compaction_state.to_dict()
+                            writer.data["micro_compact_cutoff"] = context.micro_cutoff
+                            writer.data["token_estimator"] = context.token_estimator.state_dict()
+                            writer.data.setdefault("compactions", []).append({
+                                **attempt, "step": step, "task_index": task_index,
+                                "timestamp": now_iso(), "manual": True,
+                            })
+                            appended = True
+                            writer.flush()
+                        except Exception as exc:
+                            context.compaction_state = old_state
+                            context.micro_cutoff = old_micro
+                            writer.data["llm_compaction"] = old_archive
+                            writer.data["micro_compact_cutoff"] = old_micro_archive
+                            if appended:
+                                writer.data["compactions"].pop()
+                            present("control_result", f"上下文摘要保存失败：{exc}", step=step,
+                                    payload={"status": "failed"})
+                            return
+                        sync_output_context()
+                        present("control_result", (
+                            f"上下文压缩完成：revision {context.compaction_state.revision}，"
+                            f"累计覆盖 {context.compaction_state.cutoff} 轮。"
+                        ), step=step, payload={"status": "completed"})
+                    else:
+                        present("control_result", f"上下文压缩未完成：{attempt.get('error') or '未满足压缩条件'}",
+                                step=step, payload={"status": "failed"})
+                finally:
+                    client.on_attempt = old_attempt_callback
+                    client.on_compaction_event = old_compaction_callback
+                    manual_running = False
+
+            manual_compact_callback = manual_compact_run
 
             async def prepare_context(*, force: bool = False) -> None:
                 sync_output_context()
