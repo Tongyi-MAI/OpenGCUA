@@ -72,6 +72,62 @@ def test_plain_frontend_decodes_framed_multiline_as_one_message():
     assert frames == []
 
 
+def test_plain_frontend_ctrl_c_aborts_active_turn_and_force_stops_on_repeat():
+    async def read(_prompt: str) -> str:
+        return "unused"
+
+    frontend = PlainFrontend(read, interactive=True, stdout=io.StringIO(), stderr=io.StringIO())
+    requests = []
+    frontend.bind_abort(requests.append)
+    frontend.emit(AgentEvent(kind="phase", step=0, payload={"phase": "planning"}))
+    frontend.handle_sigint()
+    frontend.handle_sigint()
+    assert requests == [False, True]
+
+
+def test_plain_frontend_ctrl_c_at_prompt_clears_input_and_reprompts():
+    async def scenario():
+        calls = []
+        pending = asyncio.Event()
+
+        async def read(_prompt: str) -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                pending.set()
+                await asyncio.Future()
+            return "corrected task"
+
+        frontend = PlainFrontend(read, interactive=True, stdout=io.StringIO(), stderr=io.StringIO())
+        frontend.bind_abort(lambda _force: pytest.fail("prompt Ctrl-C must not abort a turn"))
+        reading = asyncio.create_task(frontend.read(AgentPrompt(kind="task")))
+        await pending.wait()
+        frontend.handle_sigint()
+        assert await asyncio.wait_for(reading, 1) == "corrected task"
+        assert len(calls) == 2
+
+    asyncio.run(scenario())
+
+
+def test_plain_frontend_ctrl_c_denies_pending_approval_and_aborts_turn():
+    async def scenario():
+        entered = asyncio.Event()
+
+        async def read(_prompt: str) -> str:
+            entered.set()
+            await asyncio.Future()
+
+        frontend = PlainFrontend(read, interactive=True, stdout=io.StringIO(), stderr=io.StringIO())
+        requests = []
+        frontend.bind_abort(requests.append)
+        reading = asyncio.create_task(frontend.read(AgentPrompt(kind="approval", text="Allow?")))
+        await entered.wait()
+        frontend.handle_sigint()
+        assert await asyncio.wait_for(reading, 1) is None
+        assert requests == [False]
+
+    asyncio.run(scenario())
+
+
 def test_plain_frontend_exit_and_empty_semantics():
     values = iter(["", "continue", ""])
 

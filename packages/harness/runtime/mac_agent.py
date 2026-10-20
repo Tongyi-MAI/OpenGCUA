@@ -828,7 +828,7 @@ def _abort_event() -> asyncio.Event:
 
 
 def install_abort_signal() -> None:
-    """SIGUSR1＝中止本轮（不退出进程）；Ctrl-C 仍走 KeyboardInterrupt 结束会话。"""
+    """SIGUSR1 aborts this turn; terminal frontends separately handle Ctrl-C."""
     try:
         loop = asyncio.get_running_loop()
         _abort_event()

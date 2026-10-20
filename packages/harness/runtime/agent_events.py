@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 import json
@@ -140,8 +141,33 @@ class PlainFrontend:
         self.stdout = stdout or sys.stdout
         self.stderr = stderr or sys.stderr
         self.hub_events = hub_events
+        self._abort_callback: Callable[[bool], None] | None = None
+        self._turn_active = False
+        self._abort_requested = False
+        self._input_interrupt: asyncio.Event | None = None
+        self._input_kind: str | None = None
+
+    def bind_abort(self, callback: Callable[[bool], None]) -> None:
+        self._abort_callback = callback
+
+    def handle_sigint(self) -> None:
+        if self._input_interrupt is not None:
+            if self._input_kind == "approval" and self._abort_callback is not None:
+                self._abort_callback(False)
+            self._input_interrupt.set()
+            return
+        if self._turn_active and self._abort_callback is not None:
+            self._abort_callback(self._abort_requested)
+            self._abort_requested = True
 
     def emit(self, event: AgentEvent) -> None:
+        if event.kind == "phase":
+            phase = str(event.payload.get("phase") or event.text)
+            self._turn_active = phase in {"planning", "compaction", "execution", "postprocess", "recovery"}
+            if phase == "planning":
+                self._abort_requested = False
+        elif event.kind in {"aborted", "answer", "finished"}:
+            self._turn_active = False
         target = self.stderr if event.kind == "error" else self.stdout
         if event.kind == "model_status":
             if self.hub_events and event.step is not None:
@@ -207,6 +233,8 @@ class PlainFrontend:
         print(text, flush=bool(event.payload.get("flush", False)), file=target)
 
     async def read(self, prompt: AgentPrompt) -> str | None:
+        self._turn_active = False
+        self._abort_requested = False
         if prompt.kind in {"question", "approval"}:
             label = f"Agent> {prompt.text}\n你> " if self.interactive else "你> "
         elif prompt.kind == "retry":
@@ -214,10 +242,28 @@ class PlainFrontend:
         else:
             label = prompt.text or "\n你> "
         while True:
+            reader = asyncio.create_task(self.input_reader(label))
+            interrupted = asyncio.Event()
+            waiter = asyncio.create_task(interrupted.wait())
+            self._input_interrupt = interrupted
+            self._input_kind = prompt.kind
             try:
-                message = decode_console_message(await self.input_reader(label))
+                done, _ = await asyncio.wait({reader, waiter}, return_when=asyncio.FIRST_COMPLETED)
+                if waiter in done or interrupted.is_set():
+                    reader.cancel()
+                    await asyncio.gather(reader, return_exceptions=True)
+                    if prompt.kind == "approval":
+                        return None
+                    continue
+                message = decode_console_message(await reader)
             except (EOFError, KeyboardInterrupt):
                 return None
+            finally:
+                waiter.cancel()
+                if not reader.done():
+                    reader.cancel()
+                self._input_interrupt = None
+                self._input_kind = None
             command = message.strip().lower()
             if command in {"/exit", "/quit", "exit", "quit", "q"}:
                 return None
