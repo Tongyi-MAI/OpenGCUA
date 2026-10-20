@@ -23643,9 +23643,8 @@ await mu.emit(v5)`,
  *
  * Scenario: both agents screenshot a hotel results page and pick a hotel. While they work on other steps (2 min 40 s),
  * a sponsored hotel loads at the top and the list moves down. Left clicks the old screen coordinate and opens the wrong
- * hotel without any error. Right asks for a point from the old screenshot: img.point() itself raises STALE_TARGET (a
- * typed error), because the SDK neither makes nor uses a point from a screenshot more than 2 minutes old (max_age_ms ≤
- * 120000; observations.rs point → point_wire). The agent observes again and clicks the right hotel.
+ * hotel without any error. The right-hand replay shows historical SDK behavior: img.point() raised STALE_TARGET
+ * after the old two-minute age limit. Current SDK releases do not expire a point merely because time has passed.
  * The main line states the paper's rule (§4.3.1: a coordinate must come from what the model was shown; a stale one is
  * refused with a typed error); the 2:00 limit is a source detail (status line under the right desktop, folds). Nothing
  * here may contradict §4.3.1 (SPEC-v2 §7.2). The fold "In real runs" shows the same refusal in a Table 6 run
@@ -23660,8 +23659,8 @@ await mu.emit(v5)`,
   /* ------------------------------------------------------------------ copy (EN source; ZH written natively) */
   const C = {
     question: { en: 'What if the screen changes between looking and clicking?', zh: '如果屏幕在观测与点击之间发生了变化，会怎样？' },
-    lead: { en: 'A coordinate valid when observed may be wrong by the time the agent acts.', zh: '观测时有效的坐标，到智能体操作时可能已经不再正确。' },
-    takeaway: { en: 'A coordinate must come from what the model was shown; a stale one is refused with a typed error.', zh: '坐标必须来自模型实际看到过的内容；过时的坐标会被拒绝，并返回类型化错误。' },
+    lead: { en: 'Historical replay: the old SDK rejected points after two minutes. The current SDK has no time-based point expiry; reobserve when the screen changes.', zh: '历史回放：旧版 SDK 两分钟后拒绝坐标点。当前 SDK 不按时间使截图点失效；屏幕变化后应重新观察。' },
+    takeaway: { en: 'Screenshot points keep their capture identity, but time alone no longer invalidates them. Reobserve before acting if the UI may have changed.', zh: '截图点保留捕获身份，但不会仅因时间流逝而失效。若界面可能变化，操作前请重新观察。' },
     subA: { en: 'The screen stays as it was when observed.', zh: '屏幕保持观测时的样子。' },
     subB: { en: 'Refuses a coordinate from a stale screenshot with a typed error; the agent observes again.', zh: '以类型化错误拒绝过时截图上的坐标；智能体重新观测。' },
     hint: { en: 'Press Run both: each agent opens Le Grand Paris using an earlier screenshot.', zh: '点击“同时运行”：两个智能体都依据早先的截图去打开 Le Grand Paris。' },
@@ -24042,8 +24041,8 @@ await mu.emit(v5)`,
           'The left program reuses screen coordinates from step 12. Nothing checks them at step 16, so the click lands on whatever is at that position by then.',
           '左侧程序沿用第 12 步的屏幕坐标。到第 16 步时没有任何检查，点击就落在当时位于那个位置的东西上。')),
         h('p', null, L(
-          'The right program turns the coordinate into a point with img.point(…): a point in a captured image, the target of a visual action. A point belongs to the screenshot it comes from. The SDK treats a screenshot more than 2 minutes old as stale and will neither make nor use a point from it. At step 16 the screenshot is 2 min 40 s old, so img.point() raises the typed error STALE_TARGET and nothing reaches the Mac.',
-          '右侧程序用 img.point(…) 把坐标变成坐标点，即已捕获图像中的一个点，也就是视觉操作的目标。坐标点属于它所来自的截图。截图超过 2 分钟，SDK 就视其为过时，既不会用它生成坐标点，也不会使用此前由它生成的坐标点。第 16 步时那张截图已过去 2 分 40 秒，所以 img.point() 抛出类型化错误 STALE_TARGET，什么也不会发到 Mac 上。')),
+          'This historical replay shows the former two-minute expiry: at step 16, img.point() raised STALE_TARGET. In the current SDK, age alone does not cause that error; the agent must reobserve when the page has changed.',
+          '这段历史回放展示旧版的两分钟过期规则：第 16 步 img.point() 抛出 STALE_TARGET。当前 SDK 不会仅因截图年龄报错；页面变化时，智能体需要主动重新观察。')),
         h('p', null, L(
           'At step 17 the model observes again. It clicks at step 18, because it has to see the new screenshot before it can choose a new point.',
           '第 17 步，模型重新观测；第 18 步才点击，因为模型要先看到新截图，才能选出新的坐标点。')));
@@ -24073,8 +24072,8 @@ await mu.emit(v5)`,
           `The last two lines are a hint the harness appended for the model (in Chinese): “${R.s82.manualGloss.en}”`,
           '最后两行是 Harness 附给模型的处置提示。')),
         h('p', null, L(
-          'img.point() on line 1 raised STALE_TARGET, so the click on line 2 never ran, and the step’s driver log has no calls. The run does not record a reason. The refusal is consistent with the SDK rule that a point cannot be made from, or used with, a screenshot more than 2 minutes old.',
-          '第 1 行的 img.point() 抛出了 STALE_TARGET，第 2 行的点击没有执行，这一步的驱动日志里也没有任何调用。运行记录没有写明原因；这次拒绝与 SDK 的规则一致：截图超过 2 分钟后，既不能用它生成坐标点，也不能使用此前由它生成的坐标点。')),
+          'In this historical run, img.point() on line 1 raised STALE_TARGET, so the click never ran. The run does not record a reason. The old time limit was consistent with this refusal; the current SDK no longer applies that limit.',
+          '这条历史轨迹中，第 1 行 img.point() 抛出 STALE_TARGET，后续点击没有执行。轨迹没有记录具体原因；旧版时间限制与这次拒绝相符，当前 SDK 已不再实行该限制。')),
         h('p', { class: 'ogl-gaps-ch-kicker' }, L('Steps 83–84', '第 83–84 步')),
         h('p', null, L(
           'At step 83 the model observed again (the second image). At step 84 it made a point from the new screenshot and clicked the date control; the click was delivered.',
@@ -24113,7 +24112,7 @@ await mu.emit(v5)`,
       const foldAbout = () => h('div', { class: 'ogl-gaps-ch-fold' },
         h('ul', { class: 'ogl-gaps-ch-bullets' },
           h('li', null, L('The hotel page, the names, the prices and the coordinates are invented. The 2 min 40 s pass in about 6 seconds.', '酒店页面、酒店名、价格和坐标都是虚构的。2 分 40 秒被压缩到了大约 6 秒。')),
-          h('li', null, L('Before a point is made or used, the SDK checks that the window still exists, that the point belongs to this window and its screenshot, that the screenshot is at most 2 minutes old (max_age_ms: default and maximum 120000), and that the window has kept its size (otherwise GEOMETRY_CHANGED).', '生成或使用坐标点之前，SDK 会检查：窗口仍然存在；坐标点属于这个窗口及其截图；截图不超过 2 分钟（max_age_ms，默认值和上限都是 120000）；窗口尺寸没有变化（否则返回 GEOMETRY_CHANGED）。')),
+          h('li', null, L('The current SDK keeps window and screenshot identity and geometry checks. It has no time-based expiry for screenshot points. This animation reproduces the older behavior.', '当前 SDK 保留窗口、截图身份与几何尺寸检查，但截图点不按时间失效；这段动画复现的是旧版行为。')),
           h('li', null, L('GEOMETRY_CHANGED did not occur in the 24 runs behind Table 6; STALE_TARGET did (see “In real runs”).', '在表 6 所依据的 24 次运行中没有出现过 GEOMETRY_CHANGED；STALE_TARGET 则出现过（见“真实运行中”）。'))),
         ui.source([{ en: 'SDK source: sdk/crates/runtime/src/observations.rs (point checks), sdk/adapters/macos/src/provider/actions.rs (window size)', zh: 'SDK 源码：sdk/crates/runtime/src/observations.rs（坐标点检查），sdk/adapters/macos/src/provider/actions.rs（窗口尺寸）' }]));
 
