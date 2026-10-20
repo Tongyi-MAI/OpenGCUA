@@ -197,22 +197,40 @@ def test_tui_abort_notice_disclaims_rollback():
     assert "不会回滚" in rendered
 
 
-def test_tui_sigint_requests_abort_once_only_while_turn_is_active():
+def test_tui_sigint_requests_abort_then_force_stop_while_turn_is_active():
     ui, output = frontend()
     requests: list[bool] = []
-    ui.bind_abort(lambda: requests.append(True))
+    ui.bind_abort(requests.append)
 
-    with pytest.raises(KeyboardInterrupt):
-        ui.handle_sigint()
     ui.emit(AgentEvent("phase", "planning", step=2, payload={"phase": "planning"}))
     ui.handle_sigint()
     ui.handle_sigint()
+    ui.emit(AgentEvent("phase", "execution", step=2, payload={"phase": "execution"}))
+    ui.handle_sigint()
     ui.emit(AgentEvent("aborted", "本轮已停止", step=2))
-    with pytest.raises(KeyboardInterrupt):
-        ui.handle_sigint()
 
-    assert requests == [True]
+    assert requests == [False, True, True]
     assert output.getvalue().count("不会回滚") == 2  # request notice + terminal abort panel
+
+
+def test_tui_ctrl_c_at_prompt_discards_input_and_reprompts():
+    class Prompt:
+        calls = 0
+
+        async def prompt_async(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise KeyboardInterrupt
+            return "corrected instruction"
+
+    prompt = Prompt()
+    ui = RichTerminalFrontend(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        prompt_session=prompt,
+    )
+
+    assert asyncio.run(ui.read(AgentPrompt(kind="task"))) == "corrected instruction"
+    assert prompt.calls == 2
 
 
 def test_runtime_package_lists_frontend_and_console_protocol_modules():

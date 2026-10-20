@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import FrozenInstanceError
 import io
+import json
 import sys
 import types
 
@@ -169,7 +170,7 @@ def test_frontend_failure_does_not_escape_agent_event_delivery():
     assert errors == ["renderer broke"]
 
 
-def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=()):
+def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_correct=False):
     import llm_entry
     import mac_agent
     from code_executor import CodeExecutionResult, empty_control
@@ -207,6 +208,12 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=()):
         def __init__(self, **_kwargs):
             pass
 
+        def interrupt_active(self, *, force=False):
+            pass
+
+        async def force_stop_active(self):
+            pass
+
         def reset_output_context(self):
             pass
 
@@ -234,7 +241,13 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=()):
 
     client = Client()
 
+    model_inputs = []
+
     async def plan(current_client, _messages, **_kwargs):
+        model_inputs.append(_messages)
+        if abort_then_correct and len(model_inputs) == 1:
+            mac_agent._abort_event().set()
+            await asyncio.sleep(0)
         current_client.on_event({"type": "request_start", "purpose": "action", "attempt": 1})
         current_client.on_event({"type": "reasoning_delta", "purpose": "action", "delta": "brief"})
         current_client.on_event({"type": "intent_start", "purpose": "action", "block_index": 1})
@@ -264,12 +277,20 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=()):
         "--runs-dir", str(tmp_path),
     ])
     frontend = RecordingFrontend()
+    if abort_then_correct:
+        frontend.interactive = True
+        async def correction(_prompt):
+            return "请按原任务继续，但先检查状态"
+        frontend.read = correction
     observer_events: list[dict] = []
     result = asyncio.run(mac_agent.run_agent(
         args,
         frontend=frontend,
         on_model_event=observer_events.append,
     ))
+    if abort_then_correct:
+        trajectory = json.loads(next(tmp_path.glob("*/traj.json")).read_text(encoding="utf-8"))
+        return result, frontend.events, observer_events, model_inputs, trajectory
     return result, frontend.events, observer_events
 
 
@@ -320,3 +341,17 @@ def test_run_agent_forwards_code_preview_and_attempt_reset(tmp_path, monkeypatch
         ("code_delta", 0, "print(1)\n", 1),
         ("code_end", 0, "", 1),
     ]
+
+
+def test_abort_correction_remains_in_same_task_and_reaches_next_model_input(tmp_path, monkeypatch):
+    result, events, _observer, inputs, trajectory = _run_fake_agent(
+        tmp_path, monkeypatch, abort_then_correct=True,
+    )
+
+    assert result == 0
+    assert len(trajectory["tasks"]) == 1
+    assert trajectory["tasks"][0]["index"] == 0
+    assert any(event.kind == "aborted" for event in events)
+    assert len(inputs) == 2
+    assert "请按原任务继续，但先检查状态" in json.dumps(inputs[1], ensure_ascii=False)
+    assert trajectory["steps"][-1]["task_index"] == 0

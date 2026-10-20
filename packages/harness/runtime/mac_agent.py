@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from agent_events import AgentEvent, AgentFrontend, AgentPrompt, PlainFrontend, emit_safely, model_status_event
 from console_protocol import decode_console_message
@@ -834,8 +834,10 @@ def install_abort_signal() -> None:
         pass
 
 
-async def with_abort(coro):
-    """把一次 await 变成可中止：中止时取消原协程并抛 StepAborted。"""
+async def with_abort(
+    coro, *, force_stop: Callable[[], Awaitable[None]] | None = None,
+):
+    """Cancel a turn promptly; never wait indefinitely for a resistant awaitable."""
     event = _abort_event()
     if event.is_set():
         event.clear()
@@ -845,23 +847,34 @@ async def with_abort(coro):
     waiter = asyncio.ensure_future(event.wait())
     try:
         done, _ = await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
-        if waiter in done:
+        if waiter in done or event.is_set():
             event.clear()
-            await _settle(task)
+            await _settle(task, force_stop=force_stop)
             raise StepAborted("aborted by user")
         return task.result()
     except asyncio.CancelledError:
         # 外层取消（Ctrl-C/关闭）：等被包装任务收尾，保证其耗时与用量账本完整。
-        await _settle(task)
+        await _settle(task, force_stop=force_stop)
         raise
     finally:
         waiter.cancel()
 
 
-async def _settle(task: asyncio.Task) -> None:
+async def _settle(
+    task: asyncio.Task, *, force_stop: Callable[[], Awaitable[None]] | None = None,
+) -> None:
     task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=2)
+    if not done:
+        if force_stop is not None:
+            await force_stop()
+        # A model transport may swallow cancellation. Its result is discarded;
+        # a worker action instead has been force-stopped before this returns.
+        task.cancel()
+        task.add_done_callback(lambda finished: finished.exception() if not finished.cancelled() else None)
+        return
     try:
-        await task
+        task.result()
     except (asyncio.CancelledError, Exception):
         pass
 
@@ -2146,10 +2159,19 @@ async def run_agent(
     if ui_api not in UI_API_MARKERS:
         raise SystemExit(f"不支持的 UI API：{ui_api!r}")
     install_abort_signal()
+    active_executor: CodeExecutor | None = None
+
+    def on_turn_interrupt(force: bool) -> None:
+        _abort_event().set()
+        if active_executor is not None:
+            interrupt = getattr(active_executor, "interrupt_active", None)
+            if interrupt is not None:
+                interrupt(force=force)
+
     bind_abort = getattr(frontend, "bind_abort", None)
     handle_sigint = getattr(frontend, "handle_sigint", None)
     if callable(bind_abort) and callable(handle_sigint):
-        bind_abort(lambda: _abort_event().set())
+        bind_abort(on_turn_interrupt)
         try:
             asyncio.get_running_loop().add_signal_handler(signal.SIGINT, handle_sigint)
         except (NotImplementedError, RuntimeError, ValueError):
@@ -2348,6 +2370,7 @@ async def run_agent(
         overlay_handler=host_control.overlay if host_control is not None else None,
         image_dir=writer.screenshot_dir,
     )
+    active_executor = executor
     stall = StallDetector(
         warn_at=args.stall_warn_at,
         stop_at=args.stall_stop_at,
@@ -2923,13 +2946,10 @@ async def run_agent(
                     checkpoint(phase="execution")
                     action_started = time.monotonic()
                     try:
-                        # 中止应立即打断执行：把 executor.run 也包进 with_abort，abort 时取消
-                        # 客户端等待并抛 StepAborted，立刻回到读取下一条输入；worker 进程内的
-                        # 代码仍会自行收尾（无法硬杀），本轮结果记为 unknown，下一条指令的反馈
-                        # 会提示“上一轮被中止、可能已产生部分副作用，先核实再继续”。
+                        # 先协作取消，超出宽限期则硬停旧 worker；下一轮不得与旧代码并行。
                         execution = await with_abort(executor.run(
                             action.execution_source, context.ledger.as_dicts() if args.todo else [],
-                        ))
+                        ), force_stop=getattr(executor, "force_stop_active", None))
                     finally:
                         step_metrics["action_execution_time_seconds"] = time.monotonic() - action_started
                         checkpoint()
@@ -3282,20 +3302,36 @@ async def run_agent(
                         break
                     current_feedback = ("上一轮已被用户中止（规划或执行未完成，可能已产生部分副作用）；"
                                         "不要盲目重放，先核实当前界面状态再继续。")
-                    # 与 terminate 后的新任务同构：中止后的新指令也要立为新任务并写入历史
-                    # 边界（begin_task + set_task）；否则它只作为临时 user_response，
-                    # 不会拼进历史上下文（表现为“中止后重发的消息没进历史”）。
-                    previous_task = context.task
-                    task_index = writer.begin_task(follow_up, step + 1)
-                    logger.info(
-                        "task %d begins at step %d fresh=False task=%r previous=%r (after abort)",
-                        task_index, step + 1, follow_up, previous_task,
-                    )
-                    context.set_task(follow_up, previous_result={"status": "aborted", "answer": ""})
-                    if host_control is not None:
-                        host_control.begin_turn(follow_up)
+                    command = follow_up.strip().lower()
+                    fresh = command == "/new" or command.startswith("/new ")
+                    if fresh:
+                        parts = follow_up.strip().split(None, 1)
+                        new_task = parts[1] if len(parts) > 1 else ""
+                        if not new_task.strip():
+                            reply = (await host_control.follow_up() if host_control is not None
+                                     else await frontend.read(AgentPrompt(kind="task")))
+                            new_task = reply or ""
+                        if not new_task.strip():
+                            present("notice", "会话已结束。")
+                            break
+                        writer.close_task("aborted", "")
+                        task_index = writer.begin_task(new_task, step + 1)
+                        context.set_task(new_task, previous_result={"status": "aborted", "answer": ""})
+                        desktop.invalidate_references()
+                        executor.set_rpc_generation(desktop.generation)
+                        await executor.reset_task()
+                        if host_control is not None:
+                            host_control.begin_turn(new_task)
+                        current_feedback = "已根据 /new 切换新任务；旧界面引用失效，请重新观察。"
+                        current_user_response = ""
+                    else:
+                        # Ordinary correction stays inside the current task boundary. It is
+                        # included in the next model input and then persisted with that turn.
+                        current_user_response = follow_up
                     stall.reset()
-                    current_user_response = ""
+                    current_payload = None
+                    current_screenshot = None
+                    current_screenshots = ()
                     current_lifecycle_observation = False
                     step += 1
                     continue

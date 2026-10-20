@@ -937,6 +937,21 @@ class CodeExecutor:
         """摘要丢弃展示历史后，下一轮清除裸目标依据，不清 Python 活对象。"""
         self._output_reset_revision += 1
 
+    def interrupt_active(self, *, force: bool = False) -> None:
+        """Cancel the current cell without closing this reusable executor."""
+        active = self._active_run
+        if active is not None and not active.done():
+            active.cancel()
+        if force:
+            if self._process is not None:
+                _kill_group(self._process)
+            self._stop_child_groups()
+
+    async def force_stop_active(self) -> None:
+        """Confirm the old worker is gone before accepting a replacement cell."""
+        self.interrupt_active(force=True)
+        await _finish_cancelled_cleanup(self._stop_worker())
+
     def _config(self) -> dict[str, Any]:
         return {
             "ui_api": self.ui_api,

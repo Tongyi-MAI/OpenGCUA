@@ -47,6 +47,10 @@ def _prompt_session() -> PromptSession:
     def _newline(event) -> None:
         event.current_buffer.insert_text("\n")
 
+    @bindings.add("c-c")
+    def _clear_input(event) -> None:
+        event.current_buffer.reset()
+
     return PromptSession(
         history=InMemoryHistory(),
         key_bindings=bindings,
@@ -85,22 +89,28 @@ class RichTerminalFrontend:
         self._code_step: int | None = None
         self._code_block: int | None = None
         self._code_preview: dict[int, str] = {}
-        self._abort_callback: Callable[[], None] | None = None
+        self._abort_callback: Callable[[bool], None] | None = None
         self._abort_requested = False
 
-    def bind_abort(self, callback: Callable[[], None]) -> None:
+    def bind_abort(self, callback: Callable[[bool], None]) -> None:
         self._abort_callback = callback
 
     def handle_sigint(self) -> None:
-        """Request the existing turn abort; prompt-time Ctrl-C stays prompt-local."""
+        """Interrupt the active turn; a repeat asks for immediate force-stop."""
 
         if not self.turn_active:
-            raise KeyboardInterrupt
+            buffer = getattr(self._session, "default_buffer", None)
+            if buffer is not None:
+                buffer.reset()
+            return
         if self._abort_requested:
+            if self._abort_callback is not None:
+                self._abort_callback(True)
             return
         self._abort_requested = True
+        self.phase = "interrupting"
         if self._abort_callback is not None:
-            self._abort_callback()
+            self._abort_callback(False)
         self.console.print(
             "[yellow]正在请求中止当前轮次；已经发出的操作不会回滚。[/yellow]"
         )
@@ -120,8 +130,6 @@ class RichTerminalFrontend:
         self.step = event.step
         active_phases = {"planning", "compaction", "execution", "postprocess", "recovery"}
         self.turn_active = self.phase in active_phases
-        if self.turn_active:
-            self._abort_requested = False
         marker = (event.step, self.phase)
         if marker == self._last_phase:
             return
@@ -326,7 +334,9 @@ class RichTerminalFrontend:
                     value = await self._session.prompt_async(
                         "❯ ", bottom_toolbar=self._toolbar,
                     )
-            except (EOFError, KeyboardInterrupt):
+            except KeyboardInterrupt:
+                continue
+            except EOFError:
                 return None
             command = value.strip().lower()
             if command in {"/exit", "/quit", "exit", "quit", "q"}:
