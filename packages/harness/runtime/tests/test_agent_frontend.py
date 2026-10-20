@@ -13,6 +13,7 @@ import agent_events
 from agent_events import (
     AgentEvent,
     AgentPrompt,
+    ForegroundApprovalPrompt,
     PlainFrontend,
     emit_safely,
 )
@@ -170,6 +171,29 @@ def test_plain_frontend_retry_keeps_empty_enter_as_retry():
     assert asyncio.run(frontend.read(AgentPrompt(
         kind="retry", empty_exits=True,
     ))) == ""
+
+
+@pytest.mark.parametrize("response,expected", [
+    ("yes", "allow"), ("同意", "allow"), ("no", "reject"),
+    ("拒绝", "reject"), ("maybe", "cancel"), ("", "cancel"),
+    ("/exit", "cancel"),
+])
+def test_plain_frontend_choice_requires_explicit_answer(response, expected):
+    async def read(_prompt: str) -> str:
+        return response
+
+    frontend = PlainFrontend(read, interactive=True, stdout=io.StringIO())
+    prompt = ForegroundApprovalPrompt("r1", "Allow foreground?", 0, "app:a", "window:7")
+    assert asyncio.run(frontend.choose_approval(prompt)) == expected
+
+
+def test_noninteractive_frontend_cannot_grant_foreground():
+    async def read(_prompt: str) -> str:
+        pytest.fail("noninteractive approval must not read input")
+
+    frontend = PlainFrontend(read, interactive=False, stdout=io.StringIO())
+    prompt = ForegroundApprovalPrompt("r1", "Allow foreground?", 0, "app:a", "window:7")
+    assert asyncio.run(frontend.choose_approval(prompt)) == "cancel"
 
 
 def test_plain_frontend_hub_code_preview_preserves_multiline_delta():

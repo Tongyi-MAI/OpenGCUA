@@ -116,6 +116,8 @@ class AgentFrontend(Protocol):
 
     async def read(self, prompt: AgentPrompt) -> str | None: ...
 
+    async def choose_approval(self, prompt: ForegroundApprovalPrompt) -> ConsentChoice: ...
+
     def close(self) -> None: ...
 
 
@@ -286,6 +288,19 @@ class PlainFrontend:
             if prompt.empty_exits:
                 return None
 
+    async def choose_approval(self, prompt: ForegroundApprovalPrompt) -> ConsentChoice:
+        if not self.interactive:
+            return "cancel"
+        answer = await self.read(AgentPrompt(kind="approval", text=prompt.text, empty_exits=True))
+        if not isinstance(answer, str):
+            return "cancel"
+        value = answer.strip().casefold()
+        if value in {"yes", "y", "同意", "允许"}:
+            return "allow"
+        if value in {"no", "n", "拒绝"}:
+            return "reject"
+        return "cancel"
+
     def close(self) -> None:
         return None
 
@@ -294,6 +309,8 @@ __all__ = [
     "AgentEvent",
     "AgentFrontend",
     "AgentPrompt",
+    "ConsentChoice",
+    "ForegroundApprovalPrompt",
     "PlainFrontend",
     "emit_safely",
     "decode_hub_event",

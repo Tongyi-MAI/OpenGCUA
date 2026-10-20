@@ -50,6 +50,7 @@ py-modules = [
   "image_store",
   "rich_help",
   "terminal_tui",
+  "terminal_interaction",
   "web_shim",
 ]
 
