@@ -5,13 +5,22 @@ from __future__ import annotations
 import os
 import pty
 import select
+import fcntl
+import signal
+import struct
 import subprocess
 import sys
 import time
+import termios
+import pytest
 
 
-def run_in_pty(source: str, keystrokes: list[tuple[float, bytes]]) -> tuple[int, str]:
+def run_in_pty(source: str, keystrokes: list[tuple[float, bytes]], *,
+               terminal_size: tuple[int, int] | None = None,
+               resize_after_first: tuple[int, int] | None = None) -> tuple[int, str]:
     master, slave = pty.openpty()
+    if terminal_size is not None:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", *terminal_size, 0, 0))
     env = dict(os.environ, TERM="xterm-256color")
     process = subprocess.Popen(
         [sys.executable, "-c", source], stdin=slave, stdout=slave, stderr=slave,
@@ -20,9 +29,22 @@ def run_in_pty(source: str, keystrokes: list[tuple[float, bytes]]) -> tuple[int,
     os.close(slave)
     output = bytearray()
     try:
-        for delay, keys in keystrokes:
-            time.sleep(delay)
+        def drain_for(seconds):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline and process.poll() is None:
+                ready, _, _ = select.select([master], [], [], max(0, min(.05, deadline - time.monotonic())))
+                if ready:
+                    try:
+                        output.extend(os.read(master, 65536))
+                    except OSError:
+                        break
+
+        for index, (delay, keys) in enumerate(keystrokes):
+            drain_for(delay)
             os.write(master, keys)
+            if index == 0 and resize_after_first is not None:
+                fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", *resize_after_first, 0, 0))
+                process.send_signal(signal.SIGWINCH)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and process.poll() is None:
             ready, _, _ = select.select([master], [], [], .1)
@@ -31,7 +53,10 @@ def run_in_pty(source: str, keystrokes: list[tuple[float, bytes]]) -> tuple[int,
                     output.extend(os.read(master, 65536))
                 except OSError:
                     break
-        process.wait(timeout=3)
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(output.decode("utf-8", errors="replace")) from exc
         return process.returncode, output.decode("utf-8", errors="replace")
     finally:
         if process.poll() is None:
@@ -62,6 +87,29 @@ asyncio.run(main())
     assert "INTENT_FIRST" in decoded and "INTENT_SECOND" in decoded
 
 
+def test_small_terminal_resize_preserves_input():
+    source = '''import asyncio
+from agent_events import AgentEvent, AgentPrompt
+from terminal_tui import RichTerminalFrontend
+async def main():
+    ui = RichTerminalFrontend()
+    ui.start()
+    pending = asyncio.create_task(ui.read(AgentPrompt(kind="task")))
+    await asyncio.sleep(.35)
+    ui.emit(AgentEvent("intent_delta", "a long message that wraps in a small terminal"))
+    result = await pending
+    await ui.stop()
+    print("RESIZE_RESULT=" + repr(result), flush=True)
+asyncio.run(main())
+'''
+    code, output = run_in_pty(
+        source, [(.3, b"before"), (.4, b"-after\r")],
+        terminal_size=(8, 30), resize_after_first=(16, 60),
+    )
+    assert code == 0, output
+    assert "RESIZE_RESULT='before-after'" in output
+
+
 def test_choice_keys_in_pty_require_explicit_allow_selection():
     source = '''import asyncio
 from agent_events import ForegroundApprovalPrompt
@@ -81,3 +129,58 @@ asyncio.run(main())
     code, output = run_in_pty(source, [(.3, b"\x1b[C\r")])
     assert code == 0, output
     assert "CHOICE=allow" in output
+
+
+def test_ctrl_c_twice_interrupts_turn_and_accepts_same_task_correction_in_pty():
+    source = '''import asyncio
+from agent_events import AgentEvent, AgentPrompt
+from terminal_tui import RichTerminalFrontend
+async def main():
+    ui = RichTerminalFrontend()
+    ui.start()
+    calls = []
+    ui.bind_abort(calls.append)
+    ui.emit(AgentEvent("phase", step=1, payload={"phase":"execution"}))
+    await asyncio.sleep(.7)
+    ui.emit(AgentEvent("aborted", "stopped"))
+    correction = await ui.read(AgentPrompt(kind="task"))
+    await ui.stop()
+    print("ABORTS=" + repr(calls) + " CORRECTION=" + repr(correction), flush=True)
+asyncio.run(main())
+'''
+    code, output = run_in_pty(source, [(.3, b"\x03"), (.1, b"\x03"), (1.0, b"corrected\r")])
+    assert code == 0, output
+    assert "ABORTS=[False, True] CORRECTION='corrected'" in output
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("planning", "ABORTS=[False]"),
+    ("question", "ANSWER=None ABORTS=[False]"),
+    ("approval", "ANSWER='cancel' ABORTS=[False]"),
+])
+def test_ctrl_c_cancels_each_waiting_phase_in_pty(mode, expected):
+    source = f'''import asyncio
+from agent_events import AgentEvent, AgentPrompt, ForegroundApprovalPrompt
+from terminal_tui import RichTerminalFrontend
+async def main():
+    ui = RichTerminalFrontend()
+    ui.start()
+    calls = []
+    ui.bind_abort(calls.append)
+    ui.emit(AgentEvent("phase", step=1, payload={{"phase":"planning"}}))
+    if {mode!r} == "planning":
+        await asyncio.sleep(.5)
+        print("ABORTS=" + repr(calls), flush=True)
+    elif {mode!r} == "question":
+        answer = await ui.read(AgentPrompt(kind="question", text="What next?"))
+        print("ANSWER=" + repr(answer) + " ABORTS=" + repr(calls), flush=True)
+    else:
+        prompt = ForegroundApprovalPrompt("r1", "Take foreground control?", 1, "app:a", "window:7")
+        answer = await ui.choose_approval(prompt)
+        print("ANSWER=" + repr(answer) + " ABORTS=" + repr(calls), flush=True)
+    await ui.stop()
+asyncio.run(main())
+'''
+    code, output = run_in_pty(source, [(.3, b"\x03")])
+    assert code == 0, output
+    assert expected in output

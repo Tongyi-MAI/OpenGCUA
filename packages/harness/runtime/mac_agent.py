@@ -23,11 +23,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from agent_events import AgentEvent, AgentFrontend, AgentPrompt, PlainFrontend, emit_safely, model_status_event
+from agent_events import AgentEvent, AgentFrontend, AgentPrompt, ForegroundApprovalPrompt, PlainFrontend, emit_safely, model_status_event
 from console_protocol import decode_console_message
 from code_executor import BLOCK_PROGRESS_FIELDS, CodeExecutor
 from gui_approval import GuiGrantStore, request_gui_approval
-from agent_events import ForegroundApprovalPrompt
 from sdk_backend import CuaDesktop, CuaRpcServer, Observation
 from llm_compaction import CompactionConfig, CompactionState, maybe_compact, restore_state
 import llm_entry
@@ -395,7 +394,7 @@ BACKGROUND_MODE_NOTE = r"""
 - 默认不抢占用户鼠标、键盘或焦点。原生 App 先按精确窗口观察 AX 树并操作节点、核验结果；AX 拒绝或效果未核实时，先尝试同窗截图定位和后台投递，不能直接升级前台。网页先用 DOM/Playwright，不以网页 AX 树代替 DOM。
 - isolated web 是有界面的任务专属浏览器，但后台模式按需启动：web 为 None 且确需网页时，先 web = await reset_web()。使用 pg.locator 等 DOM 操作，不主动激活浏览器；有界面不等于自动获得前台授权。attach/borrow 用户 Chrome 必须显式 opt-in。
 - 未运行的原生 App 优先 await device.apps.launch(已确认的 bundle ID, timeout_ms=30000)，这是驱动的后台启动路径；随后列窗、绑定、观察。不要调用会置前的 app.launch()/activate()，也不要用 open -a 或 open -g -a 代替后台启动。若后台启动或后续后台动作确实失败，再评估是否需要前台。
-- 所有 SDK vision.click（包括后台投递）、delivery="foreground" 的键鼠动作和 win.activate() 都须绑定精确 App/窗口；宿主会在首次调用前暂停并向用户申请该任务/窗口的一次授权，后续同范围动作不重复询问。不要再用 ask_user 重复申请同一授权；用户拒绝就走后台 AX 路径或停止。重大或不可逆操作仍须单独确认。
+- 后台 SDK vision.click、AX 和网页 DOM 操作不触发前台授权。只有 delivery="foreground" 的 SDK 动作或 win.activate() 会在分派前由宿主弹出“允许/拒绝”选择；不必提前 ask_user。同意后本任务内跨窗口复用；每个前台动作仍须绑定精确 App/窗口并核对焦点。拒绝后宿主直接阻断同类动作，不会反复弹窗；先走后台/AX，确实仍需前台时才用 await request_foreground_permission(win, "具体原因") 显式重新请求，获准后再行动。重大或不可逆操作仍须单独确认。
 - 前台键鼠前先 await win.activate() 激活获准的精确窗口。若用户中途切换焦点，SDK 会以 INPUT_REFUSED 拒绝下一次前台动作；不要重放点击，先核实状态和用户意图。桌面截图可了解态势，但无精确窗口绑定时不能据此点击。
 - 门禁只覆盖本 harness 的 SDK 调用；普通 Python/Bash 能绕过它，不是操作系统沙箱，不得用其它输入库规避授权。
 """
@@ -404,7 +403,7 @@ DEMO_MODE_NOTE = r"""
 
 ## 演示/前台模式（已开启，用于录制 demo）
 - 本模式覆盖通用的后台优先路线：需要展示的操作先将精确目标窗口置前，再用 delivery="foreground" 的真实键鼠完成；AX 可用于读取、定位和核验，不能把静默 AX 写入当作可见输入。
-- 演示模式仍须经过 SDK 的任务/窗口 GUI 授权；它不自动授予前台接管。
+- 演示模式仍须经过 SDK 的本任务前台键鼠授权；它不自动授予前台接管。
 - 若用户明确要求 GUI-only，只通过 GUI 读取和修改目标；若只要求操作可见，可用代码只读分析资料，但对目标应用/产物的修改与保存必须在可见 GUI 中完成。
 - web 保持可见；需录到网页操作时，将目标浏览器窗口/标签置前（具体方法按 mu.help("playwright")）。连续动作不为演示人为 sleep，只在界面确实加载时短暂等待；不隐藏或最小化目标窗口。
 - 观察和业务核验照常；重大或不可逆操作仍须取得授权。
@@ -539,12 +538,12 @@ MAI_UI_SYSTEM_PROMPT = r"""
 ## 原生任务速查
 绑定：apps = await device.apps.list()；按真实 id 选 app = await device.apps.get(id)；windows = await app.windows.list()；按精确 id 选 win = await app.windows.get(id)；ui = win.ui。健康且窗口未变时复用 win/ui，不每步重绑。
 观察：ax = await ui.ax.observe()；从 ax.tree.nodes 按 role/name/text 找 node；需要看外观时 vision = await ui.vision.observe()，image = vision.images[0]。观察默认静默；只在模型需要看到时 await mu.emit(ax) 或 await mu.emit(vision)。已有观察可在 Python 中搜索、筛选，不重复抓取。
-操作：后台控件点击用 await ui.ax.click(node)；AX 不适用且同窗截图可靠时可 await ui.vision.click(node,image=image)，默认仍为后台投递，但首次视觉点击会触发宿主授权。可见点击先 await win.activate()（宿主会询问），再观察同窗口截图，用 await ui.vision.click(node,image=image,delivery="foreground")；没有可靠节点才从刚观察的 image 生成 point。可见输入先确认焦点，再 await ui.input.text(value,delivery="foreground")。
+操作：后台控件点击用 await ui.ax.click(node)；AX 不适用且同窗截图可靠时可 await ui.vision.click(node,image=image)，默认后台投递且不触发前台授权。可见点击先 await win.activate()（宿主会在首次前台操作时展示授权选择），再观察同窗口截图，用 await ui.vision.click(node,image=image,delivery="foreground")；没有可靠节点才从刚观察的 image 生成 point。可见输入先确认焦点，再 await ui.input.text(value,delivery="foreground")。
 核验：输入后查字段值或可见状态；布局、窗口、页面或资源变化后重新观察。不要把后台 AX 点击的回执当成前台键盘焦点证明。更多配方用 mu.help("native")，精确签名分别查 mu.help("ax")、mu.help("vision")、mu.help("input")；能力限制用 await win.capabilities()。
 
 ## 运行时与预置对象
 支持顶层 await；asyncio 已导入，不要调用 asyncio.run，也不要创建跨回复运行的后台 Task。单步 worker 上限 300s，超时会硬终止并重置 Python 会话；等待/轮询循环自行限制在 60s 内，重活拆步。
-预置 mu、device（Mac）、ui（初始为 device.ui 主桌面，仅 vision/input，无 AX）、web（专用浏览器，可能为 None）、bash、todo、ask_user、terminate、rebind_window、reset_web、save_web_session、log，以及 time/os/sys/re/json/subprocess/shlex/Path/asyncio。await mu.emit(x) 才把观察送到下一轮，返回 None；控制句柄 App/Window/Tab/Browser/Locator/Inventory 不直接 emit，先提取 id/title/url/count；完整 AX 视图可 await mu.emit(ax, full=True)。mu.help(topic) 同步返回帮助。
+预置 mu、device（Mac）、ui（初始为 device.ui 主桌面，仅 vision/input，无 AX）、web（专用浏览器，可能为 None）、bash、todo、ask_user、terminate、rebind_window、request_foreground_permission、reset_web、save_web_session、log，以及 time/os/sys/re/json/subprocess/shlex/Path/asyncio。await mu.emit(x) 才把观察送到下一轮，返回 None；控制句柄 App/Window/Tab/Browser/Locator/Inventory 不直接 emit，先提取 id/title/url/count；完整 AX 视图可 await mu.emit(ax, full=True)。mu.help(topic) 同步返回帮助。
 Python 文件处理优先在当前解释器 import；确需子 Python 时用 subprocess.run([sys.executable, ...], capture_output=True, text=True, check=True)，不要混用 python3/pip3 或只打印 stderr 忽略返回码。bash(...) 是同步调用，不要 await bash(...)；r = bash(cmd, timeout=120, echo=False, cwd=None) 默认静默；检查 r.ok/r.timed_out，必要时 await mu.emit(r)。各次 Bash 不共享 shell 状态。
 安装依赖前先检查任务能否由 Python 标准库、当前解释器已有的包或本机命令完成；可用 importlib.util.find_spec 检查包、shutil.which 检查命令。已有工具足够就直接用，不为依赖盘点反复耗步。
 确需临时 pip install 时，用当前解释器 sys.executable -m pip，单次明确设置 timeout=60（subprocess.run 或 bash 均适用）；不要用无超时的 pip install。超时或安装失败后检查错误，改用已有工具或告知用户，不盲目重复安装；不能把步骤的 300s 上限当成安装超时。
@@ -2352,12 +2351,11 @@ async def run_agent(
         async def choose(prompt: ForegroundApprovalPrompt) -> str:
             if host_control is not None:
                 answer = await host_control.ask(prompt.text)
-            elif not frontend.interactive:
-                return "cancel"
             else:
-                answer = await frontend.read(AgentPrompt(
-                    kind="approval", text=prompt.text, empty_exits=True,
-                ))
+                chooser = getattr(frontend, "choose_approval", None)
+                if callable(chooser):
+                    return await chooser(prompt)
+                return "cancel"
             if not isinstance(answer, str):
                 return "cancel"
             if answer.strip().casefold() in {"yes", "y", "同意", "允许"}:
@@ -2891,6 +2889,8 @@ async def run_agent(
                                 ))
                             finally:
                                 step_metrics["user_wait_time_seconds"] += time.monotonic() - wait_started
+                            if choice is None and _abort_event().is_set():
+                                raise StepAborted("user interrupted model retry prompt")
                             if choice is None or choice.strip().lower() not in {"r", "retry", ""}:
                                 raise
                             step_metrics["manual_retry_count"] += 1
@@ -3041,6 +3041,8 @@ async def run_agent(
                                     kind="question", text=question,
                                 ))
                                 if response is None:
+                                    if _abort_event().is_set():
+                                        raise StepAborted("user interrupted agent question")
                                     raise EOFError("input closed while awaiting agent question")
                                 user_response = response
                         finally:
@@ -3321,6 +3323,7 @@ async def run_agent(
                     step += 1
                 except StepAborted:
                     # 用户中止本轮：不杀会话、不清上下文；把中止事实交回模型，并等下一条指令。
+                    _abort_event().clear()
                     logger.warning("step %03d aborted by user", step)
                     present(
                         "aborted",
@@ -3440,8 +3443,22 @@ async def run_agent(
         resume_cmd = f"{Path(__file__).name} --ui-api {ui_api} --resume {writer.run_dir}"
         logger.info("resume hint: %s", resume_cmd)
         present("resume_hint", f".venv/bin/python {resume_cmd}", payload={"command": resume_cmd})
-    frontend.close()
+    if not callable(getattr(frontend, "stop", None)):
+        frontend.close()
     return 0 if final_status == "success" else 1
+
+
+async def run_interactive_agent(args: argparse.Namespace, frontend: AgentFrontend) -> int:
+    """Own one persistent terminal application around the existing agent loop."""
+    from prompt_toolkit.patch_stdout import patch_stdout
+
+    try:
+        with patch_stdout(raw=True):
+            frontend.start()
+            return await run_agent(args, frontend=frontend)
+    finally:
+        await frontend.stop()
+        frontend.close()
 
 
 def boolean_flag(
@@ -3667,11 +3684,13 @@ def main() -> int:
             stdout_tty=stdout_tty,
             term=os.environ.get("TERM"),
         )
-        if args.ui == "tui" and (not stdin_tty or not stdout_tty):
-            raise SystemExit("--ui tui requires interactive stdin and stdout; use --ui plain for pipes")
+        if args.ui == "tui" and (not stdin_tty or not stdout_tty or os.environ.get("TERM", "").lower() in {"", "dumb"}):
+            raise SystemExit("--ui tui requires an interactive terminal (stdin, stdout, TERM); use --ui plain for pipes")
         args.ui = resolved_ui
         frontend = build_rich_frontend() if resolved_ui == "tui" else None
-        return asyncio.run(run_agent(args, frontend=frontend))
+        if frontend is not None:
+            return asyncio.run(run_interactive_agent(args, frontend))
+        return asyncio.run(run_agent(args))
     except KeyboardInterrupt:
         print("\n会话已中断。")
         return 130

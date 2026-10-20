@@ -189,6 +189,8 @@ class PlainFrontend:
                 # Reasoning may still occupy an unterminated stdout line.
                 print("\n" + HUB_EVENT_PREFIX + json.dumps(frame, ensure_ascii=False), flush=True, file=self.stdout)
             return
+        if event.kind == "foreground_consent":
+            return
         if event.kind in HUB_CODE_EVENTS:
             if self.hub_events and event.step is not None:
                 frame = {"type": event.kind, "step": event.step,

@@ -354,8 +354,10 @@ def test_background_prompt_uses_ax_first_and_one_consented_takeover(monkeypatch)
     prompt = context.system_prompt
     assert "device.apps.launch" in prompt
     assert "AX" in prompt and "后台投递" in prompt
-    assert "前台接管" in prompt and "ask_user" in prompt
-    assert "后续同范围动作不重复询问" in prompt
+    assert "前台接管" in prompt
+    assert "不必提前 ask_user" in prompt
+    assert "本任务内跨窗口复用" in prompt
+    assert "后台 SDK vision.click、AX 和网页 DOM 操作不触发前台授权" in prompt
     assert "无头" not in mac_agent.BACKGROUND_MODE_NOTE
 
 

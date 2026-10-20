@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
+import sys
 from typing import Literal
 
 from prompt_toolkit.application import Application
@@ -65,6 +67,8 @@ class RichTerminalFrontend:
         self._approval_index = 0  # Reject is the default.
         self._abort_callback: Callable[[bool], None] | None = None
         self._abort_requested = False
+        self._pending_correction: str | None = None
+        self._ready_direct: deque[str] = deque()
         self._code_open = False
         self._code_step: int | None = None
         self._code_preview: dict[int, str] = {}
@@ -84,7 +88,9 @@ class RichTerminalFrontend:
     @property
     def status_text(self) -> str:
         step = "-" if self.step is None else str(self.step)
-        queued = len(self._interaction.queued_messages())
+        queued = len(self._interaction.queued_messages()) + len(self._ready_direct)
+        if self._pending_correction:
+            queued += 1
         suspended = " suspended" if self._interaction.queue_suspended else ""
         return (f" session {self.session_id or '-'} · step {step} · {self.phase}"
                 f" · {self.model or 'model'} · queued {queued}{suspended}"
@@ -143,12 +149,17 @@ class RichTerminalFrontend:
         if task.cancelled():
             return
         error = task.exception()
+        if self.turn_active and self._abort_callback is not None:
+            self._abort_callback(True)
         if self._approval_answer is not None:
             self._finish_approval("cancel")
         if self._pending_read is not None:
             self._finish_read(None)
+        if (self._interaction.queued_messages() or self._pending_correction or self._ready_direct) and not self._exit_requested:
+            print("OpenGCUA: terminal closed with unsent queued messages.", file=sys.stderr)
         if error is not None:
             self._append(f"\nTerminal unavailable: {type(error).__name__}\n")
+            print(f"OpenGCUA terminal unavailable: {type(error).__name__}: {error}", file=sys.stderr)
 
     async def stop(self) -> None:
         if self._events is not None:
@@ -186,6 +197,8 @@ class RichTerminalFrontend:
     def handle_sigint(self) -> None:
         if self._approval_answer is not None:
             self._finish_approval("cancel")
+        if self._pending_kind in {"question", "retry"}:
+            self._finish_read(None)
         if self.turn_active:
             force = self._abort_requested
             self._abort_requested = True
@@ -213,7 +226,7 @@ class RichTerminalFrontend:
         self._invalidate()
 
     def _request_exit(self) -> None:
-        if self._interaction.queued_messages() and not self._exit_requested:
+        if (self._interaction.queued_messages() or self._pending_correction or self._ready_direct) and not self._exit_requested:
             self._exit_requested = True
             self._append("\n仍有排队消息未发送；再按 Ctrl-D 或输入 /exit 确认退出。\n")
             return
@@ -234,7 +247,9 @@ class RichTerminalFrontend:
                          "/reasoning on|off · /code on|off · /clear · /exit\n")
             return True
         if command == "/queue":
-            queued = self._interaction.queued_messages()
+            queued = list(self._ready_direct) + list(self._interaction.queued_messages())
+            if self._pending_correction:
+                queued.insert(0, self._pending_correction)
             self._append("\nQueued messages:\n" + ("\n".join(f"{i}. {s}" for i, s in enumerate(queued, 1)) if queued else "(empty)") + "\n")
             return True
         if command == "/queue send":
@@ -283,12 +298,20 @@ class RichTerminalFrontend:
         if self._pending_kind == "question":
             self._finish_read(value)
             return
+        if self._abort_requested and self._interaction.turn_active and self._pending_correction is None:
+            self._pending_correction = value
+            self._append(f"\nYou (after interrupt): {value}\n")
+            self._invalidate()
+            return
         route = self._interaction.submit(value)
         if route == "queued":
             self._append(f"\nYou (queued): {value}\n")
         elif route == "send":
             self._append(f"\nYou: {value}\n")
-            self._finish_read(value)
+            if self._pending_read is None:
+                self._ready_direct.append(value)
+            else:
+                self._finish_read(value)
         self._invalidate()
 
     def _finish_read(self, value: str | None) -> None:
@@ -314,9 +337,16 @@ class RichTerminalFrontend:
         if self._pending_read is not None:
             raise RuntimeError("another terminal read is already pending")
         if prompt.kind == "task":
-            queued = self._interaction.next_message()
-            if queued is not None:
-                return queued
+            if self._pending_correction is not None:
+                correction = self._pending_correction
+                self._pending_correction = None
+                return correction
+            if not self._interaction.queue_suspended:
+                queued = self._interaction.next_message()
+                if queued is not None:
+                    return queued
+            if self._ready_direct:
+                return self._ready_direct.popleft()
         if prompt.kind == "question":
             self._saved_draft = self._input.text
             self._input.text = ""
@@ -375,8 +405,10 @@ class RichTerminalFrontend:
             self.phase = str(event.payload.get("phase") or event.text or "working")
             self.step = event.step
             if self.phase in {"planning", "compaction", "execution", "postprocess", "recovery"}:
+                was_active = self._interaction.turn_active
                 self._interaction.begin_turn()
-                self._abort_requested = False if self.phase == "planning" else self._abort_requested
+                if self.phase == "planning" and not was_active:
+                    self._abort_requested = False
             self._append(f"\nStep {event.step if event.step is not None else '-'} · {self.phase}\n")
         elif kind == "reasoning_delta":
             if self.show_reasoning:

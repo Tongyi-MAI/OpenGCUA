@@ -91,6 +91,23 @@ def test_question_uses_separate_input_and_restores_draft_without_eating_queue():
     asyncio.run(scenario())
 
 
+def test_ctrl_c_during_question_releases_read_and_keeps_existing_draft():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui._interaction.begin_turn()
+        calls = []
+        ui.bind_abort(calls.append)
+        ui._input.text = "draft correction"
+        pending = asyncio.create_task(ui.read(AgentPrompt(kind="question", text="Need help?")))
+        await asyncio.sleep(0)
+        ui.handle_sigint()
+        assert await asyncio.wait_for(pending, 1) is None
+        assert ui._input.text == "draft correction"
+        assert calls == [False]
+    asyncio.run(scenario())
+
+
 def test_messages_queue_during_active_turn_and_status_shows_consent():
     ui = RichTerminalFrontend()
     ui.emit(AgentEvent("phase", step=2, payload={"phase": "planning"}))
@@ -101,6 +118,21 @@ def test_messages_queue_during_active_turn_and_status_shows_consent():
     assert "foreground: allowed" in ui.status_text
     ui.emit(AgentEvent("answer", "done"))
     assert ui._interaction.next_message() == "send later"
+
+
+def test_read_drains_queued_messages_in_order_after_normal_completion():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui.emit(AgentEvent("phase", step=0, payload={"phase": "execution"}))
+        ui._input.text = "first"
+        ui._submit_enter()
+        ui._input.text = "second"
+        ui._submit_enter()
+        ui.emit(AgentEvent("answer", "done"))
+        assert await ui.read(AgentPrompt(kind="task")) == "first"
+        assert await ui.read(AgentPrompt(kind="task")) == "second"
+    asyncio.run(scenario())
 
 
 def test_abort_suspends_queue_and_disclaims_rollback():
@@ -117,6 +149,69 @@ def test_abort_suspends_queue_and_disclaims_rollback():
     assert ui._interaction.queue_suspended
     assert ui._interaction.next_message() is None
     assert "不会回滚" in ui.transcript
+
+
+def test_correction_typed_while_interrupt_is_settling_is_delivered_after_abort():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui.bind_abort(lambda _force: None)
+        ui.emit(AgentEvent("phase", step=0, payload={"phase": "execution"}))
+        ui._input.text = "older queued message"
+        ui._submit_enter()
+        ui.handle_sigint()
+        ui._input.text = "correct immediately"
+        ui._submit_enter()
+        assert ui.queued_messages() == ("older queued message",)
+        ui.emit(AgentEvent("aborted", "stopped"))
+        assert await ui.read(AgentPrompt(kind="task")) == "correct immediately"
+        assert ui._interaction.queue_suspended
+        assert ui.queued_messages() == ("older queued message",)
+    asyncio.run(scenario())
+
+
+def test_input_between_abort_event_and_next_read_is_not_lost():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui.emit(AgentEvent("phase", step=0, payload={"phase": "execution"}))
+        ui.emit(AgentEvent("aborted", "stopped"))
+        ui._input.text = "correct after abort"
+        ui._submit_enter()
+        assert await ui.read(AgentPrompt(kind="task")) == "correct after abort"
+    asyncio.run(scenario())
+
+
+def test_older_queue_precedes_new_idle_input_after_normal_completion():
+    async def scenario():
+        ui = RichTerminalFrontend()
+        ui.start = lambda: None
+        ui.emit(AgentEvent("phase", step=0, payload={"phase": "execution"}))
+        ui._input.text = "older queued"
+        ui._submit_enter()
+        ui.emit(AgentEvent("answer", "done"))
+        ui._input.text = "new idle message"
+        ui._submit_enter()
+        assert await ui.read(AgentPrompt(kind="task")) == "older queued"
+        assert await ui.read(AgentPrompt(kind="task")) == "new idle message"
+    asyncio.run(scenario())
+
+
+def test_terminal_eof_warns_about_unsent_queue_and_aborts_running_turn(capsys):
+    async def scenario():
+        ui = RichTerminalFrontend()
+        calls = []
+        ui.bind_abort(calls.append)
+        ui.emit(AgentEvent("phase", step=0, payload={"phase": "execution"}))
+        ui._input.text = "unsent"
+        ui._submit_enter()
+        done = asyncio.get_running_loop().create_future()
+        done.set_exception(EOFError())
+        ui._on_application_done(done)
+        assert calls == [True]
+
+    asyncio.run(scenario())
+    assert "unsent queued messages" in capsys.readouterr().err
 
 
 def test_package_lists_terminal_interaction_module():

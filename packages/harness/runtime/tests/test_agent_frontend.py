@@ -32,6 +32,9 @@ class RecordingFrontend:
     async def read(self, _prompt: AgentPrompt) -> str | None:
         return None
 
+    async def choose_approval(self, _prompt: ForegroundApprovalPrompt) -> str:
+        return "allow"
+
     def close(self) -> None:
         pass
 
@@ -250,7 +253,8 @@ def test_frontend_failure_does_not_escape_agent_event_delivery():
     assert errors == ["renderer broke"]
 
 
-def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_correct=False):
+def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_correct=False,
+                    simulate_gui_approval=False, simulate_question_abort=False):
     import llm_entry
     import mac_agent
     from code_executor import CodeExecutionResult, empty_control
@@ -285,8 +289,9 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
             pass
 
     class Executor:
-        def __init__(self, **_kwargs):
-            pass
+        def __init__(self, **kwargs):
+            self.approval_handler = kwargs.get("approval_handler")
+            self.calls = 0
 
         def interrupt_active(self, *, force=False):
             pass
@@ -298,8 +303,16 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
             pass
 
         async def run(self, _code, _todos):
+            self.calls += 1
+            if simulate_gui_approval:
+                assert await self.approval_handler({
+                    "request_id": "test-approval", "app_id": "app:a", "window_id": "window:7",
+                })
             control = empty_control()
-            control["terminate"] = {"status": "success", "answer": "Verified result"}
+            if simulate_question_abort and self.calls == 1:
+                control["ask_user"] = {"question": "Which file?"}
+            else:
+                control["terminate"] = {"status": "success", "answer": "Verified result"}
             return CodeExecutionResult("", "", 0, False, control)
 
         async def close(self):
@@ -362,13 +375,23 @@ def _run_fake_agent(tmp_path, monkeypatch, *, extra_model_events=(), abort_then_
         async def correction(_prompt):
             return "请按原任务继续，但先检查状态"
         frontend.read = correction
+    if simulate_question_abort:
+        frontend.interactive = True
+
+        async def abort_question(prompt):
+            if prompt.kind == "question":
+                mac_agent._abort_event().set()
+                return None
+            return "问题已中止，请按原任务继续"
+
+        frontend.read = abort_question
     observer_events: list[dict] = []
     result = asyncio.run(mac_agent.run_agent(
         args,
         frontend=frontend,
         on_model_event=observer_events.append,
     ))
-    if abort_then_correct:
+    if abort_then_correct or simulate_question_abort:
         trajectory = json.loads(next(tmp_path.glob("*/traj.json")).read_text(encoding="utf-8"))
         return result, frontend.events, observer_events, model_inputs, trajectory
     return result, frontend.events, observer_events
@@ -388,6 +411,15 @@ def test_run_agent_emits_structured_lifecycle_action_and_answer(tmp_path, monkey
     assert kinds[-1] == "finished"
     assert next(event for event in events if event.kind == "action").payload["intent"] == "reply"
     assert next(event for event in events if event.kind == "answer").text == "Verified result"
+
+
+def test_typed_foreground_choice_is_task_scoped_and_cleared_on_completion(tmp_path, monkeypatch):
+    result, events, _observer = _run_fake_agent(
+        tmp_path, monkeypatch, simulate_gui_approval=True,
+    )
+    states = [event.payload["state"] for event in events if event.kind == "foreground_consent"]
+    assert result == 0
+    assert states == ["allowed", "unset", "unset"]
 
 
 def test_plain_frontend_model_events_keep_existing_observer_callback(tmp_path, monkeypatch):
@@ -435,3 +467,41 @@ def test_abort_correction_remains_in_same_task_and_reaches_next_model_input(tmp_
     assert len(inputs) == 2
     assert "请按原任务继续，但先检查状态" in json.dumps(inputs[1], ensure_ascii=False)
     assert trajectory["steps"][-1]["task_index"] == 0
+
+
+def test_ctrl_c_during_agent_question_returns_to_same_task(tmp_path, monkeypatch):
+    result, events, _observer, inputs, trajectory = _run_fake_agent(
+        tmp_path, monkeypatch, simulate_question_abort=True,
+    )
+    assert result == 0
+    assert len(trajectory["tasks"]) == 1
+    assert any(event.kind == "aborted" for event in events)
+    assert len(inputs) == 2
+    assert "问题已中止，请按原任务继续" in json.dumps(inputs[1], ensure_ascii=False)
+
+
+def test_interactive_wrapper_starts_and_stops_ui_even_on_error(monkeypatch):
+    import mac_agent
+
+    class Frontend:
+        def __init__(self):
+            self.events = []
+
+        def start(self):
+            self.events.append("start")
+
+        async def stop(self):
+            self.events.append("stop")
+
+        def close(self):
+            self.events.append("close")
+
+    async def fail(_args, *, frontend):
+        frontend.events.append("run")
+        raise RuntimeError("failure")
+
+    monkeypatch.setattr(mac_agent, "run_agent", fail)
+    frontend = Frontend()
+    with pytest.raises(RuntimeError, match="failure"):
+        asyncio.run(mac_agent.run_interactive_agent(object(), frontend))
+    assert frontend.events == ["start", "run", "stop", "close"]

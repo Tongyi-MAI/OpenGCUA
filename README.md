@@ -173,20 +173,27 @@ keep the compatible plain-text interface.
 bash packages/harness/runtime/start_demo.sh
 ```
 
-In the visual terminal, reasoning and generated code are hidden by default. Use `/reasoning on`
-or `/code on` to show future output, `/help` for shortcuts, and Alt/Option+Enter to insert a
-newline. Ctrl-C during an active step aborts that turn; operations already sent to applications
-or the shell are not rolled back.
+The visual terminal keeps an input box available while the agent works. Press Enter to queue a
+message for after the current turn, or Alt/Option+Enter for a newline. `/queue` shows pending
+messages; after Ctrl-C aborts a turn, `/queue send` resumes the paused queue or `/queue clear`
+discards it. A new correction can be entered immediately after the abort in the same task.
+Reasoning and generated code are hidden by default; `/reasoning on`, `/code on`, and `/help`
+control the display. A second Ctrl-C during interruption force-stops the current worker.
+Already-sent application or shell operations are not rolled back.
 
 The macOS agent defaults to background-first operation. Its dedicated browser has a visible
 window but starts only when a web task needs it; webpage actions use DOM/Playwright first.
-Native apps use accessibility controls before window-scoped background input. If a task needs
-the real pointer, keyboard, or a foreground window, the agent asks once before a series of
-foreground actions. Use `--disable-background-mode` to opt out, or enable demo mode when
-recording deliberately visible foreground actions. This is agent guidance, not an execution-layer
-permission boundary. On macOS, the isolated Chromium browser is launched without activation and
-new tabs are created without requesting focus. In background mode, recognized GET search forms
-that target a new tab submit in the existing tab; recognized other new-tab links/forms stop
+Native apps use accessibility controls before window-scoped background input. Background SDK
+visual clicks do not request foreground consent. A foreground SDK action or window activation
+pauses for an Allow/Reject choice; Reject is the default. Allow covers repeated foreground
+operations until that task ends, even across windows. A rejected task cannot silently retry the
+choice; the agent must explicitly re-request it. Use `--disable-background-mode` to opt out, or
+enable demo mode when recording deliberately visible foreground actions. This gate only covers
+SDK actions made through this harness: arbitrary Python, Bash, AppleScript, and application or
+website behavior are not OS-level isolated. On macOS, the isolated Chromium browser is launched
+without activation and new tabs are created without requesting focus. In background mode,
+recognized GET search forms that target a new tab submit in the existing tab; other recognized
+new-tab links/forms stop
 before activation and ask for foreground permission. Script-created pop-ups and system dialogs
 can still interrupt you; demo mode intentionally uses the foreground.
 

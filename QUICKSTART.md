@@ -254,9 +254,12 @@ If you explicitly disable compaction, `history_turns` becomes the raw-history li
 | `startup_observation` | `none` | Initial visual observation policy: `none` defers observation to agent code; `desktop` captures the full desktop; `auto` follows the selected UI backend. | Use `desktop` only when the model needs an immediate overview and the launching process has Screen Recording permission. |
 | `background_mode` | `true` | Prefer DOM actions in an isolated, headed browser and AX actions in native apps without taking over your mouse or keyboard. On macOS, Chromium launches without activation; agent-created tabs stay in the background. Recognized GET search forms targeting `_blank` stay in their existing tab, while other recognized `_blank` links/forms require foreground consent. | Set `false` (or pass `--disable-background-mode`) for the foreground-oriented workflow. Script-created pop-ups, system dialogs, and explicit foreground actions can still take focus; demo mode deliberately shows foreground actions. |
 
-When an operation really requires foreground focus or global mouse/keyboard input, the agent is instructed to
-ask once before taking over the specified app/window for a series of actions, then return to background work.
-This is currently an agent instruction, not a host-level permission gate for arbitrary Python/Bash code.
+When an SDK action requests foreground focus or real mouse/keyboard input, the host pauses
+before dispatch and presents one task-level Allow/Reject choice. Allow covers further SDK
+foreground operations in that task, including a different window; target and focus checks still
+apply to each operation. Reject blocks repeat attempts without prompting again. The agent can
+explicitly re-request via `request_foreground_permission(win, reason)` if foreground work is
+genuinely necessary. This is not a host-level gate for arbitrary Python/Bash code.
 
 The GUI-only baseline uses `history` (default `5`) for its screenshot window rather than
 `history_turns`. Its token threshold is named `compact_trigger_tokens`. Run either script with
@@ -286,18 +289,21 @@ scrollback rather than an alternate screen, so completed output remains searchab
 |---|---|
 | Enter | Submit the current message. |
 | Alt/Option+Enter | Insert a newline. Bracketed multiline paste remains one logical message. |
-| Up / Down | Navigate local input history. |
+| While the agent runs, Enter | Queue a message for the next normal turn; the fixed input area stays editable. |
+| `/queue`, `/queue send`, `/queue clear` | Inspect, resume, or discard queued messages. An abort suspends the queue; a new correction can still be sent immediately. |
 | `/help` | Show terminal commands and shortcuts. |
 | `/reasoning on\|off` | Show or hide reasoning emitted after the command. It is hidden by default. |
 | `/code on\|off` | Show or hide generated code emitted after the command. It is hidden by default. |
 | `/clear` | Clear visible terminal output without clearing the agent session or trajectory. |
 | `/new <message>` | Start a fresh task boundary and invalidate old UI observations while keeping the healthy interpreter session. |
 | `/exit`, `/quit`, or Ctrl-D | End the session. |
-| Ctrl-C during an active step | Abort the current planning/execution turn. Already-issued UI or shell operations are not rolled back. |
+| Ctrl-C during an active step | Abort this turn but keep its task context and foreground consent. A second Ctrl-C force-stops a resistant worker. Already-issued actions are not rolled back. |
+| Foreground consent choice | When an SDK action requires foreground focus, mouse, or keyboard, use arrows/Tab to select Allow or Reject and Enter to confirm. Reject is selected by default; permission lasts only for this task. Background AX/visual clicks do not trigger it. |
 
 `SIGUSR1` remains the programmatic turn-abort signal and is exposed as **Abort Turn** in the demo
-studio. After an abort, the next message is appended as a new task and the model is told to verify
-the current application state before continuing.
+studio. After an abort, a correction continues the same task and the model is told to verify
+the current application state before continuing. The permission gate covers only SDK actions
+through this harness, not arbitrary model-authored Python/Bash or behavior initiated by an App or website.
 
 ### One-shot / scripted: pass the first task as an argument
 
