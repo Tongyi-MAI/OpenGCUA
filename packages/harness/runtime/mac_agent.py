@@ -2348,27 +2348,44 @@ async def run_agent(
         present("foreground_consent", payload={"state": "unset"})
 
     async def approve_gui(event: dict[str, Any]) -> bool:
+        decision = "cancel"
+
         async def choose(prompt: ForegroundApprovalPrompt) -> str:
+            nonlocal decision
             if host_control is not None:
                 answer = await host_control.ask(prompt.text)
             else:
                 chooser = getattr(frontend, "choose_approval", None)
                 if callable(chooser):
-                    return await chooser(prompt)
-                return "cancel"
+                    answer = await chooser(prompt)
+                else:
+                    answer = None
             if not isinstance(answer, str):
                 return "cancel"
             if answer.strip().casefold() in {"yes", "y", "同意", "允许"}:
-                return "allow"
-            if answer.strip().casefold() in {"no", "n", "拒绝"}:
-                return "reject"
-            return "cancel"
+                decision = "allow"
+            elif answer.strip().casefold() in {"no", "n", "拒绝"}:
+                decision = "reject"
+            elif answer in {"allow", "reject"}:
+                decision = answer
+            return decision
 
         previous = gui_grants.state(task_index)
         result = await request_gui_approval(gui_grants, task_index, event, choose)
         state = gui_grants.state(task_index)
         if state != previous:
             present("foreground_consent", payload={"state": state})
+        if decision in {"allow", "reject"}:
+            writer.data.setdefault("foreground_consent", []).append({
+                "task_index": task_index,
+                "request_id": event["request_id"],
+                "app_id": event["app_id"],
+                "window_id": event["window_id"],
+                "decision": decision,
+                "scope": "task",
+                "explicit_retry": event.get("explicit_retry") is True,
+            })
+            writer.flush()
         return result
     if resume_dir is not None:
         context.token_estimator.load_state(loaded.get("token_estimator"))

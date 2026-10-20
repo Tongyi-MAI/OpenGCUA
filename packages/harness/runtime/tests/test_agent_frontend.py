@@ -420,6 +420,12 @@ def test_typed_foreground_choice_is_task_scoped_and_cleared_on_completion(tmp_pa
     states = [event.payload["state"] for event in events if event.kind == "foreground_consent"]
     assert result == 0
     assert states == ["allowed", "unset", "unset"]
+    trajectory = json.loads(next(tmp_path.glob("*/traj.json")).read_text(encoding="utf-8"))
+    assert trajectory["foreground_consent"] == [{
+        "task_index": 0, "request_id": "test-approval",
+        "app_id": "app:a", "window_id": "window:7", "decision": "allow",
+        "scope": "task", "explicit_retry": False,
+    }]
 
 
 def test_plain_frontend_model_events_keep_existing_observer_callback(tmp_path, monkeypatch):
