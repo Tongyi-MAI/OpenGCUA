@@ -30,16 +30,6 @@ def test_source_config_options_map_to_native_tasks_without_replacing_host_owners
     assert args.driver_socket != "/unrelated.sock"
 
 
-def test_native_config_accepts_disabled_mcp_and_app_can_render_status(tmp_path):
-    args = task_arguments({
-        "llm_base_url": "https://example.com/v1", "model_name": "fixture",
-        "mcp_servers": {},
-    }, tmp_path)
-    assert args.mcp_servers == {}
-    source = (Path(__file__).resolve().parents[3] / "macos" / "Sources" / "AppModel.swift").read_text()
-    assert 'case "mcp_status":' in source
-
-
 @pytest.mark.parametrize("field,value", [
     ("api_retries", "3"), ("max_tokens", True), ("background_mode", 1),
     ("api_timeout", float("inf")), ("llm_protocol", "unsupported"),

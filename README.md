@@ -239,24 +239,6 @@ hub input). Personal Skills live in `~/Library/Application Support/Generalist/sk
 absolute directories can be listed in `skills_dirs` in `local.json`. See the
 [Skill authoring and troubleshooting guide](QUICKSTART.md#agent-skills) for the format and limits.
 
-### Optional MCP tools (read-only)
-
-The `mac_agent` harness can connect to explicitly configured stdio MCP servers. MCP is off by
-default (`"mcp_servers": {}`). A server is started only when the agent asks to list its tools or
-call an allowlisted one. The host, not the model-authored Python worker, owns the connection and
-forwards only named environment variables; no credential values belong in `local.json`.
-Only exact names in `read_only_tools` can be called. This is a host-side allowlist, not proof that
-a third-party tool is genuinely read-only, so verify the server's implementation and grant narrow
-service scopes. MCP does not change the GUI permission rules or grant the agent a DingTalk login.
-
-For the [official DingTalk MCP server](https://github.com/open-dingtalk/dingtalk-mcp), install a
-pinned package yourself, use an absolute Node executable and a fixed local `dist/cli.js` path,
-and supply your DingTalk app credentials through the launching environment. The packaged app
-can read a selected source-harness JSON config, but Finder-launched apps do not automatically
-inherit variables exported in a terminal. The official app identity is distinct from your signed-in
-personal DingTalk identity. Setup, a credential-free local smoke check, and troubleshooting are in
-[QUICKSTART](QUICKSTART.md#optional-mcp-and-dingtalk).
-
 ## Native macOS app
 
 [OpenGCUA for macOS](packages/macos/README.md) implements the menu bar assistant:

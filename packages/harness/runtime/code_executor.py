@@ -899,8 +899,6 @@ class CodeExecutor:
         ui_api: str = "mai-ui",
         overlay_handler=None,
         approval_handler=None,
-        mcp_handler=None,
-        mcp_env_names: tuple[str, ...] = (),
         image_dir: Path | None = None,
         skill_roots: tuple[Path, ...] = (),
     ) -> None:
@@ -909,8 +907,6 @@ class CodeExecutor:
         self.ui_api = ui_api
         self.overlay_handler = overlay_handler
         self.approval_handler = approval_handler
-        self.mcp_handler = mcp_handler
-        self.mcp_env_names = frozenset(mcp_env_names)
         self.image_dir = image_dir.resolve() if image_dir is not None else None
         self.skill_roots = tuple(Path(root).resolve() for root in skill_roots)
         self.runtime_path = runtime_path.resolve()
@@ -966,7 +962,6 @@ class CodeExecutor:
             "ui_api": self.ui_api,
             "overlay_guard": self.overlay_handler is not None,
             "gui_approval": self.approval_handler is not None,
-            "mcp_available": self.mcp_handler is not None,
             "rpc_socket": str(self.rpc_socket),
             "rpc_timeout": self.rpc_timeout,
             "rpc_generation": self._rpc_generation,
@@ -1014,8 +1009,6 @@ class CodeExecutor:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
-                env={key: value for key, value in os.environ.items()
-                     if key not in self.mcp_env_names},
                 pass_fds=(child.fileno(),),
                 start_new_session=True,
             ))
@@ -1197,34 +1190,6 @@ class CodeExecutor:
                                         "request_id": approval_id,
                                         "approved": approved,
                                     }).encode() + b"\n")
-                                    await self._writer.drain()
-                                elif event.get("type") == "mcp_request":
-                                    call_id = event.get("call_id")
-                                    reply: dict[str, Any] = {
-                                        "kind": "mcp_reply", "call_id": call_id, "ok": False,
-                                    }
-                                    if not isinstance(call_id, str) or not call_id or self.mcp_handler is None:
-                                        reply["error"] = {"code": "MCP_NOT_CONFIGURED", "message": "MCP is unavailable"}
-                                    else:
-                                        try:
-                                            result = await self.mcp_handler(event)
-                                            reply.update(ok=True, result=result)
-                                        except asyncio.CancelledError:
-                                            raise
-                                        except Exception as exc:
-                                            allowed = {"MCP_NOT_CONFIGURED", "MCP_TOOL_DENIED",
-                                                       "MCP_SERVER_UNAVAILABLE", "MCP_TIMEOUT", "MCP_TOOL_ERROR"}
-                                            code = getattr(exc, "code", None)
-                                            if code not in allowed:
-                                                prefix = str(exc).split(":", 1)[0]
-                                                code = prefix if prefix in allowed else "MCP_TOOL_ERROR"
-                                            reply["error"] = {"code": code, "message": "MCP operation failed"}
-                                    encoded = json.dumps(reply, ensure_ascii=True, default=str).encode() + b"\n"
-                                    if len(encoded) > 72 * 1024:
-                                        reply = {"kind": "mcp_reply", "call_id": call_id, "ok": False,
-                                                 "error": {"code": "MCP_TOOL_ERROR", "message": "MCP reply too large"}}
-                                        encoded = json.dumps(reply).encode() + b"\n"
-                                    self._writer.write(encoded)
                                     await self._writer.drain()
                                 elif event.get("type") == "_child_group":
                                     pid = int(event["pid"])

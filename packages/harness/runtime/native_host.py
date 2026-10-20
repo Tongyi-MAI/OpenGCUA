@@ -15,7 +15,6 @@ import sys
 import tempfile
 import uuid
 from urllib.parse import urlsplit
-from mcp_config import parse_mcp_servers
 
 PROTOCOL = 1
 
@@ -63,7 +62,6 @@ def task_arguments(config: dict, runs_dir: Path):
         raise ValueError("请填写模型名称。")
     if args.background_mode and args.demo_mode:
         raise ValueError("后台模式与演示模式不能同时开启。")
-    parse_mcp_servers(args.mcp_servers, os.environ)
     args.multi_task = True
     args.countdown = 0
     args.ui = "plain"

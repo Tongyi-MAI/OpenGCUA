@@ -9,7 +9,6 @@ description = "Persistent code-execution Agent and recording studio for mai-ui m
 requires-python = ">=3.11"
 dependencies = [
   "httpx>=0.27",
-  "mcp==2.3.0",
   "json-repair>=0.30",
   "Pillow>=11",
   "pyautogui>=0.9.54",
@@ -33,9 +32,6 @@ py-modules = [
   "gui_agent",
   "llm_entry",
   "model_stream",
-  "mcp_config",
-  "mcp_broker",
-  "mcp_smoke",
   "model_metrics",
   "llm_compaction",
   "rollout_data",

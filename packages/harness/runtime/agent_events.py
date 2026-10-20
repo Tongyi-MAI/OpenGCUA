@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 import json
-import re
 import sys
 import time
 from types import MappingProxyType
@@ -17,37 +16,6 @@ from console_protocol import decode_console_message
 
 HUB_EVENT_PREFIX = "__MAI_HUB_EVENT_V1__ "
 HUB_CODE_EVENTS = frozenset({"code_start", "code_delta", "code_end", "code_reset"})
-HUB_MCP_EVENTS = frozenset({"mcp_status"})
-
-
-def mcp_status_event(event: Mapping[str, Any], step: int) -> AgentEvent | None:
-    """Reduce MCP activity to public status only; never forward result bodies."""
-    stages = {
-        "mcp_connecting": ("connecting", "connecting"),
-        "mcp_ready": ("ready", "ready"),
-        "mcp_call_started": ("running", "running"),
-        "mcp_call_failed": ("failed", "failed"),
-    }
-    kind = event.get("type")
-    if kind not in stages:
-        return None
-    server = event.get("server")
-    if not isinstance(server, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", server):
-        return None
-    stage, verb = stages[kind]
-    payload: dict[str, str] = {"stage": stage, "server": server}
-    tool = event.get("tool")
-    if isinstance(tool, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", tool):
-        payload["tool"] = tool
-    code = event.get("code")
-    if code in {"MCP_NOT_CONFIGURED", "MCP_TOOL_DENIED", "MCP_SERVER_UNAVAILABLE",
-                "MCP_TIMEOUT", "MCP_TOOL_ERROR"}:
-        payload["code"] = code
-    label = f"{server}.{payload['tool']}" if "tool" in payload else server
-    text = f"MCP · {label} {verb}"
-    if "code" in payload:
-        text += f" ({payload['code']})"
-    return AgentEvent("mcp_status", text, step, payload)
 
 
 def model_status_event(event: Mapping[str, Any], step: int) -> dict[str, Any] | None:
@@ -93,7 +61,7 @@ def decode_hub_event(line: str) -> dict[str, Any] | None:
         event = json.loads(line[len(HUB_EVENT_PREFIX):])
     except json.JSONDecodeError as exc:
         raise ValueError("invalid hub event JSON") from exc
-    if not isinstance(event, dict) or event.get("type") not in HUB_CODE_EVENTS | HUB_MCP_EVENTS | {"model_status", "skill_loaded"}:
+    if not isinstance(event, dict) or event.get("type") not in HUB_CODE_EVENTS | {"model_status", "skill_loaded"}:
         raise ValueError("invalid hub event type")
     if type(event.get("step")) is not int or event["step"] < 0:
         raise ValueError("invalid hub event step")
@@ -103,10 +71,6 @@ def decode_hub_event(line: str) -> dict[str, Any] | None:
         isinstance(event.get(key), str) and event[key] for key in ("name", "source")
     ):
         raise ValueError("invalid skill load event")
-    if event.get("type") == "mcp_status" and not all(
-        isinstance(event.get(key), str) and event[key] for key in ("stage", "server")
-    ):
-        raise ValueError("invalid MCP status event")
     index = event.get("block_index")
     if index is not None and (type(index) is not int or index < 1):
         raise ValueError("invalid hub event block index")
@@ -244,12 +208,6 @@ class PlainFrontend:
         if event.kind == "skill_loaded" and self.hub_events and event.step is not None:
             frame = {"type": "skill_loaded", "step": event.step, "text": event.text,
                      "name": event.payload.get("name"), "source": event.payload.get("source")}
-            print(HUB_EVENT_PREFIX + json.dumps(frame, ensure_ascii=False), flush=True, file=self.stdout)
-            return
-        if event.kind == "mcp_status" and self.hub_events and event.step is not None:
-            frame = {"type": "mcp_status", "step": event.step, "text": event.text,
-                     **{key: event.payload[key] for key in ("stage", "server", "tool", "code")
-                        if key in event.payload}}
             print(HUB_EVENT_PREFIX + json.dumps(frame, ensure_ascii=False), flush=True, file=self.stdout)
             return
         if event.kind in HUB_CODE_EVENTS:

@@ -852,8 +852,6 @@ class RichTerminalFrontend:
                 "waiting": "waiting for API", "generating": "API responding",
                 "validating": "validating reply", "retrying": "retrying API",
             }.get(stage, "")
-        elif kind == "mcp_status":
-            self._append(event.text + "\n")
         elif kind == "reasoning_delta":
             if self.show_reasoning:
                 if not self._reasoning_open:
