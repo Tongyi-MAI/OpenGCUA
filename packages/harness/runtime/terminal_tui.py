@@ -139,6 +139,14 @@ TERMINAL_STYLE = Style.from_dict({
 })
 
 
+# /status 只展示这些宿主发布的数值字段，未知字段不进入本地状态。
+_CONTEXT_STATUS_KEYS = (
+    "input_tokens", "reserve_tokens", "total_tokens", "context_limit", "heuristic_input_tokens",
+    "estimate_source", "components", "total_turns", "visible_turns", "summary_cutoff",
+    "image_count", "memory_count", "active_skill", "risk_index",
+)
+
+
 def resolve_ui_mode(
     requested: str, *, stdin_tty: bool, stdout_tty: bool, term: str | None,
 ) -> UiMode:
@@ -163,6 +171,7 @@ class RichTerminalFrontend:
         self.phase = "waiting"
         self.step: int | None = None
         self.foreground_consent = "unset"
+        self.context_status: dict | None = None
         self._transcript = ""
         self._interaction = TerminalInteraction()
         self._skill_completer = SlashCommandCompleter()
@@ -585,6 +594,40 @@ class RichTerminalFrontend:
         if self._application.is_running:
             self._application.exit()
 
+    def _context_status_text(self) -> str:
+        """只格式化宿主已发布的数值；不重算、不联网、不发送给模型。"""
+        status = self.context_status
+        if not status:
+            return "Context: (no planning request yet)\n"
+
+        def number(key: str, source: dict = status) -> str:
+            value = source.get(key)
+            return f"{value:,}" if type(value) is int else "?"
+
+        total, limit = status.get("total_tokens"), status.get("context_limit")
+        share = (f"{total / limit:.1%}" if type(total) is int and type(limit) is int and limit > 0 else "?")
+        label = ("calibrated from last usage" if status.get("estimate_source") == "usage_delta"
+                 else "local estimate")
+        components = status.get("components") if isinstance(status.get("components"), dict) else {}
+        risk = status.get("risk_index") if isinstance(status.get("risk_index"), dict) else {}
+        summary = status.get("summary_cutoff")
+        lines = [
+            f"Context: {number('total_tokens')} / {number('context_limit')} tokens ({share}, {label})"
+            f" · input {number('input_tokens')} + reserve {number('reserve_tokens')}",
+            # 分项只解释本地启发式总量，校准后的 input 没有可信分项。
+            f"  heuristic {number('heuristic_input_tokens')}: text {number('text', components)}"
+            f" · images {number('images', components)} · opaque reasoning {number('opaque_reasoning', components)}"
+            f" · overhead {number('overhead', components)}",
+            f"  turns {number('visible_turns')}/{number('total_turns')} kept"
+            + (f" · summary covers first {summary:,}" if type(summary) is int and summary > 0 else " · no summary")
+            + f" · images {number('image_count')} · memory {number('memory_count')}"
+            + f" · skill: {status.get('active_skill') or '-'}"
+            + (f" · unverified actions {number('entries', risk)}"
+               + (f" ({number('omitted', risk)} omitted)" if risk.get("omitted") else "")
+               if risk.get("entries") else ""),
+        ]
+        return "\n".join(lines) + "\n"
+
     def _local_command(self, value: str) -> bool:
         command = value.strip().lower()
         if command == "/help":
@@ -606,7 +649,8 @@ class RichTerminalFrontend:
                          + " · Phase: " + self.phase
                          + " · Queued: " + str(len(self._interaction.queued_items()) + len(self._ready_direct)
                                                + int(self._pending_correction is not None))
-                         + " · Foreground: " + self.foreground_consent + "\n")
+                         + " · Foreground: " + self.foreground_consent + "\n"
+                         + self._context_status_text())
             return True
         if command == "/queue":
             queued = list(self._ready_direct) + list(self._interaction.queued_items())
@@ -849,6 +893,8 @@ class RichTerminalFrontend:
             state = event.payload.get("state")
             if state in {"unset", "allowed", "denied"}:
                 self.foreground_consent = str(state)
+        elif kind == "context_status":
+            self.context_status = {key: event.payload.get(key) for key in _CONTEXT_STATUS_KEYS}
         elif kind == "phase":
             self.phase = str(event.payload.get("phase") or event.text or "working")
             self.step = event.step

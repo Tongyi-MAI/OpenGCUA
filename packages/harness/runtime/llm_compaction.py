@@ -156,6 +156,24 @@ def _source_data(value: Any) -> Any:
     return value
 
 
+def _omitted_counts(value: Any, counts: dict | None = None) -> dict:
+    """只统计 _source_data 会移除的结构化节点，不读取图片数据。"""
+    counts = {"image_items": 0, "non_source_fields": 0} if counts is None else counts
+    if isinstance(value, dict):
+        if value.get("type") in ("image", "image_url", "image_ref", "input_image", "screenshot"):
+            counts["image_items"] += 1
+            return counts
+        for key, child in value.items():
+            if key in _NON_SOURCE_KEYS:
+                counts["non_source_fields"] += 1
+            else:
+                _omitted_counts(child, counts)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _omitted_counts(child, counts)
+    return counts
+
+
 def _records(context: Any, start: int, end: int) -> list[dict]:
     records = context.compaction_records(start, end)
     if (not isinstance(records, list) or len(records) != end - start
@@ -431,6 +449,11 @@ async def maybe_compact(
             record.update(
                 status="completed", cutoff_after=cutoff, summary=summary,
                 revision=candidate.revision, source_digest=candidate.source_digest,
+                # 只记录实际覆盖范围与结构化省略；不推断摘要是否遗漏事实。
+                coverage={
+                    "source_turns": [old.cutoff, cutoff], "kept_turns": total - cutoff,
+                    "omitted": _omitted_counts(source[:cutoff - old.cutoff]),
+                },
             )
             return finish()
     except asyncio.CancelledError:

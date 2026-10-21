@@ -8,7 +8,8 @@ from typing import Any
 
 
 __all__ = [
-    "normalize_usage", "estimate_messages_tokens", "TokenEstimator", "aggregate_attempts",
+    "normalize_usage", "estimate_messages_tokens", "estimate_messages_components",
+    "count_message_images", "TokenEstimator", "aggregate_attempts",
     "compact_step_metrics", "expand_step_metrics",
 ]
 
@@ -78,54 +79,83 @@ def _text_tokens(text: str) -> int:
     return (ascii_count + 3) // 4 + len(text) - ascii_count
 
 
+def _is_image(content: dict) -> bool:
+    return (content.get("type") in ("image_ref", "image_url", "image", "input_image")
+            or "image_ref" in content or "image_url" in content)
+
+
+def _content_counts(content: Any) -> tuple[int, int]:
+    """返回 (文本 token, 图片数)；图片只按类型判别，不进入 URL/base64。"""
+    if isinstance(content, str):
+        return _text_tokens(content), 0
+    if isinstance(content, (list, tuple)):
+        parts = [_content_counts(part) for part in content]
+    elif isinstance(content, dict):
+        if _is_image(content):
+            return 0, 1
+        if content.get("type") == "text":
+            return _content_counts(content.get("text", ""))
+        parts = [_content_counts(value) for value in content.values()]
+    else:
+        return 0, 0
+    return sum(text for text, _ in parts), sum(images for _, images in parts)
+
+
+def _replay_tokens(message: dict) -> int:
+    output = message.get("response_output")
+    # The assistant text is already counted from `content`; count only the
+    # opaque reasoning state that the Responses request additionally replays.
+    response_tokens = 0
+    if isinstance(output, list):
+        response_tokens = sum(
+            _text_tokens(item["encrypted_content"])
+            for item in output if isinstance(item, dict)
+            and item.get("type") == "reasoning"
+            and isinstance(item.get("encrypted_content"), str)
+        )
+    native = message.get("anthropic_content")
+    anthropic_tokens = 0
+    if isinstance(native, list):
+        anthropic_tokens = sum(
+            _text_tokens(value)
+            for block in native if isinstance(block, dict)
+            and block.get("type") in ("thinking", "redacted_thinking")
+            for value in (block.get("thinking"), block.get("signature"), block.get("data"))
+            if isinstance(value, str)
+        )
+    return response_tokens + anthropic_tokens
+
+
+def estimate_messages_components(messages: list[dict], image_token_estimate: int = 1600) -> dict:
+    """同一启发式的纯数值分项；四项之和精确等于 estimate_messages_tokens。
+
+    opaque_reasoning 只计 Responses encrypted_content 与 Anthropic thinking/signature/data，
+    overhead 是每消息 4 加序列 2。只读，不修改消息或 provider 原始回放。
+    """
+    _require_integer(image_token_estimate, "image_token_estimate", 1)
+    text = images = opaque = 0
+    for message in messages:
+        message_text, message_images = _content_counts(message.get("content"))
+        text += message_text
+        images += message_images
+        opaque += _replay_tokens(message)
+    return {
+        "text": text, "images": images * image_token_estimate,
+        "opaque_reasoning": opaque, "overhead": 2 + 4 * len(messages),
+    }
+
+
+def count_message_images(messages: list[dict]) -> int:
+    """按与估算相同的类型规则数图片引用，不读取图像数据。"""
+    return sum(_content_counts(message.get("content"))[1] for message in messages)
+
+
 def estimate_messages_tokens(messages: list[dict], image_token_estimate: int = 1600) -> int:
     """迁移原字符 fallback：ASCII/4 向上取整，非 ASCII 每字符一个。
 
     每消息加 4，整个序列加 2。图片只读类型判别，不遍历 URL/base64，不执行 I/O。
     """
-    _require_integer(image_token_estimate, "image_token_estimate", 1)
-
-    def content_tokens(content: Any) -> int:
-        if isinstance(content, str):
-            return _text_tokens(content)
-        if isinstance(content, (list, tuple)):
-            return sum(content_tokens(part) for part in content)
-        if isinstance(content, dict):
-            if content.get("type") in ("image_ref", "image_url", "image", "input_image"):
-                return image_token_estimate
-            if "image_ref" in content or "image_url" in content:
-                return image_token_estimate
-            if content.get("type") == "text":
-                return content_tokens(content.get("text", ""))
-            return sum(content_tokens(value) for value in content.values())
-        return 0
-
-    def replay_tokens(message: dict) -> int:
-        output = message.get("response_output")
-        # The assistant text is already counted from `content`; count only the
-        # opaque reasoning state that the Responses request additionally replays.
-        response_tokens = 0
-        if isinstance(output, list):
-            response_tokens = sum(
-                _text_tokens(item["encrypted_content"])
-                for item in output if isinstance(item, dict)
-                and item.get("type") == "reasoning"
-                and isinstance(item.get("encrypted_content"), str)
-            )
-        native = message.get("anthropic_content")
-        anthropic_tokens = 0
-        if isinstance(native, list):
-            anthropic_tokens = sum(
-                _text_tokens(value)
-                for block in native if isinstance(block, dict)
-                and block.get("type") in ("thinking", "redacted_thinking")
-                for value in (block.get("thinking"), block.get("signature"), block.get("data"))
-                if isinstance(value, str)
-            )
-        return response_tokens + anthropic_tokens
-
-    return 2 + sum(4 + content_tokens(message.get("content")) + replay_tokens(message)
-                   for message in messages)
+    return sum(estimate_messages_components(messages, image_token_estimate).values())
 
 
 def _require_purpose(purpose: Any) -> None:
@@ -170,7 +200,8 @@ class TokenEstimator:
         _require_purpose(purpose)
         _require_integer(reserve_tokens, "reserve_tokens", 0)
         _require_integer(context_limit, "context_limit", 1)
-        heuristic = estimate_messages_tokens(messages, self.image_token_estimate)
+        components = estimate_messages_components(messages, self.image_token_estimate)
+        heuristic = sum(components.values())
         anchor = self._anchors.get(purpose)
         input_tokens, delta = heuristic, None
         source, reason = "heuristic", "no_anchor"
@@ -193,6 +224,8 @@ class TokenEstimator:
             "delta_tokens": delta,
             "anchor_attempt_id": anchor["attempt_id"] if anchor is not None else None,
             "reason": reason,
+            # 分项永远只解释 heuristic_input_tokens；usage_delta 校准量没有可信的分项。
+            "components": components, "components_source": "heuristic",
         }
 
     def observe(

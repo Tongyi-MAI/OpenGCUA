@@ -236,7 +236,8 @@ class PlainFrontend:
             print(ACTION_LABELS.get(str(event.payload.get("stage")), event.text) + " · "
                   + str(event.payload.get("action_id", "")), flush=True, file=target)
             return
-        if event.kind == "foreground_consent":
+        if event.kind in {"foreground_consent", "context_status"}:
+            # 纯状态投影；context_status 由交互式 /status 读取，纯文本流不打印 kind 名。
             return
         if event.kind in {"skills_catalog", "skill_consumed"} and not event.text:
             return

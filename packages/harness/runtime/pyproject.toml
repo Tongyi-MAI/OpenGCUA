@@ -34,6 +34,7 @@ py-modules = [
   "model_stream",
   "model_metrics",
   "llm_compaction",
+  "context_risk",
   "rollout_data",
   "code_executor",
   "code_runtime",
