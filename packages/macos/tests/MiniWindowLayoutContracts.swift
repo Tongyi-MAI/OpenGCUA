@@ -13,6 +13,8 @@ enum TaskPhase { case idle, running, paused, waiting, completed, failed, stopped
     var phase = TaskPhase.idle, voiceMode = false, recording = false, speechPending = false
     var tint = Color.blue, speechStatus = "Ready", taskProgressDetail = ""
     var taskProgressTitle = "Waiting for API", currentIntent = "Open DingTalk meeting room booking", step = 3
+    var taskProgressIndeterminate: Bool { phase == .running }
+    var taskProgressSymbol = "clock"
     @Published var foregroundWarning = ""
     var progressBubbleHeight: CGFloat { foregroundWarning.isEmpty ? 44 : 72 }
     var colorScheme: ColorScheme? = .light

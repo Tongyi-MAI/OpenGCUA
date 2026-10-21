@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import queue
 import signal
 import subprocess
 import sys
@@ -30,17 +29,38 @@ sys.path.insert(0, str(REPO))
 
 import console_server  # noqa: E402
 import demo_hud  # noqa: E402
-from agent_events import HUB_EVENT_PREFIX, decode_hub_event  # noqa: E402
+from agent_events import HUB_EVENT_PREFIX, decode_hub_event as _decode_legacy_hub_event  # noqa: E402
 from mobile_bridge import MOBILE_ROOT, SERVER_VERSION, MobileBridge  # noqa: E402
+
+
+def decode_hub_event(line: str) -> dict | None:
+    """共享解码器升级前接受任意合法 v1；旧 code/model frames 仍交给原解码器。"""
+    if not line.startswith(HUB_EVENT_PREFIX):
+        return None
+    try:
+        event = json.loads(line[len(HUB_EVENT_PREFIX):])
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid hub event JSON") from exc
+    if isinstance(event, dict) and "schema_version" in event:
+        if not console_server.is_v1_envelope(event):
+            raise ValueError("invalid hub v1 envelope")
+        return event
+    return _decode_legacy_hub_event(line)
 
 
 class HubSession(console_server.Session):
     """单会话变体：延迟到首条指令再启动；不做 Space 锚定、不限制 foreground（录制要看真实操作）。"""
 
-    def push(self, event: dict) -> None:
-        if event.get("type") == "model_status":
-            self.model_request = dict(event)
-        super().push(event)
+    def _project_locked(self, event: dict) -> None:
+        if event.get("origin") != "hub_compat" and event["kind"] not in {"stdout", "stream"}:
+            self.structured_semantics_seen = True
+        if getattr(self, "structured_semantics_seen", False) and event.get("origin") == "hub_compat":
+            if event["kind"] in {"stdout", "stream"}:
+                event["legacy_semantics_suppressed"] = True
+        if not (getattr(self, "structured_semantics_seen", False)
+                and event.get("origin") == "hub_compat" and event["kind"] == "state"):
+            super()._project_locked(event)
+        self.model_request = self.projection["model_status"]
 
     def _push_line(self, text: str) -> None:
         if text.startswith(HUB_EVENT_PREFIX):
@@ -50,6 +70,16 @@ class HubSession(console_server.Session):
                 return
             if event is not None:
                 self.push(event)
+            return
+        if getattr(self, "structured_semantics_seen", False):
+            text = text.rstrip("\n")
+            if text.startswith("Trajectory: "):
+                self.run_dir = text[len("Trajectory: "):].strip()
+            elif text.startswith("Trajectory saved to: "):
+                self.run_dir = str(Path(text[len("Trajectory saved to: "):].strip()).parent)
+            if text:
+                # 人类日志仍可调试，但不再推断 phase/intent/answer，避免重复语义渲染。
+                self.push({"type": "stdout", "text": text, "legacy_semantics_suppressed": True})
             return
         super()._push_line(text)
 
@@ -148,6 +178,10 @@ class HubSession(console_server.Session):
             self.proc = None
             self.run_dir = ""
             self.status = "idle"
+            with self._event_ready:
+                self.projection = self._empty_projection()
+                self.structured_semantics_seen = False
+                self.model_request = None
 
     def abort(self) -> bool:
         """中止本轮（SIGUSR1）：只取消当前规划，会话进程与上下文保留。"""
@@ -197,21 +231,39 @@ class Hub:
             raise RuntimeError("End the agent session before changing its phone target")
         self.session.hub_config["mobile_serial"] = serial
 
+    def _with_event_view(self, state: dict) -> dict:
+        view = self.session.event_view()
+        state.update(event_cursor=view["cursor"], event_state=view["state"],
+                     event_view_only=True, event_authoritative=False,
+                     structured_semantics=view["structured_semantics"])
+        if state["structured_semantics"]:
+            projection = view["state"]
+            state["phase"] = projection["phase"] or state.get("phase")
+            state["model_request"] = projection["model_status"]
+            intent, question, terminal = (projection[key] or {} for key in
+                                          ("last_intent", "question", "terminal"))
+            state["intent"] = intent.get("intent") or intent.get("text") or ""
+            state["ask_user"] = question.get("question") or question.get("text") or None
+            state["answer"] = terminal.get("answer") or (
+                terminal.get("text") if terminal.get("kind") == "answer" else None)
+        return state
+
     def state(self) -> dict:
         run_dir = self.session.run_dir
         if not run_dir:
             # gui-only 等无 traj 的 agent 也必须有 session_status，否则前端按钮/发送锁全死。
-            return {"ok": False, "error": "尚未启动：在右侧输入第一条指令即可开始",
+            return self._with_event_view({"ok": False, "error": "尚未启动：在右侧输入第一条指令即可开始",
                     "task": self.session.first_message or "", "status": self.session.status,
                     "session_status": self.session.status, "phase": None, "answer": None,
                     "agent_mode": getattr(self.session, "hub_config", {}).get("agent_mode", "mai-ui"),
                     "background_mode": bool(self.session.config.get("background_mode")),
-                    "demo_mode": bool(self.session.config.get("demo_mode"))}
+                    "demo_mode": bool(self.session.config.get("demo_mode"))})
         traj = Path(run_dir) / "traj.json"
         try:
             data = json.loads(traj.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            return {"ok": False, "error": f"trajectory 未就绪：{exc}", "status": self.session.status}
+            return self._with_event_view({"ok": False, "error": f"trajectory 未就绪：{exc}",
+                                          "status": self.session.status, "session_status": self.session.status})
         state = demo_hud.build_hud_state(data, traj)
         state["session_status"] = self.session.status
         state["model_request"] = getattr(self.session, "model_request", None)
@@ -223,7 +275,7 @@ class Hub:
         state["agent_mode"] = getattr(self.session, "hub_config", {}).get("agent_mode", "mai-ui")
         state["background_mode"] = bool(self.session.config.get("background_mode"))
         state["demo_mode"] = bool(self.session.config.get("demo_mode"))
-        return state
+        return self._with_event_view(state)
 
 
 HUB: Hub | None = None
@@ -297,30 +349,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HUB.state())
         elif self.path == "/api/schema":
             self._json(HUB.schema)
-        elif self.path == "/api/events":
-            session = HUB.session
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            backlog, subscriber = session.subscribe_events()
-            try:
-                for event in backlog:
-                    self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
-                self.wfile.flush()
-                while True:
-                    try:
-                        event = subscriber.get(timeout=15)
-                    except queue.Empty:
-                        self.wfile.write(b": keepalive\n\n")
-                        self.wfile.flush()
-                        continue
-                    self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
-                    self.wfile.flush()
-            except (BrokenPipeError, OSError):
-                pass
-            finally:
-                session.unsubscribe_events(subscriber)
+        elif route == "/api/events":
+            console_server.serve_event_stream(self, HUB.session)
         else:
             self._json({"error": "not found"}, 404)
 
@@ -465,6 +495,7 @@ body { display: flex; flex-direction: column; background: radial-gradient(1200px
 .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .pill.executing::before { animation: blink 1.2s infinite; }
 .pill.attention { color: var(--warn); border-color: #4d3a12; }
+.pill.aborted { color: var(--mut); border-color: var(--line2); }
 #steprow { display: flex; align-items: center; gap: 12px; }
 #stepnum { font: 750 28px/1 var(--mono); color: var(--cy); letter-spacing: -1px; }
 .panel { background: var(--card2); border: 1px solid var(--line); border-radius: 11px; padding: 9px 11px; }
@@ -510,8 +541,9 @@ body { display: flex; flex-direction: column; background: radial-gradient(1200px
 .stepcard .row .n { font: 700 10.5px var(--mono); color: var(--te); flex: none; }
 .stepcard .row .x { color: #cfe9ec; white-space: pre-wrap; }
 .stepcard.live { border-left-color: var(--te); }
-#modelstatus { padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
+#modelstatus, #actionstatus, #recoveryreport { padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
   color: var(--cy); font: 400 12px/1.6 var(--sans); white-space: pre-wrap; }
+#recoveryreport { color: var(--warn); max-height: 160px; overflow-y: auto; }
 #modelstatus[data-stage="retrying"], #modelstatus[data-stage="error"] { color: #f5bd62; border-color: #745a30; }
 #inputwrap { border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 #cmd { width: 100%; resize: none; height: 68px; font: 400 13px/1.6 -apple-system, sans-serif;
@@ -601,6 +633,8 @@ if (location.pathname.replace(/\/+$/, '') === '/panel' || /[?&]mode=panel\b/.tes
       <div id="steprow"><div><div id="stepnum">00</div><div class="lbl">step</div></div>
         <div style="flex:1"><div class="lbl" id="phtext">ready</div></div></div>
       <div id="modelstatus" role="status" aria-live="polite" hidden></div>
+      <div id="actionstatus" role="status" aria-live="polite" hidden></div>
+      <div id="recoveryreport" role="note" aria-label="历史动作对账（只读）" hidden></div>
       <div class="panel" id="intentpanel"><div class="lbl">intent</div>
         <div class="body" id="intents"><div class="intent"><span class="x" style="color:var(--faint)">等待首条指令…</span></div></div></div>
       <div class="panel grow"><div class="lbl">thinking</div><div class="body" id="think">—</div></div>
@@ -644,7 +678,7 @@ let hudState = null; const chatLog = []; let compRaf = null;
 let lastSeq = -1, lastAsk = '', lastAnswer = '', guiReasoningText = '';
 window.__guiStep = -1;
 const stepCards = new Map();          // step -> DOM 卡片（聊天流内按步渲染）
-const PH = {thinking: 'THINKING', executing: 'EXECUTING', completed: 'COMPLETED', attention: 'ATTENTION'};
+const PH = {thinking: 'THINKING', executing: 'EXECUTING', completed: 'COMPLETED', attention: 'ATTENTION', aborted: 'ABORTED'};
 const esc = s => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
 let prevScrollHeight = 0;  // 用上一次内容高度推算“追加前用户是否在底部”，不依赖 scroll 事件
@@ -677,6 +711,9 @@ function liveStream(text) {
   if (last && last.cls === 'live') last.text = text;
   scrollChat();
 }
+function trimConversation() {
+  while ($('msgs').children.length > 200) $('msgs').firstChild.remove();
+}
 function bubble(cls, text) {
   liveEnd();
   chatLog.push({cls: cls, text: String(text == null ? '' : text)});
@@ -685,7 +722,7 @@ function bubble(cls, text) {
   const d = document.createElement('div');
   d.className = 'bub ' + cls;
   d.textContent = text;
-  $('msgs').appendChild(d); scrollChat();
+  $('msgs').appendChild(d); trimConversation(); scrollChat();
 }
 function stepCard(step) {
   liveEnd();
@@ -696,7 +733,11 @@ function stepCard(step) {
     card.className = 'stepcard live';
     card.innerHTML = `<div class="h"><span class="sn">STEP ${String(step).padStart(2, '0')}</span>
       <span class="ph">planning…</span></div><div class="list"></div>`;
-    $('msgs').appendChild(card); stepCards.set(step, card); scrollChat();
+    $('msgs').appendChild(card); stepCards.set(step, card);
+    while (stepCards.size > 64) {
+      const key = stepCards.keys().next().value; stepCards.get(key).remove(); stepCards.delete(key);
+    }
+    trimConversation(); scrollChat();
   }
   return card;
 }
@@ -839,6 +880,8 @@ $('newsess').onclick = async () => {
   clearView();
 };
 function clearView() {
+  resetSemanticView(); chatLog.length = 0; hudState = null;
+  $('actionstatus').hidden = true; $('actionstatus').textContent = '';
   currentModelRequest = null; modelSessionStatus = 'idle'; renderModelStatus();
   stepCards.clear(); lastAsk = ''; lastAnswer = ''; guiReasoningText = '';
   guiIntentCommitted.clear(); liveIntent.step = null; liveIntent.text = '';
@@ -919,6 +962,7 @@ function renderGuiIntent(step, intent, committed) {
   if (!Number.isInteger(shown) || shown < 1) return;
   const text = String(intent || '').slice(0, 2000);
   if (committed) guiIntentCommitted.set(shown, text);
+  while (guiIntentCommitted.size > 64) guiIntentCommitted.delete(guiIntentCommitted.keys().next().value);
   renderStep(shown, committed ? 'executing' : 'thinking',
     committed && text ? [{index: 1, intent: text}] : null, committed ? null : text);
   $('intents').innerHTML = text
@@ -987,6 +1031,7 @@ function renderCodePanel(s) {
   }
 }
 function handleCodePreview(ev) {
+  ev = {...ev, type: ev.kind || ev.type};
   if (ev.type === 'code_reset') {
     if (liveCode.step === null || Number(ev.step) >= liveCode.step) {
       liveCode.step = null; liveCode.blocks.clear(); liveCode.active = false; liveCode.ended = false;
@@ -998,10 +1043,227 @@ function handleCodePreview(ev) {
     liveCode.active = true;
     if (ev.type === 'code_start') { liveCode.blocks.set(index, ''); liveCode.ended = false; }
     if (ev.type === 'code_delta')
-      liveCode.blocks.set(index, (liveCode.blocks.get(index) || '') + String(ev.text || ''));
+      liveCode.blocks.set(index, ((liveCode.blocks.get(index) || '') + String(ev.text || '')).slice(-65536));
+    while (liveCode.blocks.size > 64) liveCode.blocks.delete(liveCode.blocks.keys().next().value);
     if (ev.type === 'code_end') liveCode.ended = true;
   }
   renderCodePanel(hudState || {});
+}
+// 共享 v1 语义：源 sequence 只过滤源迟到事件，seq/cursor 只负责 SSE 投递接续。
+const semanticView = {scope: null, completedTurns: new Map(), answers: new Map(), actions: new Map(),
+  sourceSequence: -1, sourceSession: null, cursor: -1, terminal: null, phase: null, structured: false,
+  recovery: null};
+const ACTION_LABELS = {waiting_resource:'等待资源', dispatching:'正在派发', running:'动作运行中',
+  receipt_received:'已收到回执（未验证）', outcome_unknown:'结果未知，需验证',
+  verification_failed:'验证失败', verification_pending:'等待验证', verified:'已验证'};
+// 与 console_server.terminal_status/terminal_state 同义：只有显式成功词算 completed，有 answer 不等于成功。
+const SUCCESS_STATUSES = ['success','succeeded','ok','done','completed'];
+const ABORTED_STATUSES = ['aborted','cancelled','canceled','interrupted','stopped'];
+const LEGACY_FINISHED_TEXT = [...SUCCESS_STATUSES, ...ABORTED_STATUSES, 'exited','failed','error',
+  'failure','stalled','max_steps','timeout'];
+const TURN_END_TYPES = ['answer','finished','turn_finished','aborted','interrupted','turn_complete','task_finished'];
+function terminalStatus(ev) {
+  const kind = ev.kind || ev.type;
+  if (['aborted','interrupted'].includes(kind)) return kind;
+  for (const key of ['status','state'])
+    if (typeof ev[key] === 'string' && ev[key].trim()) return ev[key].trim().toLowerCase().slice(0, 64);
+  const text = typeof ev.text === 'string' ? ev.text.trim().toLowerCase() : '';
+  return kind === 'finished' && LEGACY_FINISHED_TEXT.includes(text) ? text : null;
+}
+function terminalState(ev, previous) {
+  if (['completed','attention','aborted'].includes(ev.terminal_state)) return ev.terminal_state;
+  const status = terminalStatus(ev);
+  if (status === null && previous) return previous;
+  return SUCCESS_STATUSES.includes(status) ? 'completed' : ABORTED_STATUSES.includes(status) ? 'aborted' : 'attention';
+}
+// 历史动作对账只读展示：结果未知优先保留 64 条，计数覆盖全部；不改 phase/terminal，不发重试或授权。
+const RECOVERY_PRIORITY = {outcome_unknown:0, receipt_unverified:1, not_dispatched:2};
+const RECOVERY_LABELS = {outcome_unknown:'结果未知', receipt_unverified:'有回执未验证', not_dispatched:'未派发',
+  rejected:'已拒绝', cancelled_before_dispatch:'派发前取消'};
+function recoverySummary(ev, counts = null) {
+  const rows = (Array.isArray(ev.actions) ? ev.actions : []).filter(a => a && typeof a === 'object');
+  const count = status => rows.filter(a => a.status === status).length;
+  const actions = rows.map((a, i) => [RECOVERY_PRIORITY[a.status] ?? 3, i, a])
+    .sort((x, y) => x[0] - y[0] || x[1] - y[1]).slice(0, 64)
+    .map(([, , a]) => ({action_id:String(a.action_id ?? '').slice(0, 200), status:String(a.status ?? '').slice(0, 64),
+      operation:String(a.operation ?? '').slice(0, 200)}));
+  const total = Number(counts?.total ?? rows.length);
+  return {session_id:ev.session_id, event_id:ev.event_id, text:String(ev.text || '').slice(0, 4000), actions, total,
+    unknown:Number(counts?.unknown ?? count('outcome_unknown')),
+    unverified:Number(counts?.unverified ?? count('receipt_unverified')),
+    omitted:Math.max(0, total - actions.length)};
+}
+function renderRecoveryReport() {
+  const box = $('recoveryreport'), report = semanticView.recovery;
+  if (!report) { box.hidden = true; box.textContent = ''; return; }
+  const lines = report.actions.map(a =>
+    `${a.action_id} · ${RECOVERY_LABELS[a.status] || a.status}${a.operation ? ' · ' + a.operation : ''}`);
+  if (report.omitted > 0) lines.push(`另有 ${report.omitted} 项未列出`);
+  box.hidden = false;
+  box.textContent = `历史动作对账（只读，不会自动重试或授权）\n共 ${report.total} 项 · 结果未知 ${report.unknown}`
+    + ` · 有回执未验证 ${report.unverified}\n${lines.join('\n')}`;
+}
+function boundedSet(map, key, value) {
+  map.delete(key); map.set(key, value);
+  while (map.size > 64) map.delete(map.keys().next().value);
+}
+function scopeOf(ev) {
+  const current = semanticView.scope;
+  const sameSession = current && current.session_id === ev.session_id;
+  const turn = ev.turn_id ?? (sameSession ? current.turn_id : null);
+  const sameTurn = sameSession && current.turn_id === turn;
+  return {session_id:ev.session_id, turn_id:turn,
+    attempt_id:ev.attempt_id ?? (sameTurn ? current.attempt_id : null)};
+}
+function scopeKey(s) { return JSON.stringify([s.session_id, s.turn_id ?? null, s.attempt_id ?? null]); }
+function turnKey(s) { return JSON.stringify([s.session_id, s.turn_id ?? null]); }
+function rememberScope(scope, turnClosed) {
+  if (scope) boundedSet(semanticView.completedTurns, scopeKey(scope), {...scope, turn_closed:turnClosed});
+}
+function resetDeltas() {
+  liveEnd(); guiReasoningText = ''; liveIntent.step = null; liveIntent.text = '';
+  liveCode.step = null; liveCode.blocks.clear(); liveCode.active = false; liveCode.ended = false;
+  $('think').textContent = '—'; $('codebody').textContent = '等待 agent 写下本轮代码';
+  $('codestate').textContent = '';
+}
+function resetSemanticView() {
+  rememberScope(semanticView.scope, true);
+  semanticView.scope = null; semanticView.terminal = null; semanticView.phase = null;
+  semanticView.structured = false; semanticView.actions.clear();
+  semanticView.sourceSession = null; semanticView.sourceSequence = -1;
+  semanticView.recovery = null; renderRecoveryReport();
+}
+function acceptSemantic(ev) {
+  const scope = scopeOf(ev), previous = semanticView.scope;
+  if ([...semanticView.completedTurns.values()].some(s => turnKey(s) === turnKey(scope) &&
+      (s.turn_closed || scopeKey(s) === scopeKey(scope)))) return false;
+  if (semanticView.sourceSession === ev.session_id && Number(ev.sequence) <= semanticView.sourceSequence) return false;
+  if (ev.type === 'recovery_report' && previous && previous.session_id === ev.session_id) {
+    // 会话级只读帧不移动 turn/attempt scope。
+    semanticView.sourceSequence = Number(ev.sequence); return true;
+  }
+  if (previous && scopeKey(previous) !== scopeKey(scope)) {
+    const changedTurn = turnKey(previous) !== turnKey(scope);
+    if (previous.session_id !== scope.session_id) { semanticView.recovery = null; renderRecoveryReport(); }
+    rememberScope(previous, changedTurn); resetDeltas();
+    currentModelRequest = null;
+    if (changedTurn) {
+      semanticView.terminal = null; semanticView.actions.clear(); stepCards.clear();
+      lastAsk = ''; lastAnswer = ''; $('intents').innerHTML = ''; $('actionstatus').hidden = true;
+    }
+  }
+  semanticView.scope = scope; semanticView.structured = true;
+  semanticView.sourceSession = ev.session_id; semanticView.sourceSequence = Number(ev.sequence);
+  return !semanticView.terminal || [...TURN_END_TYPES, 'recovery_report', 'status', 'state'].includes(ev.type);
+}
+function renderSemanticPhase(value) {
+  const raw = String(value || 'thinking');
+  const phase = ({planning:'thinking', compaction:'thinking', execution:'executing',
+    postprocess:'verifying', recovery:'attention'})[raw] || raw;
+  semanticView.phase = phase;
+  const attention = ['attention','outcome_unknown','verification_failed'].includes(phase);
+  const css = attention ? 'attention' : ['completed','aborted'].includes(phase) ? phase
+    : ['executing','dispatching','running'].includes(phase) ? 'executing' : 'thinking';
+  $('phase').textContent = ACTION_LABELS[phase] || PH[phase] || phase.toUpperCase();
+  $('phase').className = 'pill ' + css;
+  $('phtext').textContent = ACTION_LABELS[phase] || phase;
+  setSendLock(!['completed','aborted','waiting_user','idle'].includes(phase));
+}
+function actionKey(ev) { return String(ev.action_id || ev.resource_id || ev.step_id || ev.step || 'current'); }
+function renderActionStatus(ev) {
+  const status = ev.stage || ev.status || ev.action_status || ev.text || 'pending';
+  boundedSet(semanticView.actions, actionKey(ev), ev);
+  $('actionstatus').hidden = false;
+  $('actionstatus').textContent = `${ev.action_id || ev.resource_id || 'action'} · ${ACTION_LABELS[status] || status}`;
+  renderSemanticPhase(status);
+}
+function renderSemanticAnswer(ev, force = false) {
+  const key = turnKey(semanticView.scope || ev);
+  const answer = String(ev.text || ev.answer || '');
+  if (answer && (force || !semanticView.answers.has(key))) {
+    boundedSet(semanticView.answers, key, answer); lastAnswer = answer; bubble('ag', answer);
+  }
+}
+function renderSemanticTerminal(ev, force = false) {
+  const previous = semanticView.terminal, kind = ev.kind || ev.type;
+  const fresh = previous?.event_id !== ev.event_id;
+  // answer+finished 同轮共用一个终态：缺状态的后续帧沿用前一状态，回答按 turn 只渲染一次。
+  const state = terminalState(ev, fresh ? previous?.terminal_state : null);
+  semanticView.terminal = {...ev, terminal_state: state}; lastAsk = ''; liveEnd();
+  currentModelRequest = null; renderModelStatus();
+  if (kind === 'answer') renderSemanticAnswer({...ev, text: ev.answer || ev.text}, force);
+  else if (ev.answer) renderSemanticAnswer({...ev, text: ev.answer}, force);
+  const ok = state === 'completed';
+  renderSemanticPhase(state); setSendLock(false);
+  $('conn').textContent = ok ? 'READY · 本轮完成，可发下一条'
+    : state === 'aborted' ? '本轮已中止 · 上下文保留，可发下一条' : '需要注意 · 见对话';
+  const note = kind === 'answer' ? '' : String(ev.text || '').trim();
+  const shown = semanticView.answers.get(turnKey(semanticView.scope || ev));
+  if (!ok && note && note !== shown && (force || (fresh && previous?.terminal_state !== state)))
+    bubble('sys', (LEGACY_FINISHED_TEXT.includes(note.toLowerCase()) ? '结束状态：' + note : note).slice(0, 600));
+}
+function applyProjection(state, cursor, reset = false) {
+  if (cursor < semanticView.cursor) return;
+  if (reset) clearView();
+  semanticView.cursor = cursor;
+  semanticView.completedTurns.clear();
+  for (const scope of (state.completed_turns || []).slice(-64))
+    boundedSet(semanticView.completedTurns, scopeKey(scope), scope);
+  semanticView.scope = state.session_id ? {session_id:state.session_id, turn_id:state.turn_id,
+    attempt_id:state.attempt_id} : null;
+  semanticView.structured = !!state.session_id;
+  semanticView.sourceSession = state.session_id;
+  semanticView.sourceSequence = Number(state.source_sequence ?? -1);
+  if (!state.terminal) semanticView.terminal = null;
+  resetDeltas(); semanticView.actions.clear();
+  const report = state.recovery_report;
+  semanticView.recovery = report ? recoverySummary(report, report) : null; renderRecoveryReport();
+  for (const action of (state.actions || []).slice(-64)) renderActionStatus(action);
+  if (state.phase) renderSemanticPhase(state.phase);
+  if (state.step != null) $('stepnum').textContent = String(Number(state.step) + (window.__guiOnly ? 1 : 0)).padStart(2, '0');
+  currentModelRequest = state.model_status; renderModelStatus();
+  const intent = state.last_intent;
+  if (intent) {
+    liveIntent.step = intent.step; liveIntent.text = String(intent.intent || intent.text || '');
+    $('intents').textContent = liveIntent.text;
+  }
+  if (state.question) {
+    const text = state.question.question || state.question.text || '';
+    if (reset || text !== lastAsk) { lastAsk = text; bubble('ask', text); }
+    setSendLock(false);
+  }
+  if (state.terminal) renderSemanticTerminal(state.terminal, reset);
+}
+function dispatchSemantic(ev) {
+  if (ev.type === 'recovery_report') { semanticView.recovery = recoverySummary(ev); renderRecoveryReport(); return true; }
+  if (ev.step != null) $('stepnum').textContent = String(ev.step).padStart(2, '0');
+  if (ev.type === 'phase') { renderSemanticPhase(ev.phase || ev.text); return true; }
+  if (['turn_started','task_started'].includes(ev.type)) { resetDeltas(); renderSemanticPhase('thinking'); return true; }
+  if (ev.type === 'action_status') { renderActionStatus(ev); return true; }
+  if (ev.type === 'question') {
+    const text = ev.question || ev.text;
+    if (text !== lastAsk) { lastAsk = text; bubble('ask', text); }
+    renderSemanticPhase('waiting_user'); return true;
+  }
+  if (TURN_END_TYPES.includes(ev.type)) {
+    renderSemanticTerminal(ev); return true;
+  }
+  if (ev.type === 'reasoning_delta') {
+    guiReasoningText = ((ev.start ? '' : guiReasoningText) + String(ev.text || '')).slice(-1400);
+    $('think').textContent = guiReasoningText; return true;
+  }
+  if (['intent_start','intent_delta','intent_end','intent_final','intent'].includes(ev.type)) {
+    if (ev.start || ev.type === 'intent_start' || liveIntent.step !== ev.step || liveIntent.block !== ev.block_index)
+      liveIntent.text = '';
+    liveIntent.step = ev.step; liveIntent.block = ev.block_index;
+    liveIntent.text = ev.type === 'intent_delta' ? (liveIntent.text + ev.text).slice(-4000)
+      : String(ev.intent || ev.text || liveIntent.text);
+    $('intents').textContent = liveIntent.text;
+    if (ev.step != null) renderStep(ev.step, 'thinking', null, liveIntent.text);
+    return true;
+  }
+  if (ev.type === 'intent_reset') { liveIntent.text = ''; $('intents').textContent = ''; return true; }
+  return ['stdout','stream','reasoning_end'].includes(ev.type);
 }
 // 页面加载时按服务端配置回显开关，避免 UI 与服务端状态不一致。
 fetch('/api/state', {cache: 'no-store'}).then(r => r.json()).then(s => {
@@ -1023,8 +1285,19 @@ $('demomode').onchange = () => { $('bgmode').checked = false;
   body: JSON.stringify({on: $('demomode').checked})}).then(r => r.json())
   .then(j => bubble('sys', '演示/前台模式：' + (j.demo_mode ? '开启（浏览器可见+前台真实键鼠优先，适合录制；新会话生效）' : '关闭（新会话生效）'))); };
 es.onmessage = e => {
-  const ev = JSON.parse(e.data);
-  if (ev.seq !== undefined) { if (ev.seq <= lastSeq) return; lastSeq = ev.seq; }
+  const raw = JSON.parse(e.data), ev = {...raw, type: raw.kind || raw.type};
+  const snapshot = ['snapshot','resync_snapshot'].includes(ev.type);
+  const cursor = Number(snapshot ? (ev.cursor ?? ev.seq ?? e.lastEventId) : (ev.seq ?? e.lastEventId));
+  if (Number.isFinite(cursor)) { if (cursor <= lastSeq) return; lastSeq = cursor; }
+  if (snapshot) {
+    applyProjection(ev.state || {}, cursor, true); return;
+  }
+  if (ev.legacy_semantics_suppressed) return;
+  const structured = ev.schema_version === 1 && ev.origin !== 'hub_compat';
+  if (structured) {
+    if (cursor <= semanticView.cursor || !acceptSemantic(ev)) return;
+    if (dispatchSemantic(ev)) return;
+  }
   const text = ev.text || '';
   if (ev.type === 'model_status') {
     modelSessionStatus = 'running'; handleModelStatus(ev); return;
@@ -1044,7 +1317,7 @@ es.onmessage = e => {
     return;
   }
   if (ev.type === 'gui_reasoning_delta') {
-    guiReasoningText += String(ev.delta || '');
+    guiReasoningText += String(ev.delta || ''); guiReasoningText = guiReasoningText.slice(-1400);
     $('think').textContent = guiReasoningText.slice(-1400);
     $('phase').textContent = 'THINKING'; $('phase').className = 'pill thinking';
     $('phtext').textContent = 'thinking';
@@ -1080,10 +1353,9 @@ es.onmessage = e => {
     return;
   }
   if (ev.type === 'answer') {
+    // 旧帧 answer 不带结束状态：只显示回答并解锁，完成/失败由后续 turn_complete 或 poll 决定。
     guiReasoningText = '';
     lastAnswer = text; bubble('ag', text); setSendLock(false);
-    $('phase').textContent = 'COMPLETED'; $('phase').className = 'pill completed';
-    $('phtext').textContent = 'completed';
     return;
   }
   if (ev.type === 'status' && (ev.status === 'exited' || ev.status === 'stopped')) {
@@ -1124,7 +1396,7 @@ es.onmessage = e => {
     renderStep(step, 'thinking', null, m[2]);
     return;
   }
-  if (/^\s*Agent>/.test(text)) { const ans = text.replace(/^\s*Agent>\s*/, ''); lastAnswer = ans; bubble('ag', ans); setSendLock(false); return; }
+  if (!semanticView.structured && /^\s*Agent>/.test(text)) { const ans = text.replace(/^\s*Agent>\s*/, ''); lastAnswer = ans; bubble('ag', ans); setSendLock(false); return; }
   if (ev.type === 'reset') { clearView(); bubble('sys', text.trim()); return; }
   if (ev.type === 'response_rejected') { bubble('sys', '模型输出格式异常（' + (ev.error || 'parse error') + '），已自动重试'); return; }
   if (ev.type === 'output_salvaged') {
@@ -1143,6 +1415,17 @@ async function poll() {
   try { s = await (await fetch('/api/state', {cache: 'no-store'})).json(); }
   catch (e) { setTimeout(poll, 1500); return; }
   const running = s.session_status === 'running';
+  if (s.structured_semantics || semanticView.structured) {
+    // 在线 SSE 保留完整 delta；poll 只在首屏或断线时恢复有界摘要，不拿旧轨迹覆盖语义。
+    if (s.event_state && (lastSeq < 0 || es.readyState !== 1) &&
+        Number(s.event_cursor) > Math.max(lastSeq, semanticView.cursor))
+      applyProjection(s.event_state, Number(s.event_cursor));
+    if (Number(s.event_cursor) >= lastSeq) {
+      modelSessionStatus = s.session_status; renderModelStatus();
+      $('abort').disabled = !running; $('endsess').disabled = !running;
+    }
+    setTimeout(poll, 1200); return;
+  }
   modelSessionStatus = s.session_status;
   if (s.model_request && (!currentModelRequest || Number(s.model_request.at_ms) >= Number(currentModelRequest.at_ms)))
     handleModelStatus(s.model_request, false);

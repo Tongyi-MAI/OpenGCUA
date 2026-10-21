@@ -147,6 +147,9 @@ impl MacosProvider {
                             .map(|i| format!("{}:{}:{i}", w.id, snapshot))
                             .unwrap_or(root.clone());
                         let role = text(row, "role");
+                        // Role-derived compatibility flag only. Cua 0.36 element rows carry no
+                        // AXValue settability, so the settable verdict stays unknown; any
+                        // undocumented row key is ignored rather than promoted to native.
                         let editable = matches!(
                             role,
                             "AXTextField" | "AXTextArea" | "AXSearchField" | "AXComboBox" | "AXSecureTextField"
@@ -184,6 +187,10 @@ impl MacosProvider {
                             .filter_map(action_name)
                             .map(|a| json!({"id":a}))
                             .collect::<Vec<_>>());
+                        // Cua omits `actions` when AXActionNames is empty or unread, so only
+                        // a nonempty list is a native report; absence proves nothing.
+                        let reported = row["actions"].as_array().is_some_and(|a| !a.is_empty());
+                        n["actions_source"] = json!(if reported { "native" } else { "unknown" });
                         n["target_token"] = json!(token);
                         n["target"] =
                             json!({"app_id":w.app_id,"window_id":w.id,"snapshot_id":snapshot});

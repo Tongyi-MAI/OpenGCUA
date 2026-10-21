@@ -220,8 +220,9 @@ def test_real_agent_hooks_pause_before_execution_ask_and_finish(tmp_path, monkey
         assert host.control.question_id
         await host.command({"command": "reply", "task_id": "a", "question_id": host.control.question_id, "text": "yes"})
         await wait_for_turn(events, 0)
-        assert events[-1]["state"] == "completed", events[-1]
-        assert events[-1]["text"] == "Verified result"
+        completed = next(e for e in reversed(events) if e["event"] == "turn_finished")
+        assert completed["state"] == "completed", completed
+        assert completed["text"] == "Verified result"
         assert len(calls) == 2 and not closed and not host.task.done()
         await host.command({"command": "end", "task_id": "a", "command_id": "end-turn"})
         assert closed and host.task.done()
@@ -290,7 +291,7 @@ def test_voice_receipts_follow_acceptance_and_never_ack_stale_task(tmp_path):
 
 async def wait_for_turn(events, index, task_id="a"):
     async def wait():
-        while not any(e["event"] == "turn_finished" and e["turn_index"] == index and e["task_id"] == task_id for e in events):
+        while not any(e["event"] == "turn_finished" and e["turn_index"] == index and e.get("native_task_id", e["task_id"]) == task_id for e in events):
             await asyncio.sleep(0.01)
     await asyncio.wait_for(wait(), 5)
 

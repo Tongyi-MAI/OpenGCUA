@@ -30,7 +30,9 @@ enum AppError: Error { case message(String) }
         let en = try PropertyListSerialization.propertyList(from: enData, format: nil) as! [String: String]
         let zh = try PropertyListSerialization.propertyList(from: zhData, format: nil) as! [String: String]
         precondition(Set(en.keys) == Set(zh.keys), "两种语言的本地化键必须完整对齐")
-        for key in ["会话", "不选", "允许前台操作（仅本实时会话）", "允许助手提问", "前台操作审批", "中止本轮", "继续队列", "手动压缩上下文", "显示推理", "显示代码", "诊断", "实际模型"] {
+        for key in ["会话", "不选", "允许前台操作（仅本实时会话）", "允许助手提问", "前台操作审批", "中止本轮", "继续队列", "手动压缩上下文", "显示推理", "显示代码", "诊断", "实际模型",
+                    "工具排队中", "工具派发中", "工具执行中", "已收到技术回执，尚未核验", "动作结果未知，请核实", "动作被拒绝", "最后动作 ID", "动作阶段", "执行 / 效果", "核验状态", "恢复动作快照（只读）",
+                    "刷新记忆目录", "确认记忆", "拒绝候选", "遗忘", "保存为候选，重新确认", "用户已确认（不代表业务已核验）", "上一页", "下一页"] {
             precondition(en[key]?.isEmpty == false && zh[key]?.isEmpty == false)
         }
         for (key, value) in en {
@@ -53,6 +55,11 @@ enum AppError: Error { case message(String) }
         let bundle = Bundle(url: directory)!
         precondition(L10n.text("中止本轮", language: "en", bundle: bundle) == "Interrupt turn")
         precondition(L10n.text("消息队列（%@）", arguments: ["2"], language: "en", bundle: bundle) == "Message queue (2)")
+        precondition(L10n.text("恢复报告：未核验 %@ 个，结果未知 %@ 个；请核实，不会自动重试。", arguments: ["2", "3"], language: "en", bundle: bundle) == "Recovery report: 2 unverified, 3 unknown outcomes. Please verify; no automatic retry.")
+        precondition(L10n.text("事件信封无效或版本不支持（schema_version：%@）；已忽略，不改变执行端状态。", arguments: ["2"], language: "en", bundle: bundle) == "Invalid event envelope or unsupported version (schema_version: 2). Ignored; host state is unchanged.")
+        precondition(L10n.text("长期记忆（候选 %@ · 已批准 %@）", arguments: ["2", "3"], language: "en", bundle: bundle) == "Long-term memory (candidates 2 · approved 3)")
+        precondition(L10n.text("未收到记忆操作确认，状态未确认；请刷新后核实，不要自动重发。", language: "zh-Hans", bundle: bundle) == "未收到记忆操作确认，状态未确认；请刷新后核实，不要自动重发。")
+        precondition(L10n.text("第 %@–%@ 条，共 %@ 条。", arguments: ["65", "128", "384"], language: "en", bundle: bundle) == "Items 65–128 of 384.")
         precondition(L10n.text("准备就绪", language: "en", bundle: bundle) == "Ready")
         precondition(L10n.text("准备就绪", language: "zh-Hans", bundle: bundle) == "准备就绪")
         precondition(L10n.text("Ready", language: "zh-Hans", bundle: bundle) == "准备就绪", "Cached UI status must switch back from English")

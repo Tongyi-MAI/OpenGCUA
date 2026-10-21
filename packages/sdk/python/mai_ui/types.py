@@ -108,6 +108,13 @@ class NodeAction:
 
 @dataclass(frozen=True, kw_only=True)
 class Node:
+    """AX capability fields carry provenance; absent provenance is ``unknown``.
+
+    ``editable`` with ``editable_source='role_hint'`` is a role-derived hint and
+    never proves a writable AXValue. ``value_settable`` is a verdict only when
+    ``value_settable_source='native'``. Empty ``actions`` prove nothing unless
+    ``actions_source='native'``.
+    """
     id: ID
     parent_id: ID | None
     window_id: ID | None
@@ -130,6 +137,10 @@ class Node:
     actions: tuple[NodeAction, ...]
     selection: Selection | None = None
     checked: bool | None = None
+    editable_source: Literal['native', 'role_hint', 'unknown'] = 'unknown'
+    value_settable: bool | None = None
+    value_settable_source: Literal['native', 'unknown'] = 'unknown'
+    actions_source: Literal['native', 'unknown'] = 'unknown'
 
 @dataclass(frozen=True, kw_only=True)
 class Frame:

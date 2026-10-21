@@ -35,7 +35,33 @@ pub fn normalize(row: &Value, captured_at: f64, revision: &Value, dirty: bool) -
         _ => Value::Null,
     };
     object.insert("selection".into(), selection);
+    capability_provenance(object);
     node
+}
+
+/// AX capability metadata is conservative: missing or unrecognized provenance
+/// is unknown, and only an explicit native report may carry a settable verdict.
+fn capability_provenance(object: &mut serde_json::Map<String, Value>) {
+    let source = |object: &serde_json::Map<String, Value>, key: &str, allowed: &[&str]| {
+        match object.get(key).and_then(Value::as_str) {
+            Some(value) if allowed.contains(&value) => value.to_owned(),
+            _ => "unknown".to_owned(),
+        }
+    };
+    let editable = if object.get("editable").is_some_and(Value::is_boolean) {
+        source(object, "editable_source", &["native", "role_hint"])
+    } else {
+        "unknown".into()
+    };
+    let actions = source(object, "actions_source", &["native"]);
+    let (verdict, settable) = match object.get("value_settable").filter(|v| v.is_boolean()) {
+        Some(v) if source(object, "value_settable_source", &["native"]) == "native" => (v.clone(), "native"),
+        _ => (Value::Null, "unknown"),
+    };
+    object.insert("editable_source".into(), json!(editable));
+    object.insert("actions_source".into(), json!(actions));
+    object.insert("value_settable".into(), verdict);
+    object.insert("value_settable_source".into(), json!(settable));
 }
 
 pub fn project(nodes: &[Value], indices: &[(u64, String)]) -> Vec<Value> {
@@ -64,7 +90,14 @@ pub fn project(nodes: &[Value], indices: &[(u64, String)]) -> Vec<Value> {
                 fields.push(format!("{key}={}", json!(value)));
             }
         }
-        for key in ["editable","focused","password"] { if node[key] == true { fields.push(key.into()); } }
+        for key in ["editable","focused","password"] {
+            if node[key] != true { continue; }
+            // A role-derived editable flag is a hint, never proof of a writable AXValue.
+            fields.push(if key == "editable" && node["editable_source"] == "role_hint" { "editable=role_hint".into() } else { key.into() });
+        }
+        if let Some(settable) = node["value_settable"].as_bool().filter(|_| node["value_settable_source"] == "native") {
+            fields.push(format!("value_settable={settable}"));
+        }
         for key in ["enabled","visible"] { if node[key] == false { fields.push(format!("{key}=false")); } }
         if !node["checked"].is_null() { fields.push(format!("checked={}", node["checked"])); }
         if !node["selection"].is_null() { fields.push(format!("selection=[{}:{}]",node["selection"]["start"],node["selection"]["end"])); }
@@ -90,5 +123,41 @@ mod tests {
         row["selection_end"] = json!(3);
         row["password"] = json!(true);
         assert!(normalize(&row, 0.0, &json!("r"), false)["selection"].is_null());
+    }
+
+    #[test]
+    fn legacy_rows_default_to_unknown_capability_provenance() {
+        let node = normalize(&json!({"id":"a","role":"textbox","editable":true,"actions":[]}), 0.0, &json!("r"), false);
+        assert_eq!(node["editable_source"], "unknown");
+        assert_eq!(node["actions_source"], "unknown");
+        assert!(node["value_settable"].is_null());
+        assert_eq!(node["value_settable_source"], "unknown");
+        let rows = project(&[node], &[(1, "a".into())]);
+        assert_eq!(rows[0]["text"], "textbox text=\"\" editable");
+    }
+
+    #[test]
+    fn settable_verdicts_require_an_explicit_native_report() {
+        let at = |row: Value| normalize(&row, 0.0, &json!("r"), false);
+        for row in [
+            json!({"id":"a","editable":true,"editable_source":"role_hint","value_settable":true}),
+            json!({"id":"a","editable":true,"value_settable":true,"value_settable_source":"role_hint"}),
+            json!({"id":"a","value_settable":"yes","value_settable_source":"native"}),
+            json!({"id":"a","value_settable_source":"native"}),
+        ] {
+            let node = at(row);
+            assert!(node["value_settable"].is_null());
+            assert_eq!(node["value_settable_source"], "unknown");
+        }
+        let hinted = at(json!({"id":"a","role":"AXTextField","name":"Name","editable":true,"editable_source":"role_hint","actions_source":"guess","actions":[]}));
+        assert_eq!(hinted["actions_source"], "unknown");
+        let text = project(&[hinted], &[(1, "a".into())])[0]["text"].as_str().unwrap().to_owned();
+        assert_eq!(text, "AXTextField name=\"Name\" text=\"\" editable=role_hint");
+        let native = at(json!({"id":"a","role":"AXTextField","editable":true,"editable_source":"native","value_settable":false,"value_settable_source":"native","actions":[]}));
+        assert_eq!(native["value_settable"], false);
+        let text = project(&[native], &[(1, "a".into())])[0]["text"].as_str().unwrap().to_owned();
+        assert_eq!(text, "AXTextField text=\"\" editable value_settable=false");
+        let unreported = at(json!({"id":"a","editable":null,"editable_source":"native"}));
+        assert_eq!(unreported["editable_source"], "unknown");
     }
 }

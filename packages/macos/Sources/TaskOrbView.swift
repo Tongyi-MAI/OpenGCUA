@@ -71,11 +71,13 @@ struct TaskOrbView: View {
     @ObservedObject var model: AppModel
     var animates = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private var working: Bool { model.phase.active && model.phase != .paused && model.phase != .waiting }
+    // 动画只是装饰；动作阶段和不确定状态只能来自真实事件。
+    private var working: Bool { model.taskProgressIndeterminate }
     private var moving: Bool { animates && !reduceMotion && (working || model.voiceMode) }
     private var color: Color { model.voiceMode && !model.phase.active ? .accentColor : model.tint }
     private var symbol: String? {
         if model.voiceMode && (model.recording || model.speechPending) { return "mic.fill" }
+        if model.phase == .running && !model.taskProgressIndeterminate { return model.taskProgressSymbol }
         switch model.phase {
         case .paused: return "pause.fill"
         case .waiting: return "questionmark"

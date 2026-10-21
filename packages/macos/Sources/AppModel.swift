@@ -190,12 +190,15 @@ enum TaskPhase: String {
     var showsVoiceTaskProgress: Bool { phase != .idle }
     var taskProgressTitle: String {
         if disconnected { return L("连接已断开") }
+        if [.stopping, .pausing, .paused, .waiting].contains(phase) { return phase.label }
         if controls.compactionRunning { return L("正在整理上下文") }
         if controls.interrupted { return L("本轮已中止") }
         if controls.interruptPending { return L("正在中止本轮…") }
         if !controls.approvals.isEmpty { return L("等待前台审批") }
         if !controls.stageText.isEmpty && phase == .running { return controls.stageText }
         guard phase == .running else { return phase.label }
+        if !apiProgressTitle.isEmpty { return apiProgressTitle }
+        if let action = controls.activeAction { return action.label }
         switch executionPhase {
         case "planning": return L("思考中")
         case "execution": return L("正在操作")
@@ -206,6 +209,30 @@ enum TaskPhase: String {
         case "complete": return L("正在继续任务")
         default: return L("正在准备")
         }
+    }
+    private var apiProgressTitle: String {
+        switch controls.stage {
+        case "waiting", "api_wait": return L("正在等待 API 响应")
+        case "generating", "receiving": return L("API 模型正在生成")
+        case "retrying", "api_retry": return L("API 模型正在重试")
+        case "error": return L("API 模型请求失败")
+        case "cancelled": return L("API 模型请求已取消")
+        default: return ""
+        }
+    }
+    var displayedAction: NativeActionStatus? {
+        guard phase == .running, !disconnected, !controls.compactionRunning,
+              !controls.interrupted, !controls.interruptPending, controls.approvals.isEmpty,
+              controls.stageText.isEmpty, apiProgressTitle.isEmpty else { return nil }
+        return controls.activeAction
+    }
+    var taskProgressIndeterminate: Bool {
+        if let action = displayedAction { return action.progressing }
+        return !disconnected && [.starting, .running, .pausing, .stopping].contains(phase)
+    }
+    var taskProgressSymbol: String { displayedAction?.symbol ?? phase.symbol }
+    var recoveryNotice: String {
+        [controls.recoverySummary, controls.recoveryText].filter { !$0.isEmpty }.joined(separator: "\n")
     }
     var currentIntent: String {
         let preview = controls.intentPreview.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -304,20 +331,53 @@ enum TaskPhase: String {
             delegate?.refreshCompact()
         } catch { phase = previousPhase; executionPhase = previousExecutionPhase; sendingMessage = wasSending; self.error = error.localizedDescription; delegate?.refreshCompact() }
     }
-    func receive(_ event: [String: Any]) {
-        let kind = event["event"] as? String ?? ""
-        if let id = event["task_id"] as? String {
+    func receive(_ incoming: [String: Any]) {
+        let envelope = NativeEventEnvelope(fields: incoming)
+        guard envelope.supported else {
+            error = L("事件信封无效或版本不支持（schema_version：%@）；已忽略，不改变执行端状态。", NativeEventEnvelope.diagnostic(incoming["schema_version"]))
+            delegate?.refreshCompact()
+            return
+        }
+        let aliases = ["phase": "progress", "aborted": "interrupted", "session": "session_info"]
+        let kind = aliases[envelope.kind] ?? envelope.kind
+        var event = incoming
+        if envelope.structured { event["kind"] = kind }
+        event["event"] = kind
+        if envelope.kind == "phase", let display = incoming["display_step"] { event["step"] = display }
+        event["source_kind"] = envelope.kind
+        // 前端别名只用于视图路由，source_kind 保留统一事件类型。
+        if let id = NativeEventEnvelope.transportID(event) {
+            guard !taskID.isEmpty, id == taskID else { return }
+            let session = event["session_id"] as? String
+            let currentSession = controls.envelopeSessionID.isEmpty ? controls.sessionID : controls.envelopeSessionID
+            if let session, !currentSession.isEmpty, session != currentSession {
+                guard kind == "session_info" else { return }
+                controls.envelopeSessionID = session
+            }
+            if kind == "recovery_report" {
+                guard let session, !session.isEmpty else { return }
+                if !currentSession.isEmpty && session != currentSession { return }
+            }
+            // 记忆帧按 task/session 围栏与 generation 接收，不经过轮次终态过滤，也不改变轮次身份。
+            if receiveMemoryFrame(event, kind: kind) { delegate?.refreshCompact(); return }
             let previousTurn = controls.turnIndex
-            guard !taskID.isEmpty, id == taskID, controls.accept(event) else { return }
+            guard controls.accept(event) else { return }
+            if let session, !session.isEmpty, controls.envelopeSessionID.isEmpty { controls.envelopeSessionID = session }
             if controls.turnIndex > previousTurn {
                 overlayInteractions.removeAll(); overlayOcclusions.removeAll()
             }
-        } else if kind == "skills_catalog" {
-            receiveCatalog(event); delegate?.refreshCompact(); return
-        } else if kind == "control_result" {
-            _ = receiveControlEvent(event); delegate?.refreshCompact(); return
-        } else if !["ready", "command_ack", "error"].contains(kind) { return }
-        if event["task_id"] == nil, let id = event["command_id"] as? String,
+        } else {
+            guard ["skills_catalog", "memory_catalog", "control_result", "ready", "command_ack", "error"].contains(kind) else { return }
+            if receiveMemoryFrame(event, kind: kind) { delegate?.refreshCompact(); return }
+            guard controls.acceptDelivery(event) else { return }
+            if kind == "skills_catalog" {
+                receiveCatalog(event); delegate?.refreshCompact(); return
+            }
+            if kind == "control_result" {
+                _ = receiveControlEvent(event); delegate?.refreshCompact(); return
+            }
+        }
+        if NativeEventEnvelope.transportID(event) == nil, let id = event["command_id"] as? String,
            ["command_ack", "error"].contains(kind), controls.pending[id] == nil, id != resetCommandID { return }
         if ["command_ack", "error"].contains(kind), receiveControlAcknowledgement(event) {
             delegate?.refreshCompact(); return
@@ -334,7 +394,7 @@ enum TaskPhase: String {
         }
         if let id = event["command_id"] as? String, kind == "command_ack" || kind == "error" {
             resolveVoiceReceipt(id, result: kind == "command_ack"
-                ? ["accepted": true, "task_id": event["task_id"] as? String ?? "", "state": phase.rawValue,
+                ? ["accepted": true, "task_id": NativeEventEnvelope.transportID(event) ?? "", "state": phase.rawValue,
                    "meaning": L("执行端已接收，尚不代表任务完成")]
                 : ["accepted": false, "reason": event["text"] as? String ?? L("执行端拒绝")])
             if kind == "command_ack" { return }
@@ -346,7 +406,7 @@ enum TaskPhase: String {
             return
         }
         if kind == "error" {
-            if let id = event["task_id"] as? String, id != taskID { return }
+            if let id = NativeEventEnvelope.transportID(event), id != taskID { return }
             error = L(event["text"] as? String ?? "操作失败")
             sendingMessage = false
             if let id = event["message_id"] as? String {
@@ -357,7 +417,7 @@ enum TaskPhase: String {
             delegate?.refreshCompact()
             return
         }
-        guard !taskID.isEmpty, event["task_id"] as? String == taskID else { return }
+        guard !taskID.isEmpty, NativeEventEnvelope.transportID(event) == taskID else { return }
         if receiveControlEvent(event) {
             if voiceMode && kind == "interrupted" { syncVoiceContext() }
             delegate?.refreshCompact()
@@ -462,9 +522,9 @@ enum TaskPhase: String {
             finish(TaskPhase(rawValue: event["state"] as? String ?? "failed") ?? .failed,
                    text: text, keepingConversation: true)
         case "finished":
-            if let path = event["path"] as? String, !path.isEmpty { runPath = path }
+            if let path = (event["path"] ?? event["trajectory"]) as? String, !path.isEmpty { runPath = path }
             let state = TaskPhase(rawValue: event["state"] as? String ?? "failed") ?? .failed
-            let text = event["text"] as? String ?? ""
+            let text = event["answer"] as? String ?? event["text"] as? String ?? ""
             finish(state, text: state == .stopped || state == .failed ? L(text) : text)
         default: break
         }
@@ -593,7 +653,7 @@ enum TaskPhase: String {
         if voiceMode { content = showsCompactResult ? 334 : showsVoiceTaskProgress ? 274 : 208 }
         else { content = showsCompactResult || phase == .waiting ? 248 : phase == .paused ? 204 : phase == .idle ? 156 : 164 }
         let intentHeight: CGFloat = !voiceMode && phase.active && !currentIntent.isEmpty ? 28 : 0
-        return content + intentHeight + (foregroundWarning.isEmpty ? 0 : 32) + (error.isEmpty ? 0 : 32) + (controls.approvals.isEmpty ? 0 : 24) + (controls.result.isEmpty ? 0 : 18)
+        return content + intentHeight + (foregroundWarning.isEmpty ? 0 : 32) + (error.isEmpty ? 0 : 32) + (controls.approvals.isEmpty ? 0 : 24) + (controls.result.isEmpty ? 0 : 18) + (recoveryNotice.isEmpty ? 0 : 40)
     }
     var inputText: String {
         get { phase == .waiting ? reply : messageDraft }

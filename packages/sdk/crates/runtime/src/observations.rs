@@ -460,4 +460,33 @@ mod tests {
             "full"
         );
     }
+    #[test]
+    fn ax_capability_provenance_is_rendered_without_widening_node_actions() {
+        let mut s = ObservationStore::default();
+        let mut d = data("1");
+        d["nodes"] = json!([
+            {"id":"label","role":"AXStaticText","name":"Name:","editable":false,"editable_source":"role_hint",
+             "actions":[{"id":"macos.ax.press"}],"actions_source":"native","value_settable":null,"value_settable_source":"unknown"},
+            {"id":"field","role":"AXTextField","name":"City","text":"","editable":true,"editable_source":"role_hint",
+             "actions":[],"actions_source":"unknown","value_settable":true,"value_settable_source":"unknown"},
+            {"id":"legacy","role":"textbox","text":"","editable":true,"actions":[]},
+        ]);
+        let captured = s.capture("a", "ax", d, true, None).unwrap();
+        let nodes = captured["nodes"].as_array().unwrap();
+        assert!(nodes[1]["value_settable"].is_null());
+        assert_eq!(nodes[2]["editable_source"], "unknown");
+        let text = s.render("a", "ax", "header", true).unwrap()["text"].as_str().unwrap().to_owned();
+        assert!(text.contains("AXStaticText name=\"Name:\" actions=[\"macos.ax.press\"]"));
+        assert!(text
+            .lines()
+            .any(|line| line.ends_with("AXTextField name=\"City\" text=\"\" editable=role_hint")));
+        assert!(text.contains("textbox text=\"\" editable"));
+        assert!(!text.contains("value_settable"));
+        s.acknowledge("a", "ax", false).unwrap();
+        assert_eq!(s.node_wire("a", "ax", "field").unwrap()["_node_actions"], json!([]));
+        assert_eq!(
+            s.node_wire("a", "ax", "label").unwrap()["_node_actions"],
+            json!([{"id":"macos.ax.press"}])
+        );
+    }
 }

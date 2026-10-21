@@ -16,6 +16,9 @@ import tempfile
 import uuid
 from urllib.parse import urlsplit
 
+from event_protocol import EventClock, EventProjection, terminal_state, terminal_status, validate_event
+from memory_runtime import MemoryService, error_text
+
 PROTOCOL = 1
 
 
@@ -28,6 +31,8 @@ class NativeFrontend:
         self._delta = None
         self._delta_timer = None
         self._preview_chars = 0
+        self.event_projection = EventProjection()
+        control.frontend = self
 
     def flush(self):
         if self._delta_timer is not None:
@@ -47,6 +52,33 @@ class NativeFrontend:
 
     def emit(self, event):
         c = self.control
+        if event.payload.get("schema_version") is not None:
+            if not self.event_projection.consume(event.to_wire()):
+                return
+            self.flush()
+            fields = event.to_wire()
+            if c.current_command_id is not None:
+                fields["command_id"] = c.current_command_id
+                fields["purpose"] = "compaction"
+                fields["manual"] = True
+            if event.kind == "phase":
+                c.active_turn = fields.get("phase") not in {"waiting", "complete"}
+                fields["display_step"] = (event.step or 0) + 1
+            elif event.kind == "aborted":
+                c.active_turn = False; c.waiting_for_follow_up = True; c.suspended = True
+                c.cancel_waits()
+            elif event.kind == "finished":
+                state = terminal_state(terminal_status(fields))
+                fields["state"] = "completed" if state == "completed" else "stopped" if state == "aborted" else "failed"
+                c.session_terminal_sent = True
+            elif event.kind == "session":
+                fields.update(model=event.payload.get("model", ""), protocol=c.config.get("llm_protocol", "openai"),
+                              reasoning_effort=c.config.get("reasoning_effort", "low"),
+                              foreground_allowed=c.foreground_allowed, ask_user_enabled=c.ask_user_enabled)
+            c.emit(event.kind, **fields)
+            if event.kind == "aborted":
+                c.queue_snapshot()
+            return
         if event.kind not in {"reasoning_delta", "code_delta", "intent_delta"}:
             self.flush()
         if event.kind == "phase":
@@ -117,8 +149,12 @@ class NativeFrontend:
         self.flush()
 
 # These settings belong to the native host's process/task lifecycle, not a file.
+# memory_dir 同样由宿主数据根决定，App 配置不能把长期记忆改写到别处。
 _HOST_ARGUMENTS = frozenset({"config", "task", "resume", "ui", "ui_api", "driver_mode",
-                            "driver_socket", "session_id", "runs_dir", "multi_task", "countdown"})
+                            "driver_socket", "session_id", "runs_dir", "multi_task", "countdown",
+                            "memory_dir"})
+_MEMORY_MUTATIONS = {"memory_approve": "approve", "memory_reject": "reject",
+                     "memory_forget": "forget", "memory_update": "update"}
 
 
 def task_arguments(config: dict, runs_dir: Path):
@@ -203,7 +239,11 @@ class TaskControl:
         self.turn_index = 0
         self.overlay_waits = {}
         self.sequence = 0
+        self.event_clock = EventClock(task_id)
+        self.event_context = {}
+        self.policy_revision = 0
         self.active_turn = True
+        self.session_terminal_sent = False
         self.suspended = False
         self.commands = []
         self.config = {}
@@ -217,6 +257,7 @@ class TaskControl:
         self.compaction_callback = None
         self.current_command_id = None
         self.authorization_epoch = 0
+        self.memory_service = None
         self._queue_order = 0
 
     def next_order(self):
@@ -254,6 +295,7 @@ class TaskControl:
                 choice = "cancel"
             if choice == "allow":
                 self.foreground_allowed = True
+                self.policy_revision += 1
                 if self.policy_callback:
                     self.policy_callback()
                 self.emit("policy", foreground_allowed=True, ask_user_enabled=self.ask_user_enabled)
@@ -378,12 +420,33 @@ class TaskControl:
             self.emit("message", message_id=message["id"], state="applied")
         return messages
 
-    def emit(self, kind, **fields):
+    def emit(self, event_kind, **fields):
+        kind = event_kind
         if kind == "trajectory":
             self.run_dir = Path(fields["path"])
-        self.sequence += 1
-        self.send({"event": kind, "task_id": self.task_id, "turn_index": self.turn_index,
-                   "sequence": self.sequence, **fields})
+        if fields.get("schema_version") is not None:
+            wire = validate_event(dict(fields))
+            self.sequence = max(self.sequence, wire["sequence"])
+        else:
+            context = {**self.event_context}
+            session_id = fields.pop("session_id", None)
+            if session_id:
+                self.event_clock.session_id = session_id
+            context.update(task_id=context.get("task_id", self.task_id),
+                           turn_id=f"{self.event_clock.stream_id}/turn/{self.turn_index}")
+            merged = {**context, **fields}
+            merged.pop("policy_revision", None)
+            merged.pop("origin", None)
+            wire = self.event_clock.make(kind, origin="native_host", policy_revision=self.policy_revision,
+                                         **merged)
+            self.sequence = wire["sequence"]
+        if kind in {"turn_started", "turn_finished", "finished", "aborted", "interrupted"}:
+            frontend = getattr(self, "frontend", None)
+            if frontend is not None:
+                frontend.event_projection.consume(wire)
+        alias = {"phase": "progress", "aborted": "interrupted", "session": "session_info"}.get(kind, kind)
+        self.send({**wire, "event": alias, "native_task_id": self.task_id,
+                   "turn_index": wire.get("turn_index", self.turn_index)})
 
     def pause(self):
         self.resume_event.clear()
@@ -437,6 +500,40 @@ class NativeHost:
         self.driver = None
         self.socket_dir = None
         self.command_receipts = {}
+        # 与 runs 同在宿主数据根下；懒初始化，列表不创建数据库，也不需要 driver。
+        self.memory_service = MemoryService(Path(runs_dir).parent / "memory")
+
+    def memory_target(self, command):
+        """带 task_id 的记忆命令必须指向当前 live 会话；不带则走连接级。"""
+        if command.get("task_id") is None:
+            return None
+        if not self.control or not self.task or self.task.done() or command["task_id"] != self.control.task_id:
+            raise ValueError("会话标识已过期")
+        return self.control
+
+    def memory_emit(self, control, kind, fields):
+        # live 走 TaskControl 的 v1 信封；连接级是不带 schema_version 的 legacy 帧，task 为 null。
+        if control is not None:
+            control.emit(kind, **fields)
+        else:
+            self.send({"event": kind, "kind": kind, "task_id": None, **fields})
+
+    def memory_mutation(self, command):
+        operation = _MEMORY_MUTATIONS[command["command"]]
+        memory_id, revision = command.get("memory_id"), command.get("revision")
+        if not isinstance(command.get("command_id"), str) or not command["command_id"]:
+            raise ValueError("记忆命令缺少 command_id")
+        if not isinstance(memory_id, str) or not memory_id or len(memory_id) > 64:
+            raise ValueError("memory_id 无效")
+        if type(revision) is not int or revision < 1:
+            raise ValueError("revision 必须是正整数")
+        fields = {}
+        if operation == "update":
+            fields = {key: command[key] for key in ("title", "content", "kind", "app") if key in command}
+            if not fields or any(not isinstance(fields[key], str) for key in ("title", "content", "kind") if key in fields) \
+                    or ("app" in fields and fields["app"] is not None and not isinstance(fields["app"], str)):
+                raise ValueError("memory_update 字段无效")
+        return operation, memory_id, revision, fields
 
     async def start_driver(self):
         app = os.environ.get("GENERALIST_DRIVER_APP")
@@ -534,7 +631,8 @@ class NativeHost:
             # The trajectory is the authoritative terminal result, not process exit 0.
             data = json.loads((control.run_dir / "traj.json").read_text()) if control.run_dir else {}
             status = data.get("status", "error")
-            control.emit("finished", state="completed" if status == "success" else "failed",
+            if not control.session_terminal_sent:
+                control.emit("finished", state="completed" if status == "success" else "failed",
                          text=self.public_text(data.get("final_answer") or data.get("answer")
                                                 or (data.get("tasks") or [{}])[-1].get("answer")
                                                 or f"任务结束：{status}"),
@@ -551,6 +649,7 @@ class NativeHost:
     async def command(self, command):
         kind = command.get("command")
         command_id = command.get("command_id")
+        deferred = None
         if command_id in self.command_receipts:
             previous = self.command_receipts[command_id]
             if previous != command:
@@ -575,6 +674,7 @@ class NativeHost:
             if not task_id or len(task_id) > 100:
                 raise ValueError("任务标识无效。")
             self.control = TaskControl(task_id, self.send, self.public_text)
+            self.control.memory_service = self.memory_service
             self.control.config = dict(command.get("config") or {})
             if type(self.control.config.get("ask_user_enabled", True)) is not bool:
                 raise ValueError("ask_user_enabled 必须为布尔值")
@@ -597,6 +697,27 @@ class NativeHost:
                 self.control.emit("skills_catalog", skills=event["skills"], selected_name=event["selected_name"])
             else:
                 self.send(event)
+        elif kind == "memory_list":
+            # 宿主存储控制：不排队、不进模型、不需要前台权限。
+            live = self.memory_target(command)
+            offset = command.get("offset", 0)
+            if not isinstance(command_id, str) or not command_id or type(offset) is not int or not 0 <= offset <= 384:
+                raise ValueError("记忆目录命令的 command_id 或 offset 无效")
+            fields = await asyncio.to_thread(self.memory_service.catalog_fields,
+                                             source_command_id=command_id, offset=offset)
+            deferred = lambda: self.memory_emit(live, "memory_catalog", fields)
+        elif kind in _MEMORY_MUTATIONS:
+            operation, memory_id, revision, fields = self.memory_mutation(command)
+            target = self.memory_target(command)
+            result, catalog = await asyncio.to_thread(self.memory_service.mutate, operation, memory_id, revision, fields)
+            catalog["source_command_id"] = command_id
+            reply = {"command_id": command_id, "status": "completed" if result["ok"] else "failed",
+                     "memory_id": memory_id, "revision": result["revision"],
+                     "generation": result["generation"], "error_code": result["error_code"],
+                     "text": "记忆已更新" if result["ok"] else error_text(result["error_code"])}
+            # 受理回执先于结果；control_result 与目录快照来自同一事务的 generation。
+            deferred = lambda: (self.memory_emit(target, "control_result", reply),
+                                self.memory_emit(target, "memory_catalog", catalog))
         elif kind in {"interrupt", "compaction_cancel", "set_policy", "approval_reply", "queue_list", "queue_resume", "queue_clear", "compaction", "skill_select"}:
             if not self.control or not self.task or self.task.done() or command.get("task_id") != self.control.task_id:
                 raise ValueError("会话标识已过期")
@@ -626,6 +747,7 @@ class NativeHost:
                         setattr(c, field, command[field])
                 if command.get("foreground_allowed") is False:
                     c.authorization_epoch += 1
+                c.policy_revision += 1
                 if not c.ask_user_enabled and c.answer is not None and not c.answer.done():
                     if c.interrupt_callback:
                         c.interrupt_callback(False)
@@ -698,6 +820,8 @@ class NativeHost:
             self.command_receipts[command_id] = dict(command)
             self.send({"event": "command_ack", "command_id": command["command_id"],
                        "task_id": command.get("task_id"), "command": kind})
+        if deferred is not None:
+            deferred()
 
     async def close(self):
         if self.task and not self.task.done():

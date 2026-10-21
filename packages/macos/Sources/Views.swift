@@ -63,7 +63,8 @@ struct MainView: View {
                             if model.phase.active {
                                 if model.phase != .waiting {
                                     HStack(spacing: 8) {
-                                        if model.phase != .paused { ProgressView().controlSize(.small) }
+                                        if model.taskProgressIndeterminate { ProgressView().controlSize(.small) }
+                                        else { Image(systemName: model.taskProgressSymbol) }
                                         Text(model.taskProgressTitle)
                                             .font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
                                     }.padding(.horizontal, 14).padding(.vertical, 11)
@@ -222,6 +223,7 @@ struct CompactView: View {
                 Text(model.taskProgressDetail).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
                     .help(model.taskProgressDetail).frame(maxWidth: .infinity, alignment: .leading)
             }
+            RecoveryNoticeView(model: model, compact: true)
             if !model.controls.approvals.isEmpty {
                 Button(L("查看前台审批（默认拒绝）")) { model.delegate?.showMain() }.font(.caption)
             }

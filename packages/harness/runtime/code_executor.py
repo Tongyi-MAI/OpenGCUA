@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from action_feedback import action_feedback, remember_feedback, render_feedback
+
 
 CTRL_PREFIX = "__MAC_AGENT_CTRL__ "
 MAX_FRAME_BYTES = 8 * 1024 * 1024
@@ -126,11 +128,18 @@ class CodeExecutionResult:
                   if (value := render_tool_call(index, call, limit))]
         if errors:
             text("Automatic tool errors:\n" + "\n".join(errors))
+        facts = render_feedback(self.control, limit)
+        if facts:
+            text(facts)
+        memory_lines = [_memory_proposal_line(item) for item in self.control.get("memory_proposals") or ()]
+        if memory_lines:
+            text("Memory proposals（候选待用户审核；未批准前不会被召回，也不是业务核验）:\n"
+                 + "\n".join(memory_lines))
         if self.stdout:
             text("stdout:\n" + compact_text(self.stdout, limit))
         if self.stderr:
             text("stderr:\n" + compact_text(self.stderr, limit))
-        if not displays and not errors and not self.stdout and not self.stderr:
+        if not displays and not errors and not facts and not memory_lines and not self.stdout and not self.stderr:
             text("(no output) 调用 emit(value) 或 print(value) 显式输出；无输出不代表任务成功。")
         return {
             "status": {"returncode": self.returncode, "timed_out": self.timed_out,
@@ -154,6 +163,13 @@ class CodeExecutionResult:
                 parts.append((part["heading"] + "\n" if part["heading"] else "") + "screenshot: " +
                              compact_text(_compact_json(part["metadata"]), limit))
         return "\n\n".join(parts)
+
+
+def _memory_proposal_line(item: dict[str, Any]) -> str:
+    """只渲染有界结果字段；拒绝原因只给错误码，不回显候选正文。"""
+    safe = {key: value for key in ("status", "memory_id", "revision", "error_code", "title")
+            if (value := item.get(key)) is not None}
+    return "- " + json.dumps(safe, ensure_ascii=False, separators=(",", ":"))
 
 
 def empty_control() -> dict[str, Any]:
@@ -817,6 +833,9 @@ def _apply_event(control: dict[str, Any], event: dict[str, Any]) -> None:
         control["displays"].append(dict(event))
     elif event_type == "tool_call":
         control["tool_calls"].append(event)
+        remember_feedback(control, event.get("rule_feedback"), fallback_id=event.get("call_id"))
+    elif event_type == "action_feedback":
+        remember_feedback(control, event.get("rule_feedback"), fallback_id=event.get("action_id"))
     elif event_type == "terminate" and control["terminate"] is None:
         control["terminate"] = {
             "status": event.get("status", "failure"), "answer": event.get("answer"),
@@ -927,6 +946,9 @@ class CodeExecutor:
         image_dir: Path | None = None,
         skill_roots: tuple[Path, ...] = (),
         ask_user_enabled: bool = True,
+        action_journal=None,
+        action_event_handler=None,
+        memory_handler=None,
     ) -> None:
         if ui_api not in {"mai-ui", "legacy-cua"}:
             raise ValueError("ui_api 必须是 mai-ui 或 legacy-cua")
@@ -938,6 +960,13 @@ class CodeExecutor:
         self.image_dir = image_dir.resolve() if image_dir is not None else None
         self.skill_roots = tuple(Path(root).resolve() for root in skill_roots)
         self.ask_user_enabled = ask_user_enabled
+        self.action_journal = action_journal
+        self.action_event_handler = action_event_handler
+        # host 长期记忆候选回调；None 时 worker 的 memory.propose 明确返回 not_available。
+        self.memory_handler = memory_handler
+        self._memory_answers: dict[str, dict[str, Any]] = {}
+        self.action_context: dict = {}
+        self._journal_failed = False
         self._selected_skill: str | None = None
         self._skill_digest: str | None = None
         self._skill_revision = 0
@@ -980,6 +1009,98 @@ class CodeExecutor:
         self._skill_digest = digest
         self._skill_revision = revision
 
+    def set_action_context(self, context: dict) -> None:
+        """复制主代理身份上下文；每轮开始后不再跟随外部修改。"""
+        self.action_context = dict(context)
+
+    async def _publish_action_event(self, event: dict, control: dict) -> None:
+        remember_feedback(control, event.get("rule_feedback"), fallback_id=event.get("action_id"))
+        if self.action_event_handler is None:
+            return
+        try:
+            # 仅磁盘 journal 在线程中写；前端/轨迹投影保持在主事件循环有序提交。
+            outcome = self.action_event_handler(dict(event))
+            if inspect.isawaitable(outcome):
+                await outcome
+        except Exception:
+            # 发布失败不能重试已派发动作，也不回灌私有请求/异常正文。
+            control["events"].append({"type": "action_publication_failed",
+                                      "error_code": "ACTION_EVENT_PUBLICATION_FAILED"})
+
+    async def _memory_ack(self, event: dict, context: dict, control: dict) -> None:
+        """处理模型候选：来源身份只用宿主上下文；同一握手重发相同 ACK 且只写入一次。"""
+        handshake_id = event.get("handshake_id")
+        valid_id = isinstance(handshake_id, str) and 0 < len(handshake_id) <= 64
+        answer = self._memory_answers.get(handshake_id) if valid_id else None
+        if answer is None:
+            answer = {"ok": False, "status": "not_available", "memory_id": None, "revision": None,
+                      "error_code": "MEMORY_NOT_AVAILABLE"}
+            title = None
+            if self.memory_handler is not None and valid_id:
+                try:
+                    outcome = self.memory_handler(
+                        {key: event.get(key) for key in ("title", "content", "kind", "app")}, dict(context),
+                    )
+                    if inspect.isawaitable(outcome):
+                        outcome = await outcome
+                    if not isinstance(outcome, dict) or type(outcome.get("ok")) is not bool:
+                        raise ValueError("无效记忆结果")
+                    answer = {
+                        "ok": outcome["ok"], "status": str(outcome.get("status") or "not_available")[:32],
+                        "memory_id": outcome.get("memory_id") if isinstance(outcome.get("memory_id"), str) else None,
+                        "revision": outcome.get("revision") if type(outcome.get("revision")) is int else None,
+                        "error_code": str(outcome["error_code"])[:64] if outcome.get("error_code") else None,
+                    }
+                    title = outcome.get("title") if outcome["ok"] and isinstance(outcome.get("title"), str) else None
+                except Exception:
+                    answer["error_code"] = "MEMORY_UNAVAILABLE"
+            if valid_id:
+                if len(self._memory_answers) >= 64:
+                    self._memory_answers.pop(next(iter(self._memory_answers)))
+                self._memory_answers[handshake_id] = answer
+            proposals = control.setdefault("memory_proposals", [])
+            if len(proposals) < 16:
+                # 只记录有界结果字段；候选正文留在宿主存储，不进入执行反馈或轨迹。
+                proposals.append({**answer, **({"title": title[:120]} if title else {})})
+        assert self._writer is not None
+        self._writer.write(json.dumps({"kind": "memory_proposal_ack", "handshake_id": handshake_id,
+                                       **answer}).encode() + b"\n")
+        await self._writer.drain()
+
+    async def _journal_ack(self, event: dict, context: dict, control: dict) -> None:
+        answer = {"allowed": False, "error": {"code": "JOURNAL_UNAVAILABLE"}}
+        if self.action_journal is not None and not self._journal_failed:
+            try:
+                answer = await asyncio.to_thread(self.action_journal.transition, dict(event), dict(context))
+                if not isinstance(answer, dict) or type(answer.get("allowed")) is not bool:
+                    raise ValueError("无效 journal 确认")
+            except Exception:
+                answer = {"allowed": False, "error": {"code": "JOURNAL_UNAVAILABLE"}}
+        code = (answer.get("error") or {}).get("code")
+        if code not in {"ACTION_REPLAY_BLOCKED", "CORRUPT"}:
+            code = "JOURNAL_UNAVAILABLE"
+        assert self._writer is not None
+        # ACK 只携带有界字段，不把 receipt/request/status 放进 4096 字节读缓冲。
+        self._writer.write(json.dumps({
+            "kind": "action_journal_ack", "handshake_id": event.get("handshake_id"),
+            "allowed": answer["allowed"], "memory_replay": answer.get("memory_replay") is True,
+            **({"error": {"code": code}} if not answer["allowed"] else {}),
+        }).encode() + b"\n")
+        await self._writer.drain()
+        if not answer["allowed"]:
+            self._journal_failed = code != "ACTION_REPLAY_BLOCKED"
+            # ACK 闸门失败的事实也必须进模型反馈；不得把回执写失败说成动作未执行。
+            row = action_feedback(event.get("operation"), action_id=event.get("action_id"),
+                                  sdk_session_id=event.get("sdk_session_id"),
+                                  stage="outcome_unknown", error={"code": code},
+                                  not_dispatched=event.get("journal_stage") in {"intent_recorded", "dispatching"})
+            remember_feedback(control, row, fallback_id=event.get("handshake_id"))
+            raise ConnectionError(code)
+        status = answer.get("status")
+        if isinstance(status, dict):
+            control["events"].append(dict(status))
+            await self._publish_action_event(status, control)
+
     def set_rpc_generation(self, generation: int) -> None:
         """同步更新下一轮携带的 RPC 代次，不改变正在执行的请求上下文。"""
         self._rpc_generation = generation
@@ -1008,6 +1129,8 @@ class CodeExecutor:
             "ui_api": self.ui_api,
             "overlay_guard": self.overlay_handler is not None,
             "gui_approval": self.approval_handler is not None,
+            "journal_actions": self.action_journal is not None,
+            "memory_enabled": self.memory_handler is not None,
             "rpc_socket": str(self.rpc_socket),
             "rpc_timeout": self.rpc_timeout,
             "rpc_generation": self._rpc_generation,
@@ -1158,6 +1281,8 @@ class CodeExecutor:
                 )
             self._active_run = asyncio.current_task()
             request_id = uuid.uuid4().hex
+            action_context = {**self.action_context, "cell_request_id": request_id}
+            self._memory_answers = {}
             output = {name: bytearray() for name in OUTPUT_LIMITS}
             timed_out = False
             reset = False
@@ -1249,6 +1374,18 @@ class CodeExecutor:
                                         await asyncio.shield(self._stop_worker())
                                         self._reset_pending = False
                                         break
+                                elif event.get("type") == "action_journal":
+                                    await self._journal_ack(event, action_context, control)
+                                elif event.get("type") == "memory_proposal":
+                                    await self._memory_ack(event, action_context, control)
+                                elif event.get("type") == "action_progress":
+                                    # 仅接收 SDK status 的原始 queued/running 事实，不把协议排队当资源队列。
+                                    progress = {**action_context, **{key: event.get(key) for key in (
+                                        "type", "stage", "action_id", "sdk_session_id", "resource_id",
+                                        "observation_id", "execution", "effect",
+                                    )}, "verification": "unverified"}
+                                    _apply_event(control, progress)
+                                    await self._publish_action_event(progress, control)
                                 elif event.get("type") == "overlay_guard" and self.overlay_handler is not None:
                                     ready = False
                                     try:
@@ -1316,7 +1453,7 @@ class CodeExecutor:
                     if timed_out else f"worker 会话故障：{type(exc).__name__}: {exc}"
                 )
                 process = self._process
-                returncode = process.returncode if process and process.returncode is not None else -1
+                returncode = process.returncode if process and process.returncode not in (None, 0) else -1
                 await asyncio.shield(self._stop_worker())
                 self._reset_pending = False
                 control["completed"] = False

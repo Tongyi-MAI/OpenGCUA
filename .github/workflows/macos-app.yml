@@ -49,6 +49,26 @@ jobs:
         run: |
           sdk_wheel="$(python3 -c 'from pathlib import Path; wheels = list(Path("packages/macos/build/wheels").glob("qwen_intelligence_sdk-*-cp312-*-macosx*.whl")); assert len(wheels) == 1, wheels; print(wheels[0].resolve())')"
           uv run --no-project --python 3.12 --with ./packages/harness/runtime --with "$sdk_wheel" --with pytest pytest packages/harness/runtime/tests/test_native_host.py packages/harness/runtime/tests/test_native_session_controls.py packages/harness/runtime/tests/test_sdk_runtime.py packages/harness/runtime/tests/test_overlay_guard.py packages/harness/runtime/tests/test_image_store.py -q
+      - name: Test unified events, bounded reconnect and durable action journal
+        run: |
+          sdk_wheel="$(python3 -c 'from pathlib import Path; wheels = list(Path("packages/macos/build/wheels").glob("qwen_intelligence_sdk-*-cp312-*-macosx*.whl")); assert len(wheels) == 1, wheels; print(wheels[0].resolve())')"
+          uv run --no-project --python 3.12 --with ./packages/harness/runtime --with "$sdk_wheel" --with pytest pytest \
+            packages/harness/runtime/tests/test_event_replay.py \
+            packages/harness/runtime/tests/test_event_stream.py \
+            packages/harness/runtime/tests/test_action_journal.py \
+            packages/harness/runtime/tests/test_action_journal_executor.py \
+            packages/harness/runtime/tests/test_action_feedback.py \
+            packages/harness/runtime/tests/test_journal_agent_integration.py -q -p no:cacheprovider
+      - name: Test long-term memory review, recall and native wire
+        run: |
+          sdk_wheel="$(python3 -c 'from pathlib import Path; wheels = list(Path("packages/macos/build/wheels").glob("qwen_intelligence_sdk-*-cp312-*-macosx*.whl")); assert len(wheels) == 1, wheels; print(wheels[0].resolve())')"
+          uv run --no-project --python 3.12 --with ./packages/harness/runtime --with "$sdk_wheel" --with pytest pytest \
+            packages/harness/runtime/tests/test_memory_store.py \
+            packages/harness/runtime/tests/test_memory_channel.py \
+            packages/harness/runtime/tests/test_memory_native.py \
+            packages/harness/runtime/tests/test_memory_agent.py \
+            packages/harness/runtime/tests/test_sdk_ax_metadata.py \
+            packages/harness/runtime/tests/test_dingtalk_skill_contract.py -q -p no:cacheprovider
       - name: Test localization and system language defaults
         run: |
           python3 packages/macos/tests/test_localization.py
@@ -62,6 +82,10 @@ jobs:
         run: |
           swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/AudioInputDevices.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/SpeechInput.swift packages/macos/Sources/QwenSpeechInput.swift packages/macos/Sources/AppModel.swift packages/macos/Sources/SessionControls.swift packages/macos/tests/VoiceRouterContracts.swift -o packages/macos/build/generalist-voice-router-contracts
           packages/macos/build/generalist-voice-router-contracts
+      - name: Test long-term memory native review contracts
+        run: |
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/AudioInputDevices.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/SpeechInput.swift packages/macos/Sources/QwenSpeechInput.swift packages/macos/Sources/AppModel.swift packages/macos/Sources/SessionControls.swift packages/macos/tests/MemoryContracts.swift -o packages/macos/build/generalist-memory-contracts
+          packages/macos/build/generalist-memory-contracts
       - name: Test configuration file reload and credential isolation
         run: |
           swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/FirstLaunch.swift packages/macos/tests/ConfigContracts.swift -o packages/macos/build/generalist-config-contracts

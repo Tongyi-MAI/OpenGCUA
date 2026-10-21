@@ -75,10 +75,10 @@ struct VoiceBar: View {
                 Divider().overlay(.primary.opacity(0.04))
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 7) {
-                        if [.starting, .running, .pausing, .stopping].contains(model.phase) {
+                        if model.taskProgressIndeterminate {
                             ProgressView().controlSize(.mini)
                         } else {
-                            Image(systemName: model.phase.symbol).foregroundStyle(model.tint)
+                            Image(systemName: model.taskProgressSymbol).foregroundStyle(model.tint)
                         }
                         Text(model.taskProgressTitle).fontWeight(.medium)
                         Spacer(minLength: 4)
@@ -98,6 +98,7 @@ struct VoiceBar: View {
                     .accessibilityLabel(L("电脑任务进度"))
                     .accessibilityValue(model.taskProgressTitle + L("，第 %@ 步，", String(describing: model.step)) + model.taskProgressDetail)
             }
+            RecoveryNoticeView(model: model, compact: true)
             if !model.controls.result.isEmpty {
                 Text(model.controls.result).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).help(model.controls.result)
             }

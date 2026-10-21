@@ -39,6 +39,13 @@ import SwiftUI
     func overlayWouldObstruct(_ event: [String: Any]) -> Bool { obstructsOverlay }
     func refreshCompact() { onRefresh?() }
     func runtimeExited() {}
+    // 仅供生产 UI 闭包 typecheck；这些 fixture 不创建窗口。
+    func showMain() {}
+    func closeCompact() {}
+    func showHistory() {}
+    func showProgressBubble() {}
+    func hideProgressBubble() {}
+    func refreshMainSize() {}
 }
 @MainActor enum MacPermissions {
     static let accessibility = true, screenRecording = true
@@ -49,7 +56,38 @@ enum AppError: LocalizedError {
     var errorDescription: String? { if case let .message(text) = self { return text }; return nil }
 }
 @main enum VoiceRouterContracts {
+    @MainActor static func recordedReplay(_ path: String) throws {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let fixture = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = AppModel(dataDirectory: directory)
+        model.ready = true; model.phase = .running; model.taskID = fixture["native_task_id"] as! String
+        for segment in fixture["segments"] as! [[String: Any]] {
+            for event in segment["events"] as! [[String: Any]] { model.receive(event) }
+            let expected = segment["expected_phase"] as! String
+            let actual = model.controls.interrupted ? "aborted"
+                : model.phase == .completed ? "completed"
+                : model.phase == .failed ? "attention"
+                : model.phase == .stopped ? "aborted" : "running"
+            precondition(actual == expected, "同一录制流的 Swift 终态必须与 TUI/Hub 一致：\(actual) / \(expected)")
+            precondition(model.controls.canonicalTurnID == segment["turn_id"] as? String)
+            if let actions = segment["actions"] as? [String: String] {
+                for (id, stage) in actions {
+                    let action = model.controls.recentActions.last { $0.id == id }
+                    precondition(action?.stage == stage && action?.verification == "unverified")
+                }
+            }
+            precondition(model.bridge.commands.isEmpty, "录制回放不得派发动作、审批或重试")
+        }
+        print("D01 同源录制回放通过：真实 Swift AppModel 与 TUI/Hub 的终态、轮次和动作事实一致；无派发。")
+    }
+
     @MainActor static func main() async throws {
+        if CommandLine.arguments.count == 2 {
+            try recordedReplay(CommandLine.arguments[1])
+            return
+        }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let model = AppModel(dataDirectory: directory)
@@ -285,6 +323,8 @@ enum AppError: LocalizedError {
         try controlContracts(directory: directory.appendingPathComponent("controls"), config: config)
         try sessionContracts(directory: directory.appendingPathComponent("sessions"), config: config)
         previewContracts(directory: directory.appendingPathComponent("previews"))
+        envelopeActionContracts(directory: directory.appendingPathComponent("d01"))
+        try envelopeValidationContracts(directory: directory.appendingPathComponent("d01-strict"))
         print("Mini window routing passed: visible across execution and captures, hidden only for guarded overlaps, synchronized acknowledgement, stale fences and reset recovery.")
         print("Historical chat contracts passed: read-only selection, resume request, stable history ID, fresh execution fence, switch acknowledgement, active-task protection, drafts and app restart.")
         print("Conversation contracts passed: text and voice follow-ups, bubble ordering, deduplication, persisted history, legacy decoding and fresh chat fencing.")
@@ -679,6 +719,339 @@ enum AppError: LocalizedError {
         precondition(model.bridge.commands.last?["resume_path"] as? String == run.path)
         precondition(started["selected_skill_override"] as? Bool == true && started["selected_skill"] as? String == "alpha")
         print("会话级契约覆盖：finished 终态、Skill 三态覆盖与跨会话清理、历史恢复、轮次之间的手动压缩与取消、消息取消恢复。")
+    }
+    // 真实 AppModel 入口：flat v1、native alias、技术回执与恢复快照均只更新 UI。
+    @MainActor static func envelopeActionContracts(directory: URL) {
+        let model = AppModel(dataDirectory: directory)
+        model.ready = true; model.bridge.acknowledge = false
+        model.taskID = "native-transport"; model.conversationOpen = true; model.phase = .running
+        var sequence = 0
+        var turn = "z-opaque-turn"
+        var index = 0
+        func envelope(_ kind: String, _ fields: [String: Any] = [:]) -> [String: Any] {
+            sequence += 1
+            var event: [String: Any] = ["schema_version": 1, "event_id": "d01-\(sequence)", "sequence": sequence,
+                "session_id": "session-d01", "stream_id": "stream-d01", "task_id": "harness-task", "native_task_id": model.taskID,
+                "turn_id": turn, "turn_index": index, "step_id": "step-d01", "step": 1, "timestamp": "2026-10-21T00:00:00Z",
+                "kind": kind, "event": kind, "origin": "sdk", "policy_revision": 7, "text": ""]
+            for (key, value) in fields { event[key] = value }
+            return event
+        }
+        func emit(_ kind: String, _ fields: [String: Any] = [:]) { model.receive(envelope(kind, fields)) }
+        emit("session_info", ["model": "snapshot-model", "foreground_allowed": true, "ask_user_enabled": false])
+        emit("turn_started", ["text": "本轮任务"])
+        emit("skill_state", ["name": "single-skill", "digest": "digest", "pending": false])
+        emit("intent", ["text": "当前动作意图"])
+        precondition(model.controls.sessionID == "session-d01" && model.taskID == "native-transport")
+        precondition(model.controls.canonicalTurnID == turn && model.controls.lastEnvelope["task_id"] == "harness-task")
+        let sends = model.bridge.commands.count
+        let turns = model.conversationTurns.count
+        let messages = model.conversationMessages.count
+        let history = model.history.count
+        emit("action_status", ["action_id": "action-1", "stage": "waiting_resource", "sdk_session_id": "sdk-session",
+            "resource_id": "desktop", "observation_id": "obs", "journal_sequence": 11, "record_sequence": 12, "cell_request_id": "cell-7",
+            "model": "不能污染快照", "foreground_allowed": false, "ask_user_enabled": true])
+        precondition(model.taskProgressTitle == L("工具排队中") && model.taskProgressIndeterminate)
+        precondition(model.controls.stage.isEmpty && model.phase == .running && model.currentIntent == "当前动作意图")
+        precondition(model.controls.foregroundAllowed && !model.controls.askUserEnabled && model.controls.model == "snapshot-model")
+        precondition(model.controls.effectiveSkill == "single-skill")
+        let action = model.controls.recentActions.last!
+        precondition(action.metadata["sdk_session_id"] == "sdk-session" && action.metadata["cell_request_id"] == "cell-7")
+        precondition(action.metadata["policy_revision"] == "7" && action.metadata["step_id"] == "step-d01")
+        precondition(action.metadata["record_sequence"] == "12" && action.metadata["journal_sequence"] == "11" && action.metadata["stream_id"] == "stream-d01",
+                     "诊断元数据保留 stream_id/record_sequence，且不丢旧 journal_sequence")
+        precondition(model.controls.lastEnvelope["stream_id"] == "stream-d01" && model.controls.lastEnvelope["record_sequence"] == "12")
+        for (stage, label) in [("intent_recorded", "工具意图已记录，尚未派发"), ("dispatching", "工具派发中"),
+                               ("running", "工具执行中"), ("rejected", "动作被拒绝"),
+                               ("cancelled_before_dispatch", "动作在派发前已取消"), ("verification_failed", "动作核验失败"),
+                               ("verified", "动作已核验（不代表任务完成）"), ("outcome_unknown", "动作结果未知，请核实")] {
+            emit("action_status", ["action_id": "action-1", "stage": stage])
+            precondition(model.taskProgressTitle == L(label) && model.phase == .running)
+            precondition(model.controls.recentActions.count == 1)
+        }
+        precondition(!model.taskProgressIndeterminate, "结果未知不能由动画假装正在执行")
+        var receipt = envelope("action_status", ["event": "finished", "state": "completed", "action_id": "action-1",
+            "stage": "receipt_received", "execution": ["status": "error", "code": 500], "effect": "unknown"])
+        model.receive(receipt)
+        precondition(model.phase == .running && model.taskProgressTitle == L("已收到技术回执，尚未核验"))
+        precondition(model.controls.recentActions.last?.execution.contains("error") == true)
+        precondition(model.controls.recentActions.last?.effect == "unknown" && model.controls.recentActions.last?.verification == "unverified")
+        precondition(model.controls.recentActions.last?.metadata["sdk_session_id"] == "sdk-session" && model.controls.recentActions.last?.metadata["cell_request_id"] == "cell-7",
+                     "只带 stage 的增量不能丢掉先前 SDK 诊断身份")
+        precondition(!model.taskProgressIndeterminate && model.conversationTurns.count == turns && model.history.count == history)
+        precondition(model.conversationMessages.count == messages && model.bridge.commands.count == sends)
+        let receiptID = receipt["event_id"] as! String
+        receipt["sequence"] = sequence + 100; receipt["stage"] = "running"
+        model.receive(receipt)
+        precondition(model.controls.envelopeSequence == sequence && model.controls.activeAction?.stage == "receipt_received",
+                     "同 event_id 即使携带更大 sequence 也不能再处理")
+        emit("action_status", ["event_id": "same-sequence", "sequence": sequence, "action_id": "action-1", "stage": "running"])
+        precondition(model.controls.activeAction?.stage == "receipt_received", "相同 sequence 必须拒绝")
+        emit("action_status", ["sequence": 1, "action_id": "action-1", "stage": "running"])
+        precondition(model.controls.activeAction?.stage == "receipt_received", "迟到 sequence 必须拒绝")
+        var unknown = envelope("state", ["schema_version": 2, "state": "completed"])
+        model.sendingMessage = true
+        let lastSequence = model.controls.envelopeSequence
+        let lastMetadata = model.controls.lastEnvelope
+        model.receive(unknown)
+        precondition(!model.error.isEmpty && model.phase == .running && model.sendingMessage)
+        precondition(model.controls.envelopeSequence == lastSequence && model.controls.lastEnvelope == lastMetadata)
+        precondition(!model.controls.seenEventIDs.contains(unknown["event_id"] as! String) && model.bridge.commands.count == sends)
+        unknown["schema_version"] = 1; unknown["state"] = "running"
+        model.receive(unknown)
+        precondition(model.controls.seenEventIDs.contains(unknown["event_id"] as! String), "拒绝 unknown version 不应消费身份")
+        model.sendingMessage = false
+        for version: Any in [true, "1", 1.5, 1.0, 0, NSNull()] {
+            emit("policy", ["schema_version": version, "foreground_allowed": false])
+            precondition(model.controls.foregroundAllowed)
+        }
+        model.error = ""
+        var legacy = envelope("action_status", ["action_id": "legacy-action", "stage": "running"])
+        legacy["schema_version"] = nil; legacy["event_id"] = nil; legacy["kind"] = nil
+        model.receive(legacy)
+        precondition(model.controls.activeAction?.id == "legacy-action", "缺 version 的 event alias 保持兼容")
+        legacy = envelope("action_status", ["event": "finished", "state": "completed", "action_id": "legacy-canonical", "stage": "running"])
+        // legacy 不做 v1 完整校验：缺 text/step/policy_revision/timestamp 仍保持既有兼容。
+        legacy["schema_version"] = nil; legacy["text"] = nil; legacy["step"] = nil; legacy["policy_revision"] = nil; legacy["timestamp"] = nil
+        model.receive(legacy)
+        precondition(model.controls.activeAction?.id == "legacy-canonical" && model.phase == .running,
+                     "无 version 的 structured envelope 也必须 kind 优先")
+        model.receive(["event": "message", "task_id": model.taskID, "message_id": "legacy-correction", "kind": "correction", "state": "queued", "text": "旧消息类型"])
+        precondition(model.controls.queue.last?.kind == "correction", "legacy payload kind 不能误作事件名")
+        emit("action_status", ["action_id": "action-1", "stage": "outcome_unknown"])
+        precondition(model.controls.activeAction?.execution.contains("error") == true && model.controls.activeAction?.effect == "unknown",
+                     "stage 增量不能覆盖原始失败回执为成功或空结果")
+        let beforeWrong = model.controls.recentActions
+        var wrong = envelope("action_status", ["action_id": model.taskID, "cell_request_id": model.taskID, "stage": "running"])
+        wrong["native_task_id"] = nil; wrong["task_id"] = "other-harness-task"
+        model.receive(wrong)
+        wrong["task_id"] = NSNull(); model.receive(wrong)
+        wrong["task_id"] = model.taskID; wrong["native_task_id"] = "old-native"; model.receive(wrong)
+        emit("action_status", ["session_id": "old-session", "action_id": "stale", "stage": "running"])
+        precondition(model.controls.recentActions == beforeWrong, "action/cell ID 不得充当 transport task ID；旧 session 必须拒绝")
+        emit("model_status", ["stage": "waiting", "text": "真实 API 等待", "attempt": 1, "attempt_id": "attempt-a"])
+        precondition(model.controls.activeAction == nil && model.controls.recentActions == beforeWrong)
+        emit("action_status", ["action_id": "action-2", "stage": "running", "attempt_id": "attempt-a"])
+        precondition(model.taskProgressTitle == "真实 API 等待", "API 阶段不被工具状态覆盖")
+        emit("progress", ["phase": "execution"])
+        precondition(model.taskProgressTitle == L("工具执行中"))
+        for phase in [TaskPhase.stopping, .pausing, .paused, .waiting] {
+            model.phase = phase
+            precondition(model.taskProgressTitle == phase.label, "停止/暂停/问题优先级高于动作")
+        }
+        model.phase = .running
+        emit("approval", ["approval_id": "approval-d01", "text": "确认授权"])
+        precondition(model.taskProgressTitle == L("等待前台审批"))
+        emit("approval_closed", ["approval_id": "approval-d01"])
+        emit("model_status", ["stage": "waiting", "text": "新 API 请求", "attempt": 2, "attempt_id": "attempt-b"])
+        let beforeAttempt = model.controls.recentActions
+        emit("action_status", ["action_id": "old-attempt", "stage": "running", "attempt_id": "attempt-a"])
+        emit("action_status", ["action_id": "old-attempt-no-id", "stage": "running", "attempt": 1])
+        precondition(model.controls.activeAction == nil && model.controls.recentActions == beforeAttempt && model.controls.attemptID == "attempt-b")
+        emit("progress", ["phase": "execution"])
+        emit("action_status", ["action_id": "action-2", "stage": "receipt_received", "execution": "failed", "effect": "none", "attempt_id": "attempt-b"])
+        emit("turn_finished", ["state": "completed", "text": "仅业务终态结束轮次"])
+        precondition(model.phase == .completed && model.controls.activeAction == nil)
+        let recoveredSends = model.bridge.commands.count
+        let recoveredTurns = model.conversationTurns.count
+        let recoveredHistory = model.history.count
+        let recovery = envelope("recovery_report", ["text": "请核查桌面，不要重发", "actions": [
+            ["action_id": "r-unknown", "status": "outcome_unknown", "execution": "unknown"],
+            ["action_id": "r-receipt", "status": "receipt_unverified", "effect": "unknown"],
+            ["action_id": "r-rejected", "status": "rejected"], ["action_id": "r-cancelled", "status": "cancelled_before_dispatch"],
+            ["action_id": "r-not-sent", "status": "not_dispatched"]]])
+        model.receive(recovery)
+        precondition(model.controls.recoveryUnknownCount == 1 && model.controls.recoveryUnverifiedCount == 1)
+        precondition(model.recoveryNotice.contains("请核查桌面") && model.controls.recoveryActions.count == 5)
+        precondition(model.phase == .completed && model.controls.activeAction == nil && !model.taskProgressIndeterminate)
+        precondition(model.conversationTurns.count == recoveredTurns && model.history.count == recoveredHistory && model.bridge.commands.count == recoveredSends)
+        let notice = model.recoveryNotice
+        var oldRecovery = envelope("recovery_report", ["session_id": "old-session", "text": "旧恢复", "actions": []])
+        model.receive(oldRecovery)
+        oldRecovery["session_id"] = nil; model.receive(oldRecovery)
+        // v1 缺 session_id 已被信封拒绝；legacy 形态仍须由恢复快照自身的 session 要求拒绝。
+        oldRecovery["schema_version"] = nil; model.receive(oldRecovery)
+        oldRecovery["schema_version"] = 1
+        oldRecovery["session_id"] = "session-d01"; oldRecovery["native_task_id"] = "old-native"; model.receive(oldRecovery)
+        precondition(model.recoveryNotice == notice && model.phase == .completed)
+        emit("recovery_report", ["actions": (0..<70).map { ["action_id": "recovered-\($0)", "status": "outcome_unknown"] }])
+        precondition(model.controls.recoveryActions.count == 64 && model.controls.recoveryUnknownCount == 70,
+                     "恢复快照有界，但提示数量必须包括全部未知动作")
+        precondition(model.phase == .completed && model.bridge.commands.count == recoveredSends)
+        turn = "a-opaque-turn"; index = 1
+        emit("turn_started", ["text": "新轮次"])
+        emit("model_status", ["stage": "waiting", "text": "新轮请求", "attempt": 1, "attempt_id": "new-turn-attempt"])
+        let newTurnSequence = model.controls.envelopeSequence
+        let newTurnHistory = model.controls.recentActions
+        emit("action_status", ["turn_id": "z-opaque-turn", "turn_index": 0, "action_id": "late-turn", "stage": "running"])
+        emit("action_status", ["turn_id": "unseen-older", "turn_index": 0, "action_id": "late-numeric", "stage": "running"])
+        emit("action_status", ["turn_id": "future-turn", "turn_index": 99, "action_id": "not-a-turn-start", "stage": "running"])
+        emit("action_status", ["attempt_id": "attempt-b", "action_id": "late-attempt", "stage": "running"])
+        precondition(model.controls.canonicalTurnID == turn && model.controls.turnIndex == index)
+        precondition(model.controls.envelopeSequence == newTurnSequence && model.controls.recentActions == newTurnHistory && model.controls.activeAction == nil)
+        precondition(model.taskProgressTitle == "新轮请求" && model.phase == .running)
+        emit("progress", ["phase": "execution"])
+        for number in 0..<300 { emit("action_status", ["action_id": "bounded-\(number)", "stage": "receipt_received"]) }
+        precondition(model.controls.recentActions.count == 64 && model.controls.recentActions.first?.id == "bounded-236")
+        precondition(model.controls.seenEventIDs.count == 256 && model.controls.seenEventOrder.count == 256)
+        precondition(!model.controls.seenEventIDs.contains(receiptID))
+        let boundedSequence = model.controls.envelopeSequence
+        model.receive(receipt.merging(["sequence": 1]) { _, value in value })
+        precondition(model.controls.envelopeSequence == boundedSequence, "event ID 淘汰后仍有 sequence 防迟到")
+        model.resetSessionControls(); model.taskID = "new-native"
+        precondition(model.controls.seenEventIDs.isEmpty && model.controls.envelopeSequence == nil && model.controls.recentActions.isEmpty)
+        precondition(model.recoveryNotice.isEmpty && model.controls.canonicalTurnID == nil && model.controls.envelopeSessionID.isEmpty)
+        emit("turn_started", ["event_id": receiptID, "sequence": 1, "session_id": "new-session", "turn_index": 0])
+        precondition(model.controls.seenEventIDs.contains(receiptID), "新 task 必须清除旧去重缓存")
+        let opaque = AppModel(dataDirectory: directory.appendingPathComponent("opaque"))
+        opaque.taskID = "opaque-native"; opaque.phase = .running
+        func canonical(_ kind: String, _ id: String, _ sequence: Int, _ fields: [String: Any] = [:]) {
+            var event: [String: Any] = ["schema_version": 1, "kind": kind, "event_id": "opaque-\(sequence)", "sequence": sequence,
+                "session_id": "opaque-session", "stream_id": "opaque-stream", "native_task_id": "opaque-native", "task_id": "harness-opaque",
+                "turn_id": id, "step_id": NSNull(), "step": NSNull(), "timestamp": "2026-10-21T00:00:00Z", "origin": "harness",
+                "policy_revision": 0, "text": ""]
+            for (key, value) in fields { event[key] = value }
+            opaque.receive(event)
+        }
+        canonical("turn_started", "z", 1)
+        canonical("turn_started", "a", 2)
+        canonical("action_status", "z", 3, ["action_id": "late-z", "stage": "running"])
+        precondition(opaque.controls.canonicalTurnID == "a" && opaque.controls.turnIndex == 1 && opaque.controls.recentActions.isEmpty)
+        canonical("action_status", "a", 4, ["action_id": "actual-a", "stage": "running"])
+        precondition(opaque.controls.activeAction?.id == "actual-a", "canonical turn_id 不按字典序判断先后")
+        canonical("model_status", "a", 5, ["stage": "waiting", "attempt_id": "opaque-a"])
+        canonical("turn_started", "b", 6)
+        canonical("action_status", "b", 7, ["action_id": "old-attempt-gap", "stage": "running", "attempt_id": "opaque-a"])
+        precondition(opaque.controls.activeAction == nil && opaque.controls.attemptID == nil && opaque.controls.envelopeSequence == 6,
+                     "新轮模型请求尚未到达时，旧 attempt 也不能恢复动作状态")
+        canonical("model_status", "c", 8, ["stage": "waiting", "attempt_id": "opaque-c"])
+        canonical("intent_delta", "c", 9, ["text": "轮次启动前的预览", "attempt_id": "opaque-c"])
+        canonical("turn_started", "c", 10)
+        canonical("turn_started", "c", 11)
+        precondition(opaque.controls.envelopeSequence == 10, "同一 canonical turn 的重复启动也须拒绝")
+        precondition(opaque.controls.turnIndex == 3 && opaque.currentIntent == "轮次启动前的预览",
+                     "canonical 预先到达的模型快照不能被 turn_started 重置两次")
+        print("D01 路由契约通过：canonical/native 身份、kind 优先、legacy alias、版本拒绝、去重/迟到、有界动作、回执非业务完成、恢复只读、旧 turn/attempt 与 API/审批优先级。")
+    }
+    // 真实 AppModel 入口：带 schema_version 的畸形 flat v1 帧整帧忽略，不改变授权/phase/sequence/缓存，也不发送请求。
+    @MainActor static func envelopeValidationContracts(directory: URL) throws {
+        let model = AppModel(dataDirectory: directory)
+        model.ready = true; model.bridge.acknowledge = false
+        model.taskID = "strict-native"; model.conversationOpen = true; model.phase = .running
+        var sequence = 0
+        // 与 Python EventClock.make 同形：无 event alias，step/step_id 可为 null。
+        func frame(_ kind: String, _ fields: [String: Any] = [:]) -> [String: Any] {
+            sequence += 1
+            var event: [String: Any] = ["schema_version": 1, "event_id": "strict-\(sequence)", "sequence": sequence,
+                "session_id": "strict-session", "stream_id": "strict-stream", "task_id": "harness-strict", "native_task_id": model.taskID,
+                "turn_id": "strict-turn", "turn_index": 0, "step_id": NSNull(), "step": NSNull(), "timestamp": "2026-10-21T00:00:00Z",
+                "kind": kind, "origin": "harness", "policy_revision": 0, "text": ""]
+            for (key, value) in fields { event[key] = value }
+            return event
+        }
+        model.receive(frame("turn_started", ["text": "严格信封"]))
+        model.receive(frame("policy", ["foreground_allowed": false, "ask_user_enabled": true]))
+        model.receive(frame("action_status", ["action_id": "strict-action", "stage": "running", "step": 0, "step_id": "strict-session/step/0"]))
+        precondition(model.controls.activeAction?.id == "strict-action" && model.controls.turnIndex == 0 && model.error.isEmpty,
+                     "完整生产形状的 v1 帧必须接受")
+        precondition(model.controls.lastEnvelope["stream_id"] == "strict-stream" && model.controls.envelopeSequence == sequence)
+        struct Snapshot: Equatable {
+            let foreground: Bool, askUser: Bool, approvals: [SessionApproval], closedApprovals: Set<String>
+            let phase: TaskPhase, sending: Bool, envelopeSequence: Int?, turnSequence: Int?, turnIndex: Int, turnID: String?
+            let seen: Set<String>, seenOrder: [String], lastEnvelope: [String: String], actions: [NativeActionStatus], activeAction: String?
+            let skills: [SkillEntry], catalogSequence: Int?, session: String, commands: Int, turns: Int
+            @MainActor init(_ model: AppModel) {
+                let c = model.controls
+                foreground = c.foregroundAllowed; askUser = c.askUserEnabled; approvals = c.approvals; closedApprovals = c.closedApprovals
+                phase = model.phase; sending = model.sendingMessage; envelopeSequence = c.envelopeSequence; turnSequence = c.sequence
+                turnIndex = c.turnIndex; turnID = c.canonicalTurnID; seen = c.seenEventIDs; seenOrder = c.seenEventOrder
+                lastEnvelope = c.lastEnvelope; actions = c.recentActions; activeAction = c.activeActionID
+                skills = c.skills; catalogSequence = c.catalogSequence; session = c.envelopeSessionID
+                commands = model.bridge.commands.count; turns = model.conversationTurns.count
+            }
+        }
+        // 每个探针若被接受都会改变可见状态；最后逐一用合法帧做正向对照。
+        let probes: [(String, [String: Any])] = [
+            ("policy", ["foreground_allowed": true, "ask_user_enabled": false]),
+            ("approval", ["approval_id": "strict-approval", "text": "伪造授权"]),
+            ("action_status", ["action_id": "strict-forged", "stage": "verified"]),
+            ("skills_catalog", ["native_task_id": NSNull(), "task_id": NSNull(), "skills": [["name": "forged-skill"]]]),
+            ("state", ["state": "completed"]),
+            ("turn_started", ["turn_id": "strict-next", "turn_index": 1, "text": "伪造新轮"]),
+        ]
+        var mutations: [(String, (inout [String: Any]) -> Void)] = [
+            ("schema_version=true", { $0["schema_version"] = true }), ("schema_version=\"1\"", { $0["schema_version"] = "1" }),
+            ("schema_version=1.0", { $0["schema_version"] = 1.0 }), ("schema_version=2", { $0["schema_version"] = 2 }),
+            ("schema_version=0", { $0["schema_version"] = 0 }), ("schema_version=null", { $0["schema_version"] = NSNull() }),
+            ("sequence=0", { $0["sequence"] = 0 }), ("sequence=-1", { $0["sequence"] = -1 }), ("sequence=true", { $0["sequence"] = true }),
+            ("sequence=float", { $0["sequence"] = Double($0["sequence"] as! Int) }), ("sequence=string", { $0["sequence"] = String($0["sequence"] as! Int) }),
+            ("policy_revision=-1", { $0["policy_revision"] = -1 }), ("policy_revision=false", { $0["policy_revision"] = false }),
+            ("policy_revision=0.0", { $0["policy_revision"] = 0.0 }), ("policy_revision=\"0\"", { $0["policy_revision"] = "0" }),
+            ("text=null", { $0["text"] = NSNull() }), ("text=1", { $0["text"] = 1 }),
+            ("step=-1", { $0["step"] = -1 }), ("step=true", { $0["step"] = true }), ("step=1.0", { $0["step"] = 1.0 }), ("step=\"1\"", { $0["step"] = "1" }),
+            ("stream_id=\"\"", { $0["stream_id"] = "" }), ("stream_id=null", { $0["stream_id"] = NSNull() }), ("stream_id=1", { $0["stream_id"] = 1 }),
+            // v1 帧不能退回 event alias 取事件名。
+            ("kind missing with event alias", { $0["event"] = $0["kind"]; $0["kind"] = nil }),
+        ]
+        for key in ["sequence", "policy_revision", "text", "step", "task_id", "turn_id", "step_id"] {
+            mutations.append(("\(key) missing", { $0[key] = nil }))
+        }
+        for key in ["sequence", "policy_revision"] { mutations.append(("\(key)=null", { $0[key] = NSNull() })) }
+        for key in ["event_id", "session_id", "kind", "origin", "timestamp"] {
+            mutations += [("\(key) missing", { $0[key] = nil }), ("\(key)=\"\"", { $0[key] = "" }),
+                          ("\(key)=1", { $0[key] = 1 }), ("\(key)=null", { $0[key] = NSNull() })]
+        }
+        for key in ["task_id", "turn_id", "step_id"] {
+            mutations += [("\(key)=1", { $0[key] = 1 }), ("\(key)=false", { $0[key] = false })]
+        }
+        // JSON 解码后的 NSNumber 同样区分整数、浮点与 bool。
+        func decoded(_ event: [String: Any], replacing token: String = "", with value: String = "") throws -> [String: Any] {
+            var text = String(data: try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]), encoding: .utf8)!
+            if !token.isEmpty {
+                precondition(text.contains(token), "JSON fixture 未命中 \(token)")
+                text = text.replacingOccurrences(of: token, with: value)
+            }
+            return try JSONSerialization.jsonObject(with: Data(text.utf8)) as! [String: Any]
+        }
+        let baseline = Snapshot(model)
+        var rejected = 0
+        for (kind, fields) in probes {
+            for (label, mutate) in mutations {
+                var event = frame(kind, fields); mutate(&event)
+                model.error = ""
+                model.receive(event)
+                precondition(!model.error.isEmpty && Snapshot(model) == baseline, "畸形 v1 帧必须整帧忽略：\(kind) \(label)")
+                rejected += 1
+            }
+            let json = try decoded(frame(kind, fields))
+            let number = json["sequence"] as! Int
+            for (token, value) in [("\"schema_version\":1,", "\"schema_version\":1.0,"), ("\"schema_version\":1,", "\"schema_version\":1e0,"),
+                                   ("\"schema_version\":1,", "\"schema_version\":true,"), ("\"sequence\":\(number),", "\"sequence\":\(number).0,"),
+                                   ("\"policy_revision\":0,", "\"policy_revision\":0.0,"), ("\"policy_revision\":0,", "\"policy_revision\":false,"),
+                                   ("\"step\":null,", "\"step\":0.0,"), ("\"step\":null,", "\"step\":true,")] {
+                model.error = ""
+                model.receive(try decoded(json, replacing: token, with: value))
+                precondition(!model.error.isEmpty && Snapshot(model) == baseline, "JSON 浮点/bool 必须拒绝：\(kind) \(value)")
+                rejected += 1
+            }
+        }
+        precondition(model.controls.foregroundAllowed == false && model.controls.approvals.isEmpty && model.phase == .running)
+        model.error = ""
+        // 正向对照：同一探针的合法帧（含 JSON 解码 NSNumber）确实会生效，证明上面是信封校验而非其他路由拦截。
+        model.receive(try decoded(frame("policy", probes[0].1)))
+        precondition(model.controls.foregroundAllowed && !model.controls.askUserEnabled && model.error.isEmpty)
+        model.receive(frame("approval", probes[1].1))
+        precondition(model.controls.approvals.map(\.id) == ["strict-approval"])
+        model.receive(try decoded(frame("action_status", probes[2].1.merging(["step": 0, "step_id": "strict-session/step/0"]) { _, value in value })))
+        precondition(model.controls.activeAction?.id == "strict-forged" && model.controls.activeAction?.metadata["stream_id"] == "strict-stream")
+        model.receive(frame("skills_catalog", probes[3].1))
+        precondition(model.controls.skills.map(\.name) == ["forged-skill"] && model.controls.catalogSequence == sequence)
+        model.receive(frame("state", probes[4].1))
+        precondition(model.phase == .completed)
+        model.receive(frame("turn_started", probes[5].1))
+        precondition(model.controls.turnIndex == 1 && model.controls.canonicalTurnID == "strict-next" && model.phase == .running)
+        precondition(model.controls.envelopeSequence == sequence && model.error.isEmpty && model.bridge.commands.count == baseline.commands)
+        print("D01 严格信封契约通过：\(rejected) 个畸形 v1 帧（含 JSON 1.0/bool）未改变授权/phase/sequence/缓存且未发请求；合法对照帧生效。")
     }
     @MainActor static func previewContracts(directory: URL) {
         let model = AppModel(dataDirectory: directory)

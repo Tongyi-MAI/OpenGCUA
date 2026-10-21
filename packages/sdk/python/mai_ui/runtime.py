@@ -66,9 +66,25 @@ class PointRef:
     _scope: str = dataclasses.field(repr=False)
 
 
+def _ax_provenance(d):
+    """Mirror mu_core normalize: missing or unrecognized provenance is unknown,
+    and only an explicit native report may carry a settable verdict."""
+
+    def source(key, allowed):
+        return d.get(key) if d.get(key) in allowed else "unknown"
+
+    editable = isinstance(d.get("editable"), bool)
+    d["editable_source"] = source("editable_source", ("native", "role_hint")) if editable else "unknown"
+    d["actions_source"] = source("actions_source", ("native",))
+    native = isinstance(d.get("value_settable"), bool) and source("value_settable_source", ("native",)) == "native"
+    d["value_settable"] = d["value_settable"] if native else None
+    d["value_settable_source"] = "native" if native else "unknown"
+
+
 def _node(row, at, revision, dirty):
     d = dict(row)
     d.pop("target_token", None)
+    _ax_provenance(d)
     a = d.pop("selection_start", -1)
     b = d.pop("selection_end", -1)
     text = d.get("text") or ""
@@ -262,7 +278,11 @@ class Observation:
                     fields.append(f"{key}={json.dumps(value or '', ensure_ascii=False)}")
             for key in ("editable", "focused", "password"):
                 if getattr(node, key):
-                    fields.append(key)
+                    # A role-derived editable flag is a hint, never proof of a writable AXValue.
+                    hint = key == "editable" and node.editable_source == "role_hint"
+                    fields.append("editable=role_hint" if hint else key)
+            if node.value_settable_source == "native" and node.value_settable is not None:
+                fields.append("value_settable=" + str(node.value_settable).lower())
             for key in ("enabled", "visible"):
                 if getattr(node, key) is False:
                     fields.append(f"{key}=false")

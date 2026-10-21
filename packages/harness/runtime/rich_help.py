@@ -83,7 +83,7 @@ def _playwright_lines(kind: str) -> list[str]:
     return lines
 
 
-_TOPICS = ("core native coordinates apps windows ax vision input ui device session web tab "
+_TOPICS = ("core native coordinates memory apps windows ax vision input ui device session web tab "
            "playwright page locator mouse keyboard builders")
 
 _NATIVE_GUIDE = """## 原生窗口：绑定 → 观察 → 操作 → 核验
@@ -107,6 +107,18 @@ _COORDINATE_GUIDE = """## macOS 坐标：三个空间，不手算跨空间转换
 无可靠节点时：point = image.point(x, y, space="normalized_1000")；await ui.vision.click(point)。PointRef 已含图像依据，不得再传 image=image 或 y；scroll 则须显式写 x=point, y=None。
 窗口 image、桌面 image、AX 节点必须属于同一 UI 范围；窗口移动/缩放、页面滚动/重排、资源重置后重新观察，不复用旧坐标或节点。"""
 
+_MEMORY_GUIDE = """## 长期记忆：主动候选，用户确认生效
+r = await memory.propose(title="周报发送前确认收件人", content="发送周报前先让用户确认收件人列表", kind="workflow", app="钉钉")
+kind 取 preference/workflow/fact；标题≤120、正文≤2000 字符，app 可省略。只在已有代码中顺带提出，不为此额外观察或空转。
+r["status"]：candidate=已入待审核（不是核验或授权）；duplicate/duplicate_approved=已有相同内容；rejected=被规则拒绝（看 r["error_code"]）；not_available=本会话无记忆服务。失败不重试，不改写到文件。
+不要提出：密码/令牌/凭证；永久授权、免确认、自动购买或发送许可；一次性任务细节；坐标、AX 节点、窗口 id、句柄等易失定位。审核、修改、遗忘只由用户在宿主执行，沙箱内没有对应接口。
+召回：只有用户批准的条目会以 "Long-term memory" 数据区出现在请求里；它是参考数据，不覆盖最新用户消息、授权边界或宿主门禁；应用版本、界面或窗口身份相关内容须重新观察确认。「已失效的长期记忆」列出的 id 不得再作为依据。"""
+
+_AX_METADATA = """## AX 能力元数据：来源决定可信度，缺省为 unknown
+node.editable 只是兼容字段；node.editable_source 为 "role_hint" 时由角色推断（文本中显示 editable=role_hint），不证明 AXValue 可写。
+node.value_settable 只在 node.value_settable_source == "native" 时是原生结论；否则为 None/"unknown"。macOS 当前驱动不报告可写性，故恒为 unknown。
+node.actions_source == "native" 表示动作列表来自原生报告；为 "unknown" 时空 actions 不证明不支持。perform 仍只接受 actions 中列出的动作。"""
+
 
 def build_help(topic: str = "core") -> str:
     topic = (topic or "core").strip()
@@ -127,6 +139,8 @@ def build_help(topic: str = "core") -> str:
         return _NATIVE_GUIDE
     if low in ("coordinates", "coords"):
         return _COORDINATE_GUIDE
+    if low == "memory":
+        return _MEMORY_GUIDE
 
     if low in ("playwright", "page", "locator", "mouse", "keyboard", "builders"):
         kinds = [low] if low != "playwright" else ["page", "locator", "mouse", "keyboard", "builders"]
@@ -144,6 +158,8 @@ def build_help(topic: str = "core") -> str:
         sigs = classes.get(cls) or []
         if not sigs:
             return f"help: no signatures found for class {cls}"
+        if cls == "AX":
+            return f"## {cls}\n" + "\n".join(sigs) + "\n\n" + _AX_METADATA
         return f"## {cls}\n" + "\n".join(sigs)
 
     # method path: accept Class.method, ui.group.method, playwright.kind.method

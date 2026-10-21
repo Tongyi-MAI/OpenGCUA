@@ -77,13 +77,13 @@ def test_lifecycle_frame_survives_unterminated_reasoning_and_hub_snapshot(tmp_pa
     hub = demo_hub.Hub({})
     for line in output.getvalue().splitlines():
         hub.session._push_line(line)
-    assert hub.session.model_request == frame
+    assert all(hub.session.model_request[key] == value for key, value in frame.items())
     path = tmp_path / "traj.json"
     path.write_text(json.dumps({"status": "running", "steps": [{"step": 2}]}))
     hub.session.run_dir = str(tmp_path)
     hub.session.status = "exited"
     state = hub.state()
-    assert state["model_request"] == frame
+    assert all(state["model_request"][key] == value for key, value in frame.items())
     assert state["phase"] == "attention"
 
 

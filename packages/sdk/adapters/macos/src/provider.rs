@@ -759,7 +759,8 @@ fn node(
     label: &str,
     value: Option<&str>,
 ) -> Value {
-    json!({"id":id,"parent_id":parent,"app_id":app,"window_id":window,"class_name":role,"automation_id":null,"role":role,"name":label,"text":value,"hint":null,"text_status":"readable","bounds":null,"enabled":null,"visible":null,"focused":null,"editable":false,"password":false,"actions":[]})
+    // Cua reports no AX settability, so `editable` is only a role hint here.
+    json!({"id":id,"parent_id":parent,"app_id":app,"window_id":window,"class_name":role,"automation_id":null,"role":role,"name":label,"text":value,"hint":null,"text_status":"readable","bounds":null,"enabled":null,"visible":null,"focused":null,"editable":false,"editable_source":"role_hint","value_settable":null,"value_settable_source":"unknown","password":false,"actions":[],"actions_source":"unknown"})
 }
 fn receipt(r: &Value) -> Value {
     let d = &r["structuredContent"];
@@ -974,6 +975,59 @@ mod tests {
         let search = call(&p, json!({"op":"observe","app_id":app,"window_id":window,"tree":true})).await;
         assert_eq!(search["nodes"][2]["role"], "AXSearchField");
         assert_eq!(search["nodes"][2]["editable"], true);
+        assert_eq!(search["nodes"][2]["editable_source"], "role_hint");
+        assert!(search["nodes"][2]["value_settable"].is_null());
+        assert_eq!(search["nodes"][2]["value_settable_source"], "unknown");
+        p.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ax_capability_metadata_never_promotes_role_hints_or_unreported_fields() {
+        let mut command = tokio::process::Command::new("python3");
+        command.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixture/mock_cua.py"));
+        let p = MacosProvider::connect_command(command, tempfile::tempfile().unwrap(), false)
+            .await
+            .unwrap();
+        let apps = call(&p, json!({"op":"list_apps"})).await;
+        let app = &apps["apps"][0]["id"];
+        let inventory = call(&p, json!({"op":"list_windows","app_id":app})).await;
+        let window = &inventory["windows"][0]["id"];
+        let frame = json!({"x":1,"y":2,"w":10,"h":20});
+        // Static PDF label with a press action, a text field with only a press
+        // action, a row whose actions were omitted, and a row carrying keys
+        // outside the Cua 0.36 contract.
+        let rows = json!([
+            {"role":"AXStaticText","label":"Name:","actions":["AXPress"],"frame":frame},
+            {"role":"AXTextField","label":"Name","value":"","actions":["AXPress"],"frame":frame},
+            {"role":"AXTextField","label":"City","frame":frame},
+            {"role":"AXStaticText","label":"Date","actions":["AXScrollToVisible"],"settable":true,
+             "value_settable":true,"value_settable_source":"native","editable":true,"editable_source":"native","frame":frame},
+        ]);
+        p.tool("fixture_set_ax_state", json!({"elements_complete":true,"rows":rows})).await.unwrap();
+        let ax = call(&p, json!({"op":"observe","app_id":app,"window_id":window,"tree":true})).await;
+        let nodes = ax["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 6);
+        for n in nodes {
+            assert_eq!(n["editable_source"], "role_hint");
+            assert!(n["value_settable"].is_null());
+            assert_eq!(n["value_settable_source"], "unknown");
+        }
+        let (label, field, bare, extra) = (&nodes[2], &nodes[3], &nodes[4], &nodes[5]);
+        assert_eq!(label["editable"], false);
+        assert_eq!(label["actions"], json!([{"id":"macos.ax.press"}]));
+        assert_eq!(label["actions_source"], "native");
+        assert_eq!(field["editable"], true);
+        assert_eq!(field["actions_source"], "native");
+        assert_eq!(bare["editable"], true);
+        assert_eq!(bare["actions"], json!([]));
+        assert_eq!(bare["actions_source"], "unknown");
+        assert_eq!(extra["editable"], false);
+        assert_eq!(extra["actions"], json!([]));
+        assert_eq!(extra["actions_source"], "native");
+        assert!(extra.get("settable").is_none());
+        for synthetic in &nodes[..2] {
+            assert_eq!(synthetic["actions_source"], "unknown");
+        }
         p.close().await.unwrap();
     }
 

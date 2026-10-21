@@ -9,6 +9,7 @@ comes from ``mac_agent.build_parser()``.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import queue
@@ -21,8 +22,10 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from console_protocol import encode_console_message
+from event_protocol import EventClock, TERMINAL_STATUSES, terminal_state, terminal_status, validate_event
 
 REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
@@ -103,6 +106,91 @@ def build_schema() -> list[dict]:
     return schema
 
 
+EVENT_BACKLOG_LIMIT = 2000
+EVENT_QUEUE_LIMIT = 256
+SUMMARY_LIMIT = 64
+TERMINAL_KINDS = frozenset({"finished", "turn_finished", "aborted", "interrupted", "turn_complete",
+                            "task_finished", "gui_turn_complete"})
+# 旧 finished 帧把 final_status 放在 text；只认状态词，绝不从回答正文推断成功。
+RECOVERY_PRIORITY = {"outcome_unknown": 0, "receipt_unverified": 1, "not_dispatched": 2}
+RECOVERY_FIELDS = ("action_id", "status", "operation", "resource_id", "execution", "effect", "verification")
+
+
+def recovery_summary(event: dict) -> dict:
+    """只读历史动作对账：结果未知优先保留，计数覆盖全部条目；不产生 verified、重试或授权。"""
+    raw = event.get("actions")
+    rows = [{key: value[:200] if isinstance(value, str) else value for key in RECOVERY_FIELDS
+             if key in item and (isinstance(value := item[key], (str, int, float, bool)) or value is None)}
+            for item in (raw if isinstance(raw, list) else []) if isinstance(item, dict)]
+    statuses = [row.get("status") for row in rows]
+    order = sorted(range(len(rows)), key=lambda index: RECOVERY_PRIORITY.get(statuses[index], 3))
+    actions = [rows[index] for index in order[:SUMMARY_LIMIT]]
+    return {**{key: event.get(key) for key in ("kind", "event_id", "sequence", "session_id", "stream_id",
+                                               "origin", "timestamp")},
+            "text": str(event.get("text") or "")[:4000], "actions": actions, "total": len(rows),
+            "unknown": statuses.count("outcome_unknown"), "unverified": statuses.count("receipt_unverified"),
+            "not_dispatched": statuses.count("not_dispatched"), "omitted": len(rows) - len(actions),
+            "view_only": True, "authoritative": False}
+
+
+def is_v1_envelope(event: dict) -> bool:
+    """只校验共享 flat envelope，不限制扩展语义 kind/payload。"""
+    try:
+        validate_event(event)
+    except ValueError:
+        return False
+    return True
+
+
+def event_cursor(path: str, headers) -> int | None:
+    """浏览器重连 header 优先于初次连接的 after 查询参数。"""
+    query = parse_qs(urlsplit(path).query, keep_blank_values=True)
+    raw = headers.get("Last-Event-ID")
+    if raw is None:
+        values = query.get("after")
+        if values is None:
+            return None
+        if len(values) != 1:
+            raise ValueError("after must be one non-negative delivery cursor")
+        raw = values[0]
+    if not isinstance(raw, str) or not re.fullmatch(r"[0-9]{1,20}", raw):
+        raise ValueError("cursor must be a non-negative delivery cursor")
+    return int(raw)
+
+
+def sse_frame(event: dict) -> bytes:
+    # seq 是 Hub delivery cursor；绝不能使用源 envelope.sequence 作 SSE id。
+    return f"id: {event['seq']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
+
+
+def serve_event_stream(handler, session) -> None:
+    try:
+        backlog, subscriber = session.subscribe_events(event_cursor(handler.path, handler.headers))
+    except ValueError as exc:
+        handler._json({"error": str(exc)}, 400)
+        return
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.end_headers()
+        for event in backlog:
+            handler.wfile.write(sse_frame(event))
+        handler.wfile.flush()
+        while True:
+            try:
+                event = subscriber.get(timeout=15)
+            except queue.Empty:
+                handler.wfile.write(b": keepalive\n\n")
+            else:
+                handler.wfile.write(sse_frame(event))
+            handler.wfile.flush()
+    except (BrokenPipeError, TimeoutError, OSError):
+        pass
+    finally:
+        session.unsubscribe_events(subscriber)
+
+
 class Session:
     def __init__(self, sid: str, name: str, config: dict, first_message: str, port_note: str = ""):
         self.sid = sid
@@ -116,6 +204,9 @@ class Session:
         self.lock = threading.Lock()
         self._event_ready = threading.Condition(self.lock)
         self._subscribers: set[queue.Queue[dict]] = set()
+        self._seq = 0
+        self._compat_clock = EventClock(sid)
+        self.projection = self._empty_projection()
         self._lifecycle_lock = threading.RLock()
         self._generation = 0
         self.proc: subprocess.Popen | None = None
@@ -171,22 +262,198 @@ class Session:
         finally:
             self._close_transport_locked()
 
+    def _empty_projection(self) -> dict:
+        return {"session_id": None, "task_id": None, "turn_id": None, "attempt_id": None,
+                "phase": None, "model_status": None, "last_intent": None, "question": None,
+                "terminal": None, "actions": [], "completed_turns": [], "step": None,
+                "recovery_report": None, "source_sequence": -1}
+
+    def _compat_envelope_locked(self, event: dict) -> dict:
+        kind = event.get("kind") or event.get("type") or event.get("event") or "stdout"
+        fields = {key: value for key, value in event.items()
+                  if key not in {"kind", "text", "step", "task_id", "turn_id", "origin", "policy_revision"}}
+        wire = self._compat_clock.make(kind, text=str(event.get("text") or ""), step=event.get("step"),
+                                       task_id=event.get("task_id"), turn_id=event.get("turn_id"),
+                                       origin="hub_compat", policy_revision=0, **fields)
+        wire["step_id"] = event.get("step_id")
+        return wire
+
+    @staticmethod
+    def _summary(event: dict) -> dict:
+        keys = ("type", "retrying", "session_id", "task_id", "turn_id", "attempt_id", "event_id", "sequence",
+                "kind", "origin", "step", "step_id", "action_id", "resource_id", "observation_id",
+                "phase", "status", "state", "action_status", "stage", "at_ms", "attempt", "max_attempts",
+                "answer_displayed",
+                "timeout_seconds", "policy_revision", "execution", "effect", "verification", "name", "source", "text", "intent", "question",
+                "answer", "reason", "round_index", "block_index", "preview_type")
+        # 这是有界展示摘要，不是原始 run 或业务结果证明。
+        return {key: value[:4000] if isinstance(value, str) else value
+                for key in keys if key in event
+                and (isinstance(value := event[key], (str, int, float, bool)) or value is None)}
+
+    @staticmethod
+    def _scope(event: dict) -> tuple:
+        return tuple(event.get(key) for key in ("session_id", "turn_id", "attempt_id"))
+
+    def _project_locked(self, event: dict) -> None:
+        kind = event["kind"]
+        state = self.projection
+        structured = event.get("origin") != "hub_compat"
+        if kind == "reset":
+            self.projection = self._empty_projection()
+            return
+        if kind == "recovery_report" and not structured:
+            return  # 旧兼容帧不是对账来源
+        if structured:
+            scope = self._scope(event)
+            current = self._scope(state)
+            if scope[0] == current[0]:
+                turn = scope[1] if scope[1] is not None else current[1]
+                attempt = scope[2] if scope[2] is not None or turn != current[1] else current[2]
+                scope = (scope[0], turn, attempt)
+            if kind in {"stdout", "stream"}:
+                return
+            if any(self._scope(item)[:2] == scope[:2] and (
+                    item.get("turn_closed") or self._scope(item) == scope)
+                   for item in state["completed_turns"]):
+                return
+            if scope[0] == current[0] and event["sequence"] <= state["source_sequence"]:
+                return
+            if kind == "recovery_report" and scope[0] == current[0]:
+                # 会话级只读帧：不移动 turn/attempt，不改 phase/terminal。
+                state["source_sequence"] = event["sequence"]
+                state["recovery_report"] = recovery_summary(event)
+                return
+            if state["session_id"] is not None and scope != current:
+                if scope[0] != current[0]:
+                    state["recovery_report"] = None  # 对账只属于本 session
+                # 缺 attempt_id 的阶段/终态属于当前 turn，而非切回旧请求。
+                same_turn = scope[:2] == current[:2]
+                if same_turn and scope[2] is None:
+                    scope = current
+                else:
+                    state["completed_turns"].append({**dict(zip(
+                        ("session_id", "turn_id", "attempt_id"), current)), "turn_closed": not same_turn})
+                    state["completed_turns"] = state["completed_turns"][-SUMMARY_LIMIT:]
+                    if not same_turn:
+                        for key in ("phase", "model_status", "last_intent", "question", "terminal"):
+                            state[key] = None
+                        state["actions"] = []
+                    else:
+                        state["model_status"] = None
+            state.update(dict(zip(("session_id", "turn_id", "attempt_id"), scope)))
+            state["task_id"] = event.get("task_id")
+            state["source_sequence"] = event["sequence"]
+            if kind == "recovery_report":
+                state["recovery_report"] = recovery_summary(event)
+                return
+            if state["terminal"] and kind not in TERMINAL_KINDS | {"answer", "status", "state"}:
+                return
+        summary = self._summary(event)
+        if event.get("step") is not None:
+            state["step"] = event["step"]
+        if kind in {"user", "gui_turn_start", "turn_started", "task_started"}:
+            for key in ("terminal", "question", "model_status", "last_intent"):
+                state[key] = None
+            state["phase"] = "thinking"
+            state["actions"] = []
+        elif kind == "phase":
+            state["phase"] = event.get("phase") or event["text"]
+            if state["phase"] not in {"waiting_user", "question"}:
+                state["question"] = None
+        elif kind == "model_status":
+            state["model_status"] = summary
+        elif kind in {"intent", "intent_start", "intent_delta", "intent_end", "intent_final", "gui_intent", "gui_preview"}:
+            previous = state["last_intent"] or {}
+            same_block = all(previous.get(key) == event.get(key) for key in ("step", "block_index"))
+            prefix = previous.get("text", "") if same_block else ""
+            intent_kind = event.get("preview_type") if kind == "gui_preview" else kind
+            if intent_kind == "preview_reset":
+                state["last_intent"] = None
+                return
+            if intent_kind == "intent_delta":
+                summary["text"] = (prefix + str(event.get("delta") or event["text"]))[-4000:]
+            else:
+                summary["text"] = str(event.get("intent") or event["text"] or prefix)[-4000:]
+            state["last_intent"] = summary
+        elif kind == "question":
+            state["question"] = summary
+            state["phase"] = "waiting_user"
+        elif kind == "action_status":
+            action_key = tuple(event.get(key) for key in ("action_id", "step_id", "step", "resource_id"))
+            actions = state["actions"]
+            actions[:] = [item for item in actions if tuple(item.get(key) for key in
+                         ("action_id", "step_id", "step", "resource_id")) != action_key]
+            actions.append(summary)
+            state["actions"] = actions[-SUMMARY_LIMIT:]
+            state["phase"] = event.get("stage") or event.get("status") or event.get("action_status") or event["text"]
+        elif (kind == "answer" or kind in TERMINAL_KINDS
+              or kind in {"status", "state"} and event.get("status") in TERMINAL_STATUSES):
+            previous = state["terminal"] or {}
+            if kind in {"status", "state"} and previous:
+                return
+            # answer+finished 同轮共用一个终态：首个回答保留，状态取最新显式值，缺失时沿用前一终态。
+            status = terminal_status(event)
+            if status is None:
+                status = previous.get("terminal_status")
+            answer = previous.get("answer") or (event.get("text") if kind == "answer" else event.get("answer"))
+            if isinstance(answer, str) and answer:
+                summary["answer"] = answer[:4000]
+            summary.update(terminal_status=status, terminal_state=terminal_state(status))
+            state["terminal"] = summary
+            state["question"] = None
+            state["model_status"] = None
+            state["phase"] = summary["terminal_state"]
+
+    def _snapshot_locked(self, reason: str, *, overflow: bool = False) -> dict:
+        kind = "resync_snapshot" if overflow else "snapshot"
+        return {**self._compat_envelope_locked({"type": kind}), "type": kind, "seq": self._seq,
+                "cursor": self._seq, "state": copy.deepcopy(self.projection), "reason": reason,
+                "view_only": True, "authoritative": False}
+
+    def event_view(self) -> dict:
+        with self._event_ready:
+            return {"cursor": self._seq, "state": copy.deepcopy(self.projection),
+                    "structured_semantics": getattr(self, "structured_semantics_seen", False),
+                    "view_only": True, "authoritative": False}
+
     def push(self, event: dict) -> None:
         with self._event_ready:
-            self._seq = getattr(self, "_seq", 0) + 1
-            event = {**event, "seq": self._seq}
+            if "schema_version" in event:
+                if not is_v1_envelope(event):
+                    raise ValueError("invalid v1 event envelope")
+                event = copy.deepcopy(event)
+            else:
+                event = self._compat_envelope_locked(copy.deepcopy(event))
+            self._seq += 1
+            event.update(type=event["kind"], seq=self._seq)
+            self._project_locked(event)
             self.backlog.append(event)
-            if len(self.backlog) > 2000:
-                del self.backlog[:500]
-            subscribers = tuple(self._subscribers)
-        for subscriber in subscribers:
-            subscriber.put(event)
+            if len(self.backlog) > EVENT_BACKLOG_LIMIT:
+                del self.backlog[:len(self.backlog) - EVENT_BACKLOG_LIMIT]
+            # 注册、投影、捕获和入队都在同一锁中；慢客户端只替换成快照，不阻塞发布。
+            for subscriber in self._subscribers:
+                try:
+                    subscriber.put_nowait(event)
+                except queue.Full:
+                    while True:
+                        try:
+                            subscriber.get_nowait()
+                        except queue.Empty:
+                            break
+                    subscriber.put_nowait(self._snapshot_locked("slow_consumer", overflow=True))
 
-    def subscribe_events(self) -> tuple[list[dict], queue.Queue[dict]]:
-        """Return an atomic backlog snapshot plus a private live-event queue."""
-        subscriber: queue.Queue[dict] = queue.Queue()
+    def subscribe_events(self, cursor: int | None = None) -> tuple[list[dict], queue.Queue[dict]]:
+        """原 noarg 返回 backlog+私有队列；cursor 为 delivery cursor，非源 sequence。"""
+        subscriber: queue.Queue[dict] = queue.Queue(maxsize=EVENT_QUEUE_LIMIT)
         with self._event_ready:
-            backlog = list(self.backlog)
+            if cursor is not None and (type(cursor) is not int or cursor < 0 or cursor > self._seq):
+                raise ValueError("cursor must be between 0 and the current delivery watermark")
+            oldest = self.backlog[0]["seq"] if self.backlog else self._seq + 1
+            if cursor is not None and cursor < oldest - 1:
+                backlog = [self._snapshot_locked("retention_expired")]
+            else:
+                backlog = [event for event in self.backlog if cursor is None or event["seq"] > cursor]
             self._subscribers.add(subscriber)
         return backlog, subscriber
 
@@ -528,7 +795,8 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length) or b"{}")
 
     def do_GET(self) -> None:
-        if self.path == "/":
+        route = urlsplit(self.path).path
+        if route == "/":
             body = UI_HTML.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -542,35 +810,13 @@ class Handler(BaseHTTPRequestHandler):
                          "run_dir": s.run_dir, "anchor": s.anchor_title,
                          "config": s.config, "created_at": s.created_at}
                         for s in MANAGER.sessions.values()])
-        elif self.path.endswith("/stream"):
-            sid = self.path.split("/")[-2]
+        elif route.endswith("/stream"):
+            sid = route.split("/")[-2]
             session = MANAGER.sessions.get(sid)
             if not session:
                 self._json({"error": "no session"}, 404)
                 return
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            backlog, subscriber = session.subscribe_events()
-            try:
-                for event in backlog:
-                    self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
-                self.wfile.flush()
-                while True:
-                    try:
-                        event = subscriber.get(timeout=15)
-                    except queue.Empty:
-                        # keepalive 维持连接，避免 EventSource 重连后 backlog 重复渲染
-                        self.wfile.write(b": keepalive\n\n")
-                        self.wfile.flush()
-                        continue
-                    self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
-                    self.wfile.flush()
-            except (BrokenPipeError, TimeoutError, OSError):
-                pass
-            finally:
-                session.unsubscribe_events(subscriber)
+            serve_event_stream(self, session)
         elif self.path.endswith("/history"):
             sid = self.path.split("/")[-2]
             session = MANAGER.sessions.get(sid)
@@ -866,6 +1112,7 @@ async function refreshSessions() {
 }
 function closeReason() { reasonEl = null; }
 function pushEvent(ev) {
+  ev = {...ev, type: ev.kind || ev.type};
   const log = $('log');
   if (log.querySelector('.empty')) log.innerHTML = '';
   if (ev.type === 'reasoning') {
@@ -892,8 +1139,21 @@ function select(sid) {
   $('log').innerHTML = '';
   es = new EventSource(`/api/sessions/${sid}/stream`);
   es.onmessage = e => {
-    const ev = JSON.parse(e.data);
+    const raw = JSON.parse(e.data), ev = {...raw, type: raw.kind || raw.type};
     if (ev.seq !== undefined) { if (ev.seq <= lastSeq) return; lastSeq = ev.seq; }
+    if (['snapshot', 'resync_snapshot'].includes(ev.type)) {
+      const state = ev.state || {}; $('log').innerHTML = ''; closeReason();
+      $('st-status').textContent = state.phase || '—';
+      $('st-steps').textContent = state.step ?? '—';
+      const question = state.question;
+      $('askbox').style.display = question ? 'block' : 'none';
+      $('askbox').textContent = question ? question.question || question.text || '' : '';
+      const report = state.recovery_report;
+      if (report) pushEvent({type:'recovery_report', text:`历史动作对账（只读）· 共 ${report.total} 项 · 结果未知 ${report.unknown} · 有回执未验证 ${report.unverified}`});
+      if (state.last_intent) pushEvent({...state.last_intent, type:'intent', kind:'intent'});
+      if (state.terminal) pushEvent(state.terminal);
+      return;
+    }
     if (ev.type === 'state') {
       $('st-status').textContent = ev.status ?? '—';
       $('st-steps').textContent = ev.steps ?? '—';

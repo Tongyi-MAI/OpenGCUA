@@ -21,7 +21,10 @@ from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
-from agent_events import AgentEvent, AgentPrompt, ConsentChoice, ForegroundApprovalPrompt, TerminalCommand
+from agent_events import (
+    AgentEvent, AgentPrompt, ConsentChoice, ForegroundApprovalPrompt, TerminalCommand, handle_memory_command,
+)
+from event_protocol import EventProjection, ACTION_LABELS
 from terminal_interaction import TerminalInteraction
 from resume_catalog import ResumeCandidate
 
@@ -44,6 +47,7 @@ class SlashCommandCompleter(Completer):
         ("/compaction", "立即尝试压缩历史上下文", False),
         ("/skills", "列出可用 Skills；/skills reload 重新读取", False),
         ("/skill", "选用 Skill；/skill new <name> 创建", True),
+        ("/memory", "长期记忆：list / approve / reject / forget / update", True),
         ("/exit", "退出程序", False),
     )
     _ARGUMENTS = {
@@ -51,6 +55,7 @@ class SlashCommandCompleter(Completer):
         "/reasoning": ("on", "off"),
         "/code": ("on", "off"),
         "/skills": ("reload",),
+        "/memory": ("list", "show", "approve", "reject", "forget", "update"),
     }
 
     def __init__(self, skill_names: tuple[str, ...] = ()) -> None:
@@ -586,7 +591,13 @@ class RichTerminalFrontend:
             self._append("\nEnter 发送 · Alt+Enter 换行 · Ctrl-C 中止当前轮 · Ctrl-D 退出\n"
                          "输入 / 可浏览命令；方向键选择，Tab 补全，Enter 选中或执行\n"
                          "/queue 查看 · /queue send 继续队列 · /queue clear 清空队列\n"
-                         "/new <消息> · /resume [run 目录] · /compaction · /skills [reload] · /skill <name> · /skill new <name> · /status · /reasoning on|off · /code on|off · /clear · /exit\n")
+                         "/new <消息> · /resume [run 目录] · /compaction · /skills [reload] · /skill <name> · /skill new <name> · /status · /reasoning on|off · /code on|off · /clear · /exit\n"
+                         "/memory list · /memory show <id> · /memory approve|reject|forget <id> <rev> · "
+                         "/memory update <id> <rev> <正文|title=|kind=|app=>（只在本机执行，不发送给模型）\n")
+            return True
+        if command == "/memory" or command.startswith("/memory "):
+            # 审核与遗忘即时生效，不排队、不消费 FIFO；参数保留原始大小写。
+            self._append("\n" + handle_memory_command(self, value.strip()[len("/memory"):]) + "\n")
             return True
         if command == "/status":
             self._append("\nSession: " + (self.session_id or "(not started)")
@@ -813,6 +824,11 @@ class RichTerminalFrontend:
             self._consume(event)
 
     def _consume(self, event: AgentEvent) -> None:
+        projection = getattr(self, "event_projection", None)
+        if projection is None:
+            self.event_projection = projection = EventProjection()
+        if event.payload.get("schema_version") is not None and not projection.consume(event.to_wire()):
+            return
         kind = event.kind
         now = time.monotonic()
         if self.turn_active and kind not in {"session", "foreground_consent"}:
@@ -902,6 +918,12 @@ class RichTerminalFrontend:
             if self.show_code and code and (self._code_step != event.step or streamed != code):
                 self._append(code + "\n")
             self._code_preview.clear()
+        elif kind == "action_status":
+            stage = str(event.payload.get("stage") or "outcome_unknown")
+            self.phase = stage
+            self._append("\n" + ACTION_LABELS.get(stage, event.text) + " · " + str(event.payload.get("action_id") or "") + "\n")
+        elif kind == "recovery_report":
+            self._append("\n" + event.text + "\n")
         elif kind == "execution":
             status = event.payload.get("status") or {}
             state = status.get("execution_state") or "completed"

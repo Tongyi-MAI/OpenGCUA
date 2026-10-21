@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Any, Literal, Protocol, TextIO
 
 from console_protocol import decode_console_message
+from event_protocol import ACTION_LABELS, EventProjection, validate_event
 
 
 HUB_EVENT_PREFIX = "__MAI_HUB_EVENT_V1__ "
@@ -61,6 +62,9 @@ def decode_hub_event(line: str) -> dict[str, Any] | None:
         event = json.loads(line[len(HUB_EVENT_PREFIX):])
     except json.JSONDecodeError as exc:
         raise ValueError("invalid hub event JSON") from exc
+    if isinstance(event, dict) and event.get("schema_version") is not None:
+        validate_event(event)
+        return {**event, "type": event["kind"]}
     if not isinstance(event, dict) or event.get("type") not in HUB_CODE_EVENTS | {"model_status", "skill_loaded"}:
         raise ValueError("invalid hub event type")
     if type(event.get("step")) is not int or event["step"] < 0:
@@ -89,6 +93,14 @@ class AgentEvent:
     def __post_init__(self) -> None:
         object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
 
+    def to_wire(self) -> dict[str, Any]:
+        return {**self.payload, "kind": self.kind, "text": self.text, "step": self.step}
+
+    @classmethod
+    def from_wire(cls, event: dict[str, Any]):
+        validate_event(event)
+        return cls(event["kind"], event.get("text", ""), event.get("step"), event)
+
 
 @dataclass(frozen=True, slots=True)
 class AgentPrompt:
@@ -105,6 +117,17 @@ class TerminalCommand:
 
     kind: Literal["resume", "compaction", "skills_list", "skills_reload", "skill_select", "skill_create"]
     target: str | None = None
+
+
+def handle_memory_command(frontend: Any, arguments: str) -> str:
+    """`/memory ...` 由前端直接交给宿主记忆服务；不排队、不进入 LLM。"""
+    service = getattr(frontend, "memory_service", None)
+    if service is None:
+        return "长期记忆未启用（--disable-memory，或会话尚未开始）。"
+    try:
+        return service.handle_command(arguments)
+    except Exception:
+        return "记忆操作失败：MEMORY_UNAVAILABLE"
 
 
 ConsentChoice = Literal["allow", "reject", "cancel"]
@@ -172,6 +195,7 @@ class PlainFrontend:
         self._abort_requested = False
         self._input_interrupt: asyncio.Event | None = None
         self._input_kind: str | None = None
+        self.event_projection = EventProjection()
 
     def bind_abort(self, callback: Callable[[bool], None]) -> None:
         self._abort_callback = callback
@@ -187,6 +211,8 @@ class PlainFrontend:
             self._abort_requested = True
 
     def emit(self, event: AgentEvent) -> None:
+        if event.payload.get("schema_version") is not None and not self.event_projection.consume(event.to_wire()):
+            return
         if event.kind == "phase":
             phase = str(event.payload.get("phase") or event.text)
             self._turn_active = phase in {"planning", "compaction", "execution", "postprocess", "recovery"}
@@ -195,11 +221,20 @@ class PlainFrontend:
         elif event.kind in {"aborted", "answer", "finished"}:
             self._turn_active = False
         target = self.stderr if event.kind == "error" else self.stdout
+        if event.payload.get("schema_version") is not None and self.hub_events:
+            print("\n" + HUB_EVENT_PREFIX + json.dumps({**event.to_wire(), "type": event.kind}, ensure_ascii=False),
+                  flush=True, file=self.stdout)
+            # 取消资格仍先维护；只跳过重复的旧文本投影。
+            return
         if event.kind == "model_status":
             if self.hub_events and event.step is not None:
                 frame = {**event.payload, "type": event.kind, "step": event.step, "text": event.text}
                 # Reasoning may still occupy an unterminated stdout line.
                 print("\n" + HUB_EVENT_PREFIX + json.dumps(frame, ensure_ascii=False), flush=True, file=self.stdout)
+            return
+        if event.kind == "action_status":
+            print(ACTION_LABELS.get(str(event.payload.get("stage")), event.text) + " · "
+                  + str(event.payload.get("action_id", "")), flush=True, file=target)
             return
         if event.kind == "foreground_consent":
             return
@@ -302,6 +337,10 @@ class PlainFrontend:
             command = message.strip().lower()
             if command in {"/exit", "/quit", "exit", "quit", "q"}:
                 return None
+            if command == "/memory" or command.startswith("/memory "):
+                # 长期记忆审核只在宿主执行；不作为任务、回复或授权传给模型。
+                print(handle_memory_command(self, message.strip()[len("/memory"):]), flush=True)
+                continue
             if command:
                 return message
             if prompt.kind == "retry":

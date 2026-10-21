@@ -33,6 +33,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from action_feedback import action_feedback, observation_feedback
 from skill_registry import SkillRegistry, default_skill_roots
 from skill_runtime import SkillRuntime
 
@@ -50,6 +51,15 @@ _BASH_CALL_COUNT = 0
 _TOOL_CALL_COUNT = 0
 _CONTROL_SOCKET: socket.socket | None = None
 _CONTROL_LOCK = threading.Lock()
+_HOST_ACK_LOCK = asyncio.Lock()
+_JOURNAL_NATIVE_SCOPE: ContextVar[tuple | None] = ContextVar("journal_native_scope", default=None)
+_JOURNAL_SESSIONS: list[Any] = []
+_JOURNAL_BROKEN = False
+# 记忆握手 ACK 未知时 fence 控制流；读线程计数用于发现被取消后仍在读的旧握手。
+_HOST_ACK_BROKEN = False
+_HOST_ACK_READERS = 0
+_HOST_ACK_READERS_LOCK = threading.Lock()
+_MEMORY_REQUEST_BYTES = 8192
 _REQUEST_CONTEXT = threading.local()
 _ACTIVE_REQUEST: ContextVar[dict | None] = ContextVar("active_code_request", default=None)
 _MAI_SESSION = None
@@ -271,6 +281,17 @@ def _emit(event: dict[str, Any]) -> None:
 
 def _recv_host_ack(kind: str, id_key: str, request_id: str, timeout: float | None) -> dict[str, Any] | None:
     """Read one fenced host reply. Callers serialize reads for each SDK session."""
+    global _HOST_ACK_READERS
+    with _HOST_ACK_READERS_LOCK:
+        _HOST_ACK_READERS += 1
+    try:
+        return _recv_host_ack_frame(kind, id_key, request_id, timeout)
+    finally:
+        with _HOST_ACK_READERS_LOCK:
+            _HOST_ACK_READERS -= 1
+
+
+def _recv_host_ack_frame(kind: str, id_key: str, request_id: str, timeout: float | None) -> dict[str, Any] | None:
     if _CONTROL_SOCKET is None:
         return None
     data = bytearray()
@@ -297,16 +318,93 @@ async def _request_gui_approval(
 ) -> bool:
     if not _CONFIG.get("gui_approval", True) or _CONTROL_SOCKET is None:
         return False
+    global _JOURNAL_BROKEN
     request_id = uuid.uuid4().hex
-    _emit({
-        "type": "gui_approval_request", "request_id": request_id,
-        "app_id": app_id, "window_id": window_id,
-        "explicit_retry": explicit_retry, "reason": reason,
-    })
-    reply = await asyncio.to_thread(
-        _recv_host_ack, "gui_approval_ack", "request_id", request_id, None,
-    )
+    try:
+        async with _HOST_ACK_LOCK:
+            if _CONFIG.get("journal_actions", False) and _JOURNAL_BROKEN:
+                raise _JournalGateError()
+            _emit({
+                "type": "gui_approval_request", "request_id": request_id,
+                "app_id": app_id, "window_id": window_id,
+                "explicit_retry": explicit_retry, "reason": reason,
+            })
+            reply = await asyncio.to_thread(
+                _recv_host_ack, "gui_approval_ack", "request_id", request_id, None,
+            )
+    except BaseException:
+        if _CONFIG.get("journal_actions", False):
+            # 取消 await 不会取消 recv 线程；fence 防止它吞掉下一次 journal ACK。
+            _JOURNAL_BROKEN = True
+        raise
     return reply is not None and reply.get("approved") is True
+
+
+_MEMORY_STATUSES = frozenset({"candidate", "duplicate", "duplicate_approved", "rejected", "not_available"})
+
+
+def _memory_result(ok: bool, status: str, error_code: str | None = None,
+                   memory_id: Any = None, revision: Any = None) -> dict[str, Any]:
+    return {"ok": ok, "status": status if status in _MEMORY_STATUSES else "not_available",
+            "memory_id": memory_id if isinstance(memory_id, str) and len(memory_id) <= 64 else None,
+            "revision": revision if type(revision) is int else None,
+            "error_code": error_code[:64] if isinstance(error_code, str) else None}
+
+
+class _Memory:
+    """模型只能提出长期记忆候选；批准、修改、遗忘只属于宿主与用户。"""
+
+    def __repr__(self) -> str:
+        return "<memory: await memory.propose(title, content, kind='workflow', app=None)>"
+
+    async def propose(self, title: Any, content: Any, kind: Any = "workflow", app: Any = None) -> dict[str, Any]:
+        """提交待用户审核的候选。候选不是已核验事实，未批准前不会被召回。"""
+        global _HOST_ACK_BROKEN, _JOURNAL_BROKEN
+        _check_active_request()
+        if not _CONFIG.get("memory_enabled", False) or _CONTROL_SOCKET is None:
+            return _memory_result(False, "not_available", "MEMORY_NOT_AVAILABLE")
+        if (not all(isinstance(value, str) for value in (title, content, kind))
+                or (app is not None and not isinstance(app, str))):
+            return _memory_result(False, "rejected", "MEMORY_INVALID")
+        payload = {"title": title, "content": content, "kind": kind, "app": app}
+        if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > _MEMORY_REQUEST_BYTES:
+            return _memory_result(False, "rejected", "MEMORY_TOO_LARGE")
+        handshake_id = uuid.uuid4().hex
+        async with _HOST_ACK_LOCK:
+            # 与 journal/前台授权共用同一把锁；旧握手仍在读时不再发送，避免串 ACK。
+            if _HOST_ACK_BROKEN or _JOURNAL_BROKEN or _HOST_ACK_READERS:
+                return _memory_result(False, "not_available", "MEMORY_CHANNEL_UNAVAILABLE")
+            _emit({"type": "memory_proposal", "handshake_id": handshake_id, **payload})
+            reader = asyncio.ensure_future(asyncio.to_thread(
+                _recv_host_ack, "memory_proposal_ack", "handshake_id", handshake_id, 10,
+            ))
+            cancelled = False
+            while True:
+                try:
+                    reply = await asyncio.shield(reader)
+                    break
+                except asyncio.CancelledError:
+                    # 取消不能让读线程带着未消费的 ACK 离开锁；等它有界结束后再传播取消。
+                    cancelled = True
+                    if reader.done():
+                        reply = None if reader.cancelled() or reader.exception() else reader.result()
+                        break
+                except Exception:
+                    reply = None
+                    break
+            if reply is None:
+                _HOST_ACK_BROKEN = True
+                if _CONFIG.get("journal_actions", False):
+                    _JOURNAL_BROKEN = True
+        if cancelled:
+            raise asyncio.CancelledError()
+        if reply is None:
+            return _memory_result(False, "not_available", "MEMORY_ACK_TIMEOUT")
+        return _memory_result(reply.get("ok") is True, str(reply.get("status") or ""),
+                              reply.get("error_code"), reply.get("memory_id"), reply.get("revision"))
+
+
+_MEMORY = _Memory()
 
 
 def gui_action_scope(device: Any, message: dict[str, Any]) -> tuple[str, str] | None:
@@ -464,6 +562,7 @@ def _record_tool(
     error_code: str | None = None,
     receipt: Any = None,
     outcome_unknown: bool = False,
+    rule_feedback: dict | None = None,
 ) -> None:
     global _TOOL_CALL_COUNT
     _TOOL_CALL_COUNT += 1
@@ -490,6 +589,8 @@ def _record_tool(
         if receipt is not None:
             event["receipt"] = _public_json(receipt, include_tree=False)
         event["effect"] = "outcome_unknown" if outcome_unknown else "refused"
+    if rule_feedback is not None:
+        event["rule_feedback"] = rule_feedback
     _emit(event)
 
 
@@ -1987,9 +2088,9 @@ def _format_exception(exc: BaseException) -> str:
     frames = traceback.extract_tb(exc.__traceback__)
     kept = [frame for frame in frames if frame.filename == "<code>"
             or frame.filename.startswith(SOURCE_PREFIX)] or frames[-1:]
-    rendered = "".join(
-        ["Traceback (most recent call last):\n", *traceback.format_list(kept), *traceback.format_exception_only(type(exc), exc)]
-    )
+    detail = ([f"{type(exc).__name__}: {getattr(exc, 'code', None) or type(exc).__name__}\n"]
+              if getattr(exc, "journal_private", False) else traceback.format_exception_only(type(exc), exc))
+    rendered = "".join(["Traceback (most recent call last):\n", *traceback.format_list(kept), *detail])
     if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
         child_stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
         if len(child_stderr) > 2000:
@@ -2151,6 +2252,9 @@ def _sdk_audit_result(operation: str, result: Any, elapsed: float) -> Any:
         summary.update(node_count=len(result.get("nodes") or ()),
                        image_count=int(bool(result.get("png"))) + len(result.get("images") or ()),
                        truncated=result.get("truncated"), source=result.get("source"))
+        facts = observation_feedback("observe", result)
+        if facts:
+            summary["rule_feedback"] = facts
     else:
         for key in ("execution", "effect", "action_id", "mechanism", "status", "complete"):
             if key in result:
@@ -2240,9 +2344,280 @@ def _repair_transparent_observation(result: Any) -> Any:
     return repaired if repaired is not None else result
 
 
+class _JournalGateError(BaseException):
+    """禁止普通 except Exception 吞掉日志故障后继续派发。"""
+
+    def __init__(self, code="JOURNAL_UNAVAILABLE"):
+        self.code = code
+        super().__init__(code)
+
+
+# 与 mu_protocol::Request::is_mutation 一致；仅在 SDK native 不可导入时使用。
+_BROWSER_READS = frozenset({
+    "list_tabs", "get_tab", "downloads_list", "downloads_get", "cookies_read",
+    "storage_state", "storage_read", "artifact_read",
+})
+_FILE_MUTATIONS = frozenset({"write", "mkdir", "remove", "move"})
+
+
+def _protocol_mutation(message):
+    op, operation = message.get("op"), message.get("operation")
+    if op == "browser":
+        # playwright 读写由 native 合约判定；此处无合约时保守视为变更。
+        return operation == "playwright" or operation not in _BROWSER_READS
+    if op == "file":
+        return operation in _FILE_MUTATIONS
+    return op in {"action", "shell", "create", "destroy"}
+
+
+def _sdk_mutation(message):
+    """按 SDK native 的同一判定区分变更与 read/stat/list/probe；无法判定时保守视为变更。"""
+    try:
+        encoded = json.dumps(message, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        # SDK encode 以同样规则在进入 native 前拒绝，不会派发。
+        return False
+    try:
+        from mai_ui._native import is_mutation
+    except ImportError:
+        return _protocol_mutation(message)
+    try:
+        return bool(is_mutation(encoded))
+    except Exception:
+        return True
+
+
+def _journal_call_id(message):
+    """SDK 真实调用 ID：native 以 action_id 优先、其次 command_id 作为 status 键。"""
+    for field in ("action_id", "command_id"):
+        value = message.get(field)
+        if isinstance(value, str):
+            return field, value
+    return None
+
+
+def _journal_wire(message):
+    """返回带调用 ID 的变更 wire；读/探测返回 None。缺 ID 时按 SDK 字段补发，不用 cell ID。"""
+    if (not _CONFIG.get("journal_actions", False) or not isinstance(message, dict)
+            or not _sdk_mutation(message)):
+        return None
+    if _journal_call_id(message) is not None:
+        return message
+    # native 对 action/browser 回写 action_id，其余变更回写 command_id。
+    field = "action_id" if message.get("op") in ("action", "browser") else "command_id"
+    try:
+        import importlib
+        new_id = importlib.import_module("mai_ui.unified.runtime").uid()
+    except (ImportError, AttributeError):
+        new_id = uuid.uuid4().hex
+    return {**message, field: new_id}
+
+
+def _journal_enabled(message):
+    return (_CONFIG.get("journal_actions", False) and isinstance(message, dict)
+            and _journal_call_id(message) is not None and _sdk_mutation(message))
+
+
+def _journal_event(session, device, message):
+    # request 保持 SDK 原字段（command_id 不改名），只把同一个值作为 journal 键。
+    request = dict(message)
+    for key in ("app_id", "window_id", "display_id", "tab_id"):
+        value = getattr(device, "_" + key, None)
+        if value:
+            request.setdefault(key, value)
+    request.setdefault("resource_id", getattr(device, "resource_id", None))
+    request.setdefault("attachment_id", getattr(device, "id", None))
+    operation = str(message.get("op") or "request")
+    detail = message.get("action") or message.get("operation")
+    return {"type": "action_journal", "action_id": _journal_call_id(message)[1],
+            "sdk_session_id": session.id, "operation": operation + ("." + str(detail) if detail else ""),
+            "request": request, "resource_id": request.get("resource_id") or request.get("resource"),
+            "observation_id": request.get("observation_id") or request.get("based_on")}
+
+
+async def _journal_transition(event, stage, **extra):
+    global _JOURNAL_BROKEN
+    if _JOURNAL_BROKEN or _CONTROL_SOCKET is None:
+        raise _JournalGateError()
+    handshake_id = uuid.uuid4().hex
+    try:
+        async with _HOST_ACK_LOCK:
+            if _JOURNAL_BROKEN:
+                raise _JournalGateError()
+            _emit({**event, **extra, "journal_stage": stage, "handshake_id": handshake_id})
+            reply = await asyncio.to_thread(
+                _recv_host_ack, "action_journal_ack", "handshake_id", handshake_id, 15,
+            )
+        if reply is None or reply.get("allowed") is not True:
+            code = (reply.get("error") or {}).get("code") if reply else None
+            raise _JournalGateError("ACTION_REPLAY_BLOCKED" if code == "ACTION_REPLAY_BLOCKED"
+                                    else "JOURNAL_UNAVAILABLE")
+        return reply
+    except BaseException:
+        # 被取消的 recv 线程可能尚未退出；禁止第二个握手或后续 cell 复用控制流。
+        _JOURNAL_BROKEN = True
+        raise
+
+
+async def _journal_receipt(session, action_id):
+    try:
+        value = session.action_status(action_id)
+        if inspect.isawaitable(value):
+            value = await value
+        if hasattr(value, "__dataclass_fields__"):
+            from dataclasses import asdict
+            value = asdict(value)
+        return value if isinstance(value, dict) else None
+    except Exception:
+        return None
+
+
+async def _journal_progress(session, event):
+    previous = None
+    while True:
+        await asyncio.sleep(0.025)
+        receipt = await _journal_receipt(session, event["action_id"])
+        execution = (receipt or {}).get("execution", "unknown")
+        stage = {"queued": "waiting_resource", "running": "running"}.get(execution)
+        if stage is None:
+            if execution != "unknown":
+                continue
+            stage = "unknown"
+        if stage != previous:
+            previous = stage
+            _emit({"type": "action_progress", "stage": stage,
+                   "action_id": event["action_id"], "sdk_session_id": event["sdk_session_id"],
+                   "resource_id": (receipt or {}).get("resource_id", event.get("resource_id")),
+                   "observation_id": (receipt or {}).get("based_on", event.get("observation_id")),
+                   "execution": execution, "effect": (receipt or {}).get("effect", "unknown")})
+
+
+async def _journal_invoke(session, event, invoke, *, memory_replay=False):
+    if _JOURNAL_BROKEN:
+        raise _JournalGateError()
+    if not memory_replay:
+        await _journal_transition(event, "dispatching")
+    token = _JOURNAL_NATIVE_SCOPE.set((event["sdk_session_id"], event["action_id"]))
+    progress = asyncio.create_task(_journal_progress(session, event))
+    try:
+        try:
+            # 不改变 SDK authority、资源 FIFO 或 OS lease；这里只是 durable entry gate。
+            try:
+                result = await invoke()
+            finally:
+                # 先停止轮询，不插入额外 await；原始回执立即送入 durable 握手。
+                progress.cancel()
+        except BaseException as exc:
+            if isinstance(exc, _JournalGateError):
+                raise
+            receipt = await _journal_receipt(session, event["action_id"])
+            if receipt is None:
+                receipt = getattr(exc, "receipt", None)
+                if hasattr(receipt, "__dataclass_fields__"):
+                    from dataclasses import asdict
+                    receipt = asdict(receipt)
+            known = (isinstance(receipt, dict) and receipt.get("effect") == "not_applied"
+                     and receipt.get("execution") in {"rejected", "cancelled_before_dispatch"})
+            terminal = isinstance(receipt, dict) and receipt.get("execution") == "completed"
+            stage = receipt["execution"] if known else "receipt_received" if terminal else "outcome_unknown"
+            receipt_error = (receipt or {}).get("error") if isinstance(receipt, dict) else None
+            code = (getattr(exc, "code", None)
+                    or (receipt_error.get("code") if isinstance(receipt_error, dict) else None)
+                    or ("CANCELLED_BEFORE_DISPATCH" if known and stage == "cancelled_before_dispatch"
+                        else type(exc).__name__))
+            exc.journal_private = True
+            exc.journal_outcome_unknown = stage == "outcome_unknown"
+            if not getattr(exc, "code", None):
+                exc.code = code
+            if not memory_replay:
+                # 诊断只进私有日志；公开规则反馈匹配固定原因，不回灌自由文本或输入正文。
+                await _journal_transition(event, stage, receipt=receipt,
+                                          error={"code": code, "message": str(exc)[:1024]})
+            raise
+        receipt = await _journal_receipt(session, event["action_id"])
+        if not memory_replay:
+            await _journal_transition(event, "receipt_received", raw_result=result, receipt=receipt)
+        else:
+            # 同 SDK 内存幂等返回没有新 journal 记录，仍自动给出该回执的事实。
+            _emit({"type": "action_feedback", "action_id": event["action_id"],
+                   "rule_feedback": action_feedback(event["operation"], action_id=event["action_id"],
+                       sdk_session_id=event["sdk_session_id"], stage="receipt_received",
+                       receipt=receipt, raw_result=result)})
+        return result
+    finally:
+        progress.cancel()
+        await asyncio.gather(progress, return_exceptions=True)
+        _JOURNAL_NATIVE_SCOPE.reset(token)
+
+
+def _install_journal_direct_calls(session):
+    """覆盖已知 public 变更的 call 别名；不承诺任意 Python/nativecore 绕过隔离。"""
+    if not _CONFIG.get("journal_actions", False):
+        return
+    import importlib
+    try:
+        sdk_runtime = importlib.import_module("mai_ui.unified.runtime")
+        # browser 在 from import 时已绑定 call，必须先加载再按原引用替换。
+        importlib.import_module("mai_ui.unified.browser")
+        importlib.import_module("mai_ui.unified.resources")
+        importlib.import_module("mai_ui.unified.services")
+    except ImportError:
+        return
+    if session not in _JOURNAL_SESSIONS:
+        _JOURNAL_SESSIONS.append(session)
+    original_call = sdk_runtime.call
+    if getattr(original_call, "_action_journal_hook", False):
+        return
+    mutations = {"apps_launch", "browser_create", "copy_files", "upload_files", "unregister",
+                 "compose", "close_session", "remove", "close", "add_macos", "add_android",
+                 "add_linux", "add_browser"}
+
+    async def journal_call(core, request):
+        permit = _ACTIVE_REQUEST.get()
+        if (not _CONFIG.get("journal_actions", False) or permit is None or not permit.get("active")
+                or request.get("op") not in mutations):
+            return await original_call(core, request)
+        _check_active_request()
+        candidates = [item for item in _JOURNAL_SESSIONS if item._runtime._core is core]
+        requested_session = request.get("session")
+        if requested_session:
+            candidates = [item for item in candidates if item.id == requested_session]
+        else:
+            # reset_task 会复用 Runtime：已关闭旧 session 不能让新 lifecycle 调用变成歧义。
+            live = [item for item in candidates if not getattr(item, "_closed", False)]
+            candidates = live or candidates[-1:]
+            if request.get("attachment") or request.get("id"):
+                attachment = request.get("attachment") or request.get("id")
+                matched = [item for item in candidates if attachment in getattr(item, "_devices", {})]
+                candidates = matched or candidates
+        if len(candidates) != 1:
+            raise _JournalGateError("ACTION_REPLAY_BLOCKED")
+        owner = candidates[0]
+        wire = dict(request)
+        # SDK 未提供 ID 的组合/lifecycle 调用，在同一入口生成并转交，绝不拿 cell ID 冒充。
+        wire["action_id"] = wire.get("action_id") or sdk_runtime.uid()
+        event = _journal_event(owner, None, wire)
+        reply = await _journal_transition(event, "intent_recorded")
+        return await _journal_invoke(owner, event, lambda: original_call(core, wire),
+                                     memory_replay=reply.get("memory_replay") is True)
+
+    journal_call._action_journal_hook = True
+    for module_name, module in tuple(sys.modules.items()):
+        if module_name.startswith("mai_ui.") and module is not None:
+            for name, value in tuple(vars(module).items()):
+                if value is original_call:
+                    setattr(module, name, journal_call)
+
+
 def _instrument_sdk_session(session: Any) -> None:
-    """Record SDK provider requests in the existing per-step tool-call audit."""
+    """记录 SDK 请求；journal 开关关闭时保留旧行为。"""
+    if getattr(session, "_action_journal_instrumented", False):
+        return
     original = session._request
+    _install_journal_direct_calls(session)
+    if _CONFIG.get("journal_actions", False):
+        # SDK 自身的 DEVICE_OFFLINE 复活重试也不能绕过持久动作的未知结果 fence。
+        session.auto_reconnect = False
 
     async def traced_call(device, message):
         operation = str(message.get("op") or "request")
@@ -2250,6 +2625,11 @@ def _instrument_sdk_session(session: Any) -> None:
         name = "mai_ui." + operation + (("." + action) if action else "")
         audit_message = {**message, "resource_id": getattr(device, "resource_id", None),
                          "platform": getattr(device, "platform", "macos")}
+        journaled = _journal_enabled(message)
+        if journaled:
+            # 完整业务请求只进私有日志，不复制到通用轨迹/模型自动反馈。
+            field, call_id = _journal_call_id(message)
+            audit_message = {field: call_id, "resource_id": getattr(device, "resource_id", None)}
         started = time.monotonic()
         global _SDK_REVIVE_PENDING, _SDK_GUI_OK, _SDK_HEAL_INPROGRESS
         global _SDK_LAST_GUI_SUCCESS_AT
@@ -2259,13 +2639,19 @@ def _instrument_sdk_session(session: Any) -> None:
         except Exception:
             offline_before = None
         try:
-            result = await original(device, message)
+            if journaled:
+                event = _journal_event(session, device, message)
+                result = await _journal_invoke(session, event, lambda: original(device, message),
+                                               memory_replay=_JOURNAL_NATIVE_SCOPE.get() is not None)
+            else:
+                result = await original(device, message)
             if operation == "observe":
                 result = await asyncio.to_thread(_repair_transparent_observation, result)
         except Exception as exc:
             code = getattr(exc, "code", None)
             if (
                 code == "PERMISSION_DENIED"
+                and not journaled
                 and _SDK_GUI_OK
                 and not _SDK_HEAL_INPROGRESS
                 and getattr(device, "platform", "macos") == "macos"
@@ -2315,8 +2701,8 @@ def _instrument_sdk_session(session: Any) -> None:
                 print(f"[System] {notice}", flush=True)
                 from mai_ui import MuError as _MuError
                 raise _MuError("SESSION_RESET", notice)
-            audit_error = str(exc)
-            if code == "DEVICE_OFFLINE":
+            audit_error = str(code or type(exc).__name__) if journaled else str(exc)
+            if code == "DEVICE_OFFLINE" and not journaled:
                 try:
                     offline_after = endpoint.offline if endpoint is not None else None
                 except Exception:
@@ -2332,8 +2718,14 @@ def _instrument_sdk_session(session: Any) -> None:
             _record_tool(
                 name, audit_message,
                 error=audit_error, error_code=code,
-                receipt=getattr(exc, "receipt", None),
-                outcome_unknown=code == "ACTION_OUTCOME_UNKNOWN",
+                receipt=None if journaled else getattr(exc, "receipt", None),
+                outcome_unknown=code == "ACTION_OUTCOME_UNKNOWN" or getattr(exc, "journal_outcome_unknown", False),
+                rule_feedback=(observation_feedback(name, {"components": [{"status": "unavailable", "error": code}]})
+                               if operation == "observe" else action_feedback(
+                                   name, action_id=(_journal_call_id(message) or (None, None))[1],
+                                   sdk_session_id=getattr(session, "id", None), receipt=getattr(exc, "receipt", None),
+                                   error={"code": code, "message": str(exc), "details": getattr(exc, "details", None)},
+                               ) if not journaled and _sdk_mutation(message) else None),
             )
             if code == "DEVICE_OFFLINE":
                 # endpoint 被 fence 后同 Session 永不恢复；标记下一轮由宿主重建会话。
@@ -2343,12 +2735,17 @@ def _instrument_sdk_session(session: Any) -> None:
         if getattr(device, "platform", "macos") == "macos":
             _SDK_GUI_OK = True
             _SDK_LAST_GUI_SUCCESS_AT = time.monotonic()
-        _record_tool(name, audit_message, _sdk_audit_result(operation, result, elapsed),
-                     include_tree=False)
+        summary = _sdk_audit_result(operation, result, elapsed)
+        _record_tool(name, audit_message, summary, include_tree=False,
+                     rule_feedback=(summary.get("rule_feedback") if operation == "observe" else
+                                    action_feedback(name, sdk_session_id=getattr(session, "id", None),
+                                        action_id=(_journal_call_id(message) or (None, None))[1],
+                                        raw_result=result)
+                                    if not journaled and _sdk_mutation(message) else None))
         return result
 
-    control_ack_lock = asyncio.Lock()
-    async def traced(device, message):
+    async def guarded(device, message):
+        global _JOURNAL_BROKEN
         from overlay_guard import impact
         scope = gui_action_scope(device, message)
         if scope is not None:
@@ -2358,28 +2755,74 @@ def _instrument_sdk_session(session: Any) -> None:
             attached_window = getattr(device, "_window_id", None)
             if (not app_id or not window_id or not attached_app or not attached_window
                     or app_id != attached_app or window_id != attached_window):
-                raise MuError("INPUT_REFUSED", "GUI approval requires an exact bound app/window target")
-            async with control_ack_lock:
-                approved = await _request_gui_approval(app_id, window_id)
+                error = MuError("INPUT_REFUSED", "GUI approval requires an exact bound app/window target")
+                error.journal_not_dispatched = True
+                raise error
+            approved = await _request_gui_approval(app_id, window_id)
             if not approved:
-                raise MuError("PERMISSION_DENIED", "Foreground input denied or unavailable; use background/AX or request_foreground_permission(win, reason) to ask again after rejection; action not dispatched")
+                error = MuError("PERMISSION_DENIED", "Foreground input denied or unavailable; use background/AX or request_foreground_permission(win, reason) to ask again after rejection; action not dispatched")
+                error.journal_not_dispatched = True
+                raise error
         footprint = impact(device, message) if _CONFIG.get("overlay_guard") else None
         if footprint is None:
             return await traced_call(device, message)
-        async with control_ack_lock:
-            guard_id = uuid.uuid4().hex
-            _emit({"type": "overlay_guard", "phase": "begin", "guard_id": guard_id, **footprint})
+        guard_id = uuid.uuid4().hex
+        try:
             try:
-                reply = await asyncio.to_thread(
-                    _recv_host_ack, "overlay_ack", "guard_id", guard_id, 8,
-                )
-                if reply is None or reply.get("ready") is not True:
-                    raise RuntimeError("Overlay preparation was not acknowledged; UI operation was not dispatched")
-                return await traced_call(device, message)
-            finally:
-                _emit({"type": "overlay_guard", "phase": "end", "guard_id": guard_id})
+                async with _HOST_ACK_LOCK:
+                    if _CONFIG.get("journal_actions", False) and _JOURNAL_BROKEN:
+                        raise _JournalGateError()
+                    _emit({"type": "overlay_guard", "phase": "begin", "guard_id": guard_id, **footprint})
+                    reply = await asyncio.to_thread(
+                        _recv_host_ack, "overlay_ack", "guard_id", guard_id, 8,
+                    )
+            except BaseException:
+                if _CONFIG.get("journal_actions", False):
+                    _JOURNAL_BROKEN = True
+                raise
+            if reply is None or reply.get("ready") is not True:
+                error = RuntimeError("Overlay preparation was not acknowledged; UI operation was not dispatched")
+                error.code = "OVERLAY_UNAVAILABLE"
+                error.journal_not_dispatched = True
+                raise error
+            return await traced_call(device, message)
+        finally:
+            _emit({"type": "overlay_guard", "phase": "end", "guard_id": guard_id})
+
+    async def traced(device, message):
+        # Files/Shell/Processes 的 command_id 与 action_id 同为 native status 键；读/探测直接透传。
+        wire = _journal_wire(message)
+        if wire is None:
+            try:
+                return await guarded(device, message)
+            except Exception as exc:
+                if getattr(exc, "journal_not_dispatched", False):
+                    code = getattr(exc, "code", None)
+                    _record_tool("mai_ui." + str(message.get("op")), {}, error=str(code), error_code=code,
+                                 rule_feedback=action_feedback("action." + str(message.get("action")),
+                                     action_id=(_journal_call_id(message) or (None, None))[1],
+                                     sdk_session_id=getattr(session, "id", None), not_dispatched=True,
+                                     error={"code": code, "message": str(exc)}))
+                raise
+        _check_active_request()
+        event = _journal_event(session, device, wire)
+        _install_journal_direct_calls(session)
+        session.auto_reconnect = False
+        reply = await _journal_transition(event, "intent_recorded")
+        token = _JOURNAL_NATIVE_SCOPE.set((session.id, event["action_id"]) if reply.get("memory_replay") else None)
+        try:
+            return await guarded(device, wire)
+        except Exception as exc:
+            # 仅 approval/overlay 的确定未派发错误在这里分类；native 错误已由 invoke 记录。
+            code = getattr(exc, "code", None)
+            if getattr(exc, "journal_not_dispatched", False) and not reply.get("memory_replay"):
+                await _journal_transition(event, "rejected", error={"code": code, "not_dispatched": True})
+            raise
+        finally:
+            _JOURNAL_NATIVE_SCOPE.reset(token)
 
     session._request = traced
+    session._action_journal_instrumented = True
     # mu.help 升级为按需手册（从生成契约 api.pyi + playwright contract 渲染），
     # 取代 Rust core 里 topic 无效的静态一句话。
     try:
@@ -2794,6 +3237,7 @@ def _bootstrap(loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
         "web": _SDK_WEB,
         "asyncio": asyncio,
         "skills": skill_runtime,
+        "memory": _MEMORY,
     }
     global _EXEC_NAMESPACE
     _EXEC_NAMESPACE = namespace
@@ -2943,6 +3387,13 @@ def _execute(source: str | list[str], namespace: dict[str, Any], *, loop=None) -
             _EXECUTION_TASKS.difference_update(task for task in tuple(_EXECUTION_TASKS) if task.done())
             if owned_loop:
                 loop.close()
+    if _JOURNAL_BROKEN:
+        fatal, ok, exit_code = True, False, 1
+        stop_reason = "journal_unavailable"
+    if _HOST_ACK_BROKEN:
+        # 记忆 ACK 未知时控制流可能错位，只能重置 worker，不重试业务动作。
+        fatal, ok, exit_code = True, False, 1
+        stop_reason = "memory_channel_unavailable"
     if multi_block and active_block is not None and stop_reason is not None:
         _emit({"type": "code_block_end", "block_index": active_block,
                "status": "aborted" if ok else "failed", "stop_reason": stop_reason,
@@ -3023,7 +3474,8 @@ def _worker_requests(loop, namespace) -> int:
             # 仅从专用 host 控制帧同步；普通 cell 变量和旧 _CONFIG 值不能覆盖。
             _CONFIG.update({key: request["config"].get(key, default) for key, default in (
                 ("ask_user_enabled", True), ("selected_skill", None),
-                ("skill_digest", None), ("skill_revision", 0),
+                ("skill_digest", None), ("skill_revision", 0), ("journal_actions", False),
+                ("memory_enabled", False),
             )})
             _REQUEST_CONTEXT.ask_user_enabled = request["config"].get("ask_user_enabled", True)
             with _RequestOutput(request_id):
@@ -3041,6 +3493,7 @@ def _worker_requests(loop, namespace) -> int:
                             skill_runtime.reset_task()
                     # 每轮更新账本内容，始终使用同一个 todo 对象。
                     namespace["todo"] = todo
+                    namespace["memory"] = _MEMORY
                     if request.get("reset_task"):
                         session, device = loop.run_until_complete(_reset_sdk_session())
                         namespace.update(mu=session, device=device, ui=device.ui)

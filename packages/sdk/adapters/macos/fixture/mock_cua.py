@@ -14,6 +14,8 @@ frontmost_window = 1
 ax_elements_complete = False
 ax_truncated = False
 ax_role = "AXButton"
+# Optional row overrides; keys mirror Cua 0.36 `elements` rows (no settability).
+ax_rows = None
 png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + struct.pack(">II", 100, 200)).decode()
 for line in sys.stdin:
     q = json.loads(line)
@@ -44,6 +46,7 @@ for line in sys.stdin:
             ax_elements_complete = args.get("elements_complete", False)
             ax_truncated = args.get("truncated", False)
             ax_role = args.get("role", "AXButton")
+            ax_rows = args.get("rows")
         elif name == "fixture_refuse":
             data = dict(
                 code="background_input_refused",
@@ -82,20 +85,22 @@ for line in sys.stdin:
             if args.get("include_accessibility_tree"):
                 version += 1
                 snapshot = f"s{version:08x}"
+                rows = ax_rows or [
+                    dict(
+                        role=ax_role,
+                        label="Click",
+                        actions=["AXPress"],
+                        frame=dict(x=1, y=2, w=10, h=20),
+                        parent_index=None,
+                    )
+                ]
                 data = dict(
                     snapshot_id=snapshot,
                     elements_complete=ax_elements_complete,
                     truncated=ax_truncated,
                     elements=[
-                        dict(
-                            element_index=0,
-                            element_token=snapshot + ":0",
-                            role=ax_role,
-                            label="Click",
-                            actions=["AXPress"],
-                            frame=dict(x=1, y=2, w=10, h=20),
-                            parent_index=None,
-                        )
+                        dict(row, element_index=i, element_token=f"{snapshot}:{i}")
+                        for i, row in enumerate(rows)
                     ],
                 )
                 # Match the driver's compact default: structured rows must be
