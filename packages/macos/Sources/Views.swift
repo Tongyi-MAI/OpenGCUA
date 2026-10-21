@@ -13,10 +13,11 @@ struct MaterialView: NSViewRepresentable {
     func updateNSView(_ view: NSVisualEffectView, context: Context) { view.material = material }
 }
 struct SymbolButton: View {
-    var symbol: String; var title: String; var action: () -> Void
+    // help 只补充悬停说明；辅助功能标签仍用简短的 title。
+    var symbol: String; var title: String; var help: String? = nil; var action: () -> Void
     var body: some View {
         Button(action: action) { Image(systemName: symbol).frame(width: 24, height: 24) }
-            .buttonStyle(.borderless).help(title).accessibilityLabel(title)
+            .buttonStyle(.borderless).help(help ?? title).accessibilityLabel(title)
     }
 }
 struct MainView: View {
@@ -34,7 +35,7 @@ struct MainView: View {
                 if model.phase != .idle {
                     TaskControls(model: model)
                     if !model.phase.active && !model.conversationOpen {
-                        SymbolButton(symbol: "square.and.pencil", title: L("新对话")) { model.reset() }
+                        SymbolButton(symbol: "square.and.pencil", title: L("新对话"), help: L("结束当前会话并开始新对话；已执行的操作不会撤销。")) { model.reset() }
                     }
                 }
                 SymbolButton(symbol: "gearshape", title: L("设置")) { model.delegate?.showSettings() }
@@ -74,6 +75,10 @@ struct MainView: View {
                                 Button(L("查看运行记录"), systemImage: "folder") { model.revealRun(model.runPath) }
                                     .buttonStyle(.borderless).font(.caption).foregroundStyle(.secondary)
                             }
+                            if !model.unresolvedActionNotice.isEmpty {
+                                Label(model.unresolvedActionNotice, systemImage: "exclamationmark.triangle")
+                                    .font(.system(size: 12)).foregroundStyle(.orange).textSelection(.enabled)
+                            }
                         }
                         ExecutionDetailsView(model: model)
                         Color.clear.frame(height: 1).id("latest")
@@ -108,7 +113,7 @@ struct MainView: View {
                         Button(L("Mac 控制权限…")) { MacPermissions.showGuide(model: model) }
                         Button(L("打开对话记录文件夹")) { NSWorkspace.shared.open(model.dataDirectory) }
                         Divider()
-                        Button(L("退出 OpenGCUA")) { NSApp.terminate(nil) }.keyboardShortcut("q")
+                        Button(L("退出 OpenGCUA")) { NSApp.terminate(nil) }.keyboardShortcut("q").help(L("退出 OpenGCUA 应用并关闭执行端连接；与暂停、中止本轮或结束会话不同，已执行的操作不会撤销。"))
                     } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel(L("更多"))
                 }.font(.system(size: 11)).foregroundStyle(.secondary)
             }.padding(.horizontal, 18).padding(.bottom, 16).padding(.top, 8)
@@ -158,21 +163,21 @@ struct TaskControls: View {
                         else { Text(L("正在中止本轮…")) }
                     }.menuStyle(.borderlessButton).fixedSize().font(.caption).accessibilityLabel(L("正在中止本轮…"))
                 } else if compact {
-                    SymbolButton(symbol: "bolt.slash", title: L("中止本轮")) { model.interruptTurn() }
+                    SymbolButton(symbol: "bolt.slash", title: L("中止本轮"), help: L("中止当前轮次，保留会话以发送纠正；不会撤销已执行的操作。")) { model.interruptTurn() }
                 } else {
                     Button(L("中止本轮"), systemImage: "bolt.slash") { model.interruptTurn() }
                         .buttonStyle(.borderless).font(.caption).help(L("中止当前轮次，保留会话以发送纠正；不会撤销已执行的操作。"))
                 }
             }
             if model.phase == .running {
-                SymbolButton(symbol: "pause.fill", title: L("暂停任务")) { model.command("pause") }
+                SymbolButton(symbol: "pause.fill", title: L("暂停任务"), help: L("暂停：当前动作结束后暂停，会话与进度保留，可随时继续。")) { model.command("pause") }
             } else if model.phase == .paused || model.phase == .pausing {
-                SymbolButton(symbol: "play.fill", title: L("继续任务")) { model.command("resume") }
+                SymbolButton(symbol: "play.fill", title: L("继续任务"), help: L("继续：从暂停处继续当前任务。")) { model.command("resume") }
             }
             if model.phase.active {
-                SymbolButton(symbol: "stop.fill", title: L("停止任务")) { model.command("stop") }.disabled(model.phase == .stopping)
+                SymbolButton(symbol: "stop.fill", title: L("停止任务"), help: L("结束会话：停止任务并关闭本会话（不同于中止本轮）；不会撤销已执行的操作。")) { model.command("stop") }.disabled(model.phase == .stopping)
             } else if model.conversationOpen {
-                SymbolButton(symbol: "square.and.pencil", title: L("新对话")) { model.reset() }.disabled(model.sendingMessage)
+                SymbolButton(symbol: "square.and.pencil", title: L("新对话"), help: L("结束当前会话并开始新对话；已执行的操作不会撤销。")) { model.reset() }.disabled(model.sendingMessage)
             }
         }
     }
@@ -224,6 +229,10 @@ struct CompactView: View {
                     .help(model.taskProgressDetail).frame(maxWidth: .infinity, alignment: .leading)
             }
             RecoveryNoticeView(model: model, compact: true)
+            if !model.unresolvedActionNotice.isEmpty {
+                Text(model.unresolvedActionNotice).font(.system(size: 10)).foregroundStyle(.orange).lineLimit(1)
+                    .help(model.unresolvedActionNotice)
+            }
             if !model.controls.approvals.isEmpty {
                 Button(L("查看前台审批（默认拒绝）")) { model.delegate?.showMain() }.font(.caption)
             }
@@ -239,6 +248,7 @@ struct CompactView: View {
                     if !model.runPath.isEmpty { Button(L("查看运行记录")) { model.revealRun(model.runPath) } }
                     Divider()
                     Button(L("退出 OpenGCUA")) { NSApp.terminate(nil) }
+                        .help(L("退出 OpenGCUA 应用并关闭执行端连接；与暂停、中止本轮或结束会话不同，已执行的操作不会撤销。"))
                 } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel(L("任务菜单"))
                 Spacer(minLength: 0)
                 if orbAtBottom { Color.clear.frame(width: 42).allowsHitTesting(false) }

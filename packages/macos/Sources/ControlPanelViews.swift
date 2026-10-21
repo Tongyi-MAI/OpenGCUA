@@ -272,6 +272,37 @@ struct RecoveryNoticeView: View {
     }
 }
 
+// 只呈现执行端 context_status：不调用模型、不自算预算，分项不强行对齐输入估算。
+struct ContextStatusView: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        DisclosureGroup(model.contextStatusTitle) {
+            VStack(alignment: .leading, spacing: 5) {
+                if let context = model.controls.context {
+                    ProgressView(value: context.fraction).tint(context.overLimit ? .orange : .accentColor)
+                    LabeledContent(L("预计请求 / 上限"), value: L("%@ / %@ tokens（%@）", number(context.totalTokens), number(context.contextLimit), context.percentText))
+                    LabeledContent(L("输入 + 预留"), value: number(context.inputTokens) + " + " + number(context.reserveTokens))
+                    LabeledContent(L("估算来源"), value: context.sourceLabel)
+                    LabeledContent(L("启发式输入估算"), value: number(context.heuristicInputTokens))
+                    Text(L("启发式分项（非实际 usage；合计可能不等于上方输入）")).foregroundStyle(.secondary)
+                    ForEach(ContextStatus.componentKeys, id: \.self) { key in
+                        LabeledContent(ContextStatus.componentLabel(key), value: number(context.components[key] ?? 0))
+                    }
+                    LabeledContent(L("保留轮次"), value: String(context.visibleTurns) + " / " + String(context.totalTurns))
+                    LabeledContent(L("摘要截止轮次"), value: String(context.summaryCutoff))
+                    LabeledContent(L("图片数量"), value: String(context.imageCount))
+                    LabeledContent(L("长期参考条数"), value: String(context.memoryCount))
+                    LabeledContent("Skill", value: context.activeSkill ?? L("无"))
+                } else {
+                    Text(L("尚未收到估算")).foregroundStyle(.secondary)
+                }
+                Text(L("仅显示执行端估算，不调用模型，也不改变会话。")).foregroundStyle(.secondary)
+            }.padding(.top, 6).font(.caption).textSelection(.enabled)
+        }.font(.system(size: 12))
+    }
+    private func number(_ value: Int) -> String { value.formatted() }
+}
+
 struct SessionControlPanel: View {
     @ObservedObject var model: AppModel
     var body: some View {
@@ -280,6 +311,7 @@ struct SessionControlPanel: View {
             SessionPolicyView(model: model)
             QueueControlsView(model: model)
             MemoryControlsView(model: model)
+            ContextStatusView(model: model)
             RecoveryNoticeView(model: model)
             HStack {
                 Button(L("手动压缩上下文"), systemImage: "arrow.down.right.and.arrow.up.left") { model.compactContext() }
@@ -302,14 +334,52 @@ struct SessionControlPanel: View {
     }
 }
 
+// 环境事实卡：只展示白名单字段与固定本地化解释；预期变化始终未核验。
+private struct ActionFactsView: View {
+    let facts: ActionRuleFacts
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(facts.label, systemImage: facts.isWarning ? "exclamationmark.triangle" : "doc.text.magnifyingglass")
+                .foregroundStyle(facts.isWarning ? Color.orange : Color.secondary)
+            LabeledContent(L("预期变化"), value: L("未核验（condition=not_checked，verification=unverified）"))
+            if let operation = facts.operation { LabeledContent(L("操作类型"), value: operation) }
+            LabeledContent(L("当前动作机制"), value: facts.mechanism ?? L("尚未报告"))
+            LabeledContent(L("回执执行 / 效果"), value: (facts.execution ?? L("尚未报告")) + " / " + (facts.effect ?? L("尚未报告")))
+            LabeledContent(L("原生错误"), value: [facts.errorCode, facts.nativeErrorCode].compactMap { $0 }.joined(separator: " / ").nonEmpty ?? L("尚未报告"))
+            if let duration = facts.durationMS { LabeledContent(L("动作耗时"), value: L("%@ 毫秒", String(Int(duration.rounded())))) }
+            if let id = facts.observationID { LabeledContent(L("观察 ID"), value: id) }
+            if let stage = facts.reportedStage { LabeledContent(L("报告阶段"), value: stage) }
+            if let count = facts.incompleteComponents {
+                LabeledContent(L("观察不完整窗口"), value: String(count) + (facts.truncated ? " · " + L("已截断") : ""))
+            }
+            if !facts.errorCodes.isEmpty { LabeledContent(L("观察错误"), value: facts.errorCodes.joined(separator: ", ")) }
+            ForEach(facts.diagnostics, id: \.self) { raw in
+                Label(ActionRuleFacts.diagnosticLabel(raw) ?? "", systemImage: "info.circle").foregroundStyle(.secondary)
+            }
+            if !facts.evidenceKinds.isEmpty {
+                LabeledContent(L("证据类型（不升级核验）"), value: facts.evidenceKinds.joined(separator: ", "))
+            }
+            if facts.isWarning { Text(L("需要核实；不会自动重试，也不视为已完成。")).foregroundStyle(.orange) }
+        }.padding(6).frame(maxWidth: .infinity, alignment: .leading)
+            .background((facts.isWarning ? Color.orange : Color.primary).opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
+}
+
 private struct ActionDiagnosticView: View {
     let action: NativeActionStatus
+    var latest = true
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            LabeledContent(L("最后动作 ID"), value: action.id)
+            LabeledContent(latest ? L("最后动作 ID") : L("动作 ID"), value: action.id)
             LabeledContent(L("动作阶段"), value: action.stage)
             LabeledContent(L("执行 / 效果"), value: (action.execution.isEmpty ? L("尚未报告") : action.execution) + " / " + (action.effect.isEmpty ? L("尚未报告") : action.effect))
             LabeledContent(L("核验状态"), value: action.verification)
+            if let facts = action.facts { ActionFactsView(facts: facts) }
+            else { Text(L("尚未收到环境事实；阶段只表示派发进度，不代表业务结果。")).foregroundStyle(.secondary) }
             ForEach(action.metadata.keys.sorted(), id: \.self) { key in
                 LabeledContent(key, value: action.metadata[key] ?? "")
             }
@@ -319,6 +389,11 @@ private struct ActionDiagnosticView: View {
 
 struct ExecutionDetailsView: View {
     @ObservedObject var model: AppModel
+    // 只在本地选择查看哪条动作；不发送命令，也不抢输入焦点。
+    @ViewState private var selectedActionID: String?
+    private var selectedAction: NativeActionStatus? {
+        selectedActionID.flatMap { id in model.controls.recentActions.last { $0.id == id } }
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -357,13 +432,20 @@ struct ExecutionDetailsView: View {
             if !model.controls.recentActions.isEmpty {
                 DisclosureGroup(L("最近工具动作（最多 64 条）")) {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 2) {
                             ForEach(model.controls.recentActions.reversed()) { action in
-                                Label(action.label + " · " + action.id, systemImage: action.symbol)
-                                    .font(.caption).textSelection(.enabled)
+                                Button { selectedActionID = selectedActionID == action.id ? nil : action.id } label: {
+                                    Label(action.progressTitle + " · " + action.id, systemImage: action.symbol)
+                                        .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                                }.buttonStyle(.plain).focusable(false).padding(4)
+                                    .foregroundStyle(action.facts?.isWarning == true ? Color.orange : Color.primary)
+                                    .background(action.id == selectedActionID ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                                    .help(L("点击查看此动作的环境事实与诊断"))
                             }
-                        }.frame(maxWidth: .infinity, alignment: .leading)
+                        }.frame(maxWidth: .infinity, alignment: .leading).font(.caption)
                     }.frame(maxHeight: 160)
+                    if let action = selectedAction { ActionDiagnosticView(action: action, latest: false).padding(.top, 4) }
+                    else { Text(L("点击一条动作查看环境事实与诊断。")).font(.caption).foregroundStyle(.secondary) }
                 }
             }
             if !model.controls.recoveryActions.isEmpty {
@@ -387,8 +469,8 @@ struct ExecutionDetailsView: View {
                         if let start = model.controls.turnStartedAt {
                             LabeledContent(L("本轮耗时"), value: L("%@ 秒", String(Int(max(0, (model.controls.turnEndedAt ?? timeline.date).timeIntervalSince(start))))))
                         }
-                        if let action = model.controls.recentActions.last {
-                            ActionDiagnosticView(action: action)
+                        if let action = selectedAction ?? model.controls.recentActions.last {
+                            ActionDiagnosticView(action: action, latest: selectedAction == nil)
                         }
                         if !model.controls.lastEnvelope.isEmpty {
                             DisclosureGroup(L("最后事件 envelope 元数据")) {

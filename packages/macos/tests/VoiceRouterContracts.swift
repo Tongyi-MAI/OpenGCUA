@@ -325,6 +325,8 @@ enum AppError: LocalizedError {
         previewContracts(directory: directory.appendingPathComponent("previews"))
         envelopeActionContracts(directory: directory.appendingPathComponent("d01"))
         try envelopeValidationContracts(directory: directory.appendingPathComponent("d01-strict"))
+        ruleFactsContracts(directory: directory.appendingPathComponent("rule-facts"))
+        try contextStatusContracts(directory: directory.appendingPathComponent("context"))
         print("Mini window routing passed: visible across execution and captures, hidden only for guarded overlaps, synchronized acknowledgement, stale fences and reset recovery.")
         print("Historical chat contracts passed: read-only selection, resume request, stable history ID, fresh execution fence, switch acknowledgement, active-task protection, drafts and app restart.")
         print("Conversation contracts passed: text and voice follow-ups, bubble ordering, deduplication, persisted history, legacy decoding and fresh chat fencing.")
@@ -1052,6 +1054,310 @@ enum AppError: LocalizedError {
         precondition(model.controls.turnIndex == 1 && model.controls.canonicalTurnID == "strict-next" && model.phase == .running)
         precondition(model.controls.envelopeSequence == sequence && model.error.isEmpty && model.bridge.commands.count == baseline.commands)
         print("D01 严格信封契约通过：\(rejected) 个畸形 v1 帧（含 JSON 1.0/bool）未改变授权/phase/sequence/缓存且未发请求；合法对照帧生效。")
+    }
+    // 真实 AppModel 入口：rule_feedback 只投影为有界只读事实，不升级核验、不复活旧动作、不发送任何请求。
+    @MainActor static func ruleFactsContracts(directory: URL) {
+        let model = AppModel(dataDirectory: directory)
+        model.ready = true; model.bridge.acknowledge = false
+        model.taskID = "facts-native"; model.conversationOpen = true; model.phase = .running
+        var sequence = 0, index = 0
+        func frame(_ kind: String, _ fields: [String: Any] = [:]) -> [String: Any] {
+            sequence += 1
+            var event: [String: Any] = ["schema_version": 1, "event_id": "facts-\(sequence)", "sequence": sequence,
+                "session_id": "facts-session", "stream_id": "facts-stream", "task_id": "harness-facts", "native_task_id": model.taskID,
+                "turn_id": "facts-turn-\(index)", "turn_index": index, "step_id": NSNull(), "step": NSNull(), "timestamp": "2026-10-22T00:00:00Z",
+                "kind": kind, "origin": "harness", "policy_revision": 0, "text": ""]
+            for (key, value) in fields { event[key] = value }
+            return event
+        }
+        func emit(_ kind: String, _ fields: [String: Any] = [:]) { model.receive(frame(kind, fields)) }
+        func rule(_ evaluation: String, _ fields: [String: Any] = [:], removing: [String] = []) -> [String: Any] {
+            var row: [String: Any] = ["rule_version": 1, "evaluation": evaluation, "condition": "not_checked", "verification": "unverified"]
+            for (key, value) in fields { row[key] = value }
+            for key in removing { row[key] = nil }
+            return row
+        }
+        func action(_ id: String) -> NativeActionStatus? { model.controls.recentActions.last { $0.id == id } }
+        emit("turn_started", ["text": "事实卡"])
+        emit("policy", ["foreground_allowed": false, "ask_user_enabled": true])
+        emit("intent", ["text": "点击保存"])
+        let commands = model.bridge.commands.count
+        emit("action_status", ["action_id": "click-1", "stage": "dispatching"])
+        precondition(model.taskProgressTitle == L("工具派发中") && action("click-1")?.facts == nil)
+        // 自由文字（text/summary/原生诊断）只用于验证隐私：任何字段都不得保存或展示。
+        let receipt = frame("action_status", ["action_id": "click-1", "stage": "receipt_received", "execution": "ok", "effect": "unknown",
+            "text": "SUMMARY-SECRET", "summary": "hunter2", "rule_feedback": rule("receipt_unverified", ["action_id": "click-1",
+                "operation": "click", "mechanism": "ax_press", "summary": "PRIVATE 自由文本", "reported_stage": "receipt_received",
+                "execution": "ok", "effect": "unknown", "observation_id": "obs-1", "duration_ms": 12.5,
+                "evidence_kinds": ["native_observation", "forged_proof", "native_observation", 7], "diagnostics": ["PRIVATE diag"]])])
+        model.receive(receipt)
+        let clicked = action("click-1")!
+        let facts = clicked.facts!
+        precondition(facts.evaluation == "receipt_unverified" && !facts.isWarning && facts.shortLabel == nil)
+        precondition(model.taskProgressTitle == L("已收到技术回执，尚未核验") && clicked.symbol == "doc.text.magnifyingglass",
+                     "普通点击的技术回执只是未核验，不能显示为失败或警告")
+        precondition(facts.operation == "click" && facts.mechanism == "ax_press" && facts.observationID == "obs-1" && facts.durationMS == 12.5)
+        precondition(facts.evidenceKinds == ["native_observation"] && facts.diagnostics.isEmpty && clicked.verification == "unverified")
+        precondition(model.currentIntent == "点击保存" && model.phase == .running && !model.taskProgressIndeterminate)
+        emit("action_status", ["action_id": "click-1", "stage": "receipt_received"])
+        precondition(action("click-1")?.facts == facts && action("click-1")?.execution == "ok" && action("click-1")?.effect == "unknown",
+                     "只带 stage 的增量保留事实与原始 execution/effect")
+        var replay = receipt
+        replay["sequence"] = sequence + 50
+        replay["rule_feedback"] = rule("outcome_unknown")
+        model.receive(replay)
+        precondition(action("click-1")?.facts == facts && model.controls.envelopeSequence == sequence, "同 event_id 重放必须拒绝")
+        var same = receipt
+        sequence += 1; same["sequence"] = sequence; same["event_id"] = "facts-same"
+        model.receive(same)
+        precondition(model.controls.seenEventIDs.contains("facts-same") && action("click-1")?.facts == facts
+                     && action("click-1")?.stage == "receipt_received" && action("click-1")?.verification == "unverified", "相同 payload 保持原值")
+        // 畸形或冒充核验的 rule_feedback 整份丢弃：新动作没有事实，已有事实不被覆盖。
+        let malformed: [(String, Any)] = [
+            ("verification=verified", rule("receipt_unverified", ["verification": "verified", "evidence_kinds": ["device_receipt"]])),
+            ("condition=checked", rule("suspected_noop", ["condition": "checked"])), ("condition missing", rule("partial", removing: ["condition"])),
+            ("verification missing", rule("partial", removing: ["verification"])),
+            ("rule_version=true", rule("partial", ["rule_version": true])), ("rule_version=1.0", rule("partial", ["rule_version": 1.0])),
+            ("rule_version=2", rule("partial", ["rule_version": 2])), ("rule_version=\"1\"", rule("partial", ["rule_version": "1"])),
+            ("rule_version missing", rule("partial", removing: ["rule_version"])),
+            ("evaluation=success", rule("success")), ("evaluation=verified", rule("verified")), ("evaluation=1", rule("partial", ["evaluation": 1])),
+            ("action_id mismatch", rule("partial", ["action_id": "other-action"])), ("action_id=7", rule("partial", ["action_id": 7])),
+            ("string", "receipt_unverified"), ("array", [rule("partial")]), ("null", NSNull()),
+        ]
+        for (offset, (name, feed)) in malformed.enumerated() {
+            emit("action_status", ["action_id": "bad-\(offset)", "stage": "receipt_received", "rule_feedback": feed])
+            let bad = action("bad-\(offset)")
+            precondition(bad != nil && bad?.facts == nil && bad?.verification == "unverified", "畸形 rule_feedback 必须整份丢弃：" + name)
+            precondition(bad?.progressTitle == L("已收到技术回执，尚未核验"), "无事实时沿用阶段标签：" + name)
+            emit("action_status", ["action_id": "click-1", "stage": "receipt_received", "rule_feedback": feed])
+            precondition(action("click-1")?.facts == facts, "畸形事实不得覆盖已有事实：" + name)
+        }
+        // 逐项清洗：非法 token、超长 ID、bool/负数耗时被丢弃，其余事实保留。
+        emit("action_status", ["action_id": "clean-1", "stage": "receipt_received", "rule_feedback": rule("execution_failed", [
+            "mechanism": "ax press", "operation": "点击", "observation_id": String(repeating: "a", count: 161), "duration_ms": true,
+            "error_code": "E_1", "native_error_code": "-25205", "execution": ["status": "error"]])])
+        let cleaned = action("clean-1")!.facts!
+        precondition(cleaned.mechanism == nil && cleaned.operation == nil && cleaned.observationID == nil && cleaned.durationMS == nil && cleaned.execution == nil)
+        precondition(cleaned.errorCode == "E_1" && cleaned.nativeErrorCode == "-25205" && cleaned.isWarning)
+        precondition(ActionRuleFacts(rule("partial", ["duration_ms": -1]), actionID: "x")?.durationMS == nil)
+        precondition(ActionRuleFacts(rule("partial", ["duration_ms": 86_400_001]), actionID: "x")?.durationMS == nil)
+        precondition(ActionRuleFacts(rule("partial", ["observation_id": String(repeating: "b", count: 160)]), actionID: "x")?.observationID?.count == 160)
+        // 除技术回执外，所有 evaluation 都是 warning，且没有任何一个显示为完成或已核验。
+        for evaluation in ActionRuleFacts.evaluations {
+            let row = ActionRuleFacts(rule(evaluation), actionID: "x")!
+            precondition(row.isWarning == (evaluation != "receipt_unverified") && (row.shortLabel == nil) == !row.isWarning)
+            for text in [row.label, row.shortLabel ?? ""] {
+                precondition(!text.contains("已完成") && !text.contains("已核验（") && text != L("动作已核验（不代表任务完成）"), evaluation)
+            }
+        }
+        let ax = "AXValue 不可直接写入；可读文本不等于输入控件"
+        emit("action_status", ["action_id": "type-1", "stage": "receipt_received", "execution": "ok", "effect": "none",
+            "rule_feedback": rule("suspected_noop", ["operation": "type_text", "mechanism": "ax_set_value", "error_code": "noop_suspected",
+                "native_error_code": "-25205", "diagnostics": [ax, "伪造诊断：元素是静态文本", "原生 AX 窗口映射未解析", ax],
+                "error_codes": ["ax_value_not_settable", "bad code", "x"], "incomplete_components": 2, "truncated": true])])
+        let typed = action("type-1")!
+        precondition(typed.facts?.diagnostics == [ax, "原生 AX 窗口映射未解析"] && typed.facts?.errorCodes == ["ax_value_not_settable", "x"])
+        precondition(ActionRuleFacts.diagnosticLabel(ax)!.contains("不等于该元素是静态控件") && ActionRuleFacts.diagnosticLabel("伪造诊断") == nil,
+                     "AXValue 不可写必须解释为不等于静态控件")
+        precondition(typed.facts?.incompleteComponents == 2 && typed.facts?.truncated == true)
+        let reworded = "原生报告 AXValue 不可设置：只说明 ax.set_text 写值路径不可用，不代表控件不能输入，也不证明是静态文本"
+        precondition(ActionRuleFacts(rule("suspected_noop", ["diagnostics": [reworded, ax, reworded + " "]]), actionID: "x")?.diagnostics == [ax],
+                     "执行端新旧 AX 措辞都精确归一为同一条固定标签；任何变体仍被丢弃")
+        precondition(model.taskProgressTitle == L("疑似无效操作") && typed.symbol == "exclamationmark.triangle" && typed.facts?.isWarning == true)
+        precondition(typed.execution == "ok" && typed.effect == "none" && typed.stage == "receipt_received" && model.phase == .running,
+                     "warning 事实保留原始 stage/execution/effect，且不改变本轮状态")
+        emit("action_status", ["action_id": "type-1", "stage": "running"])
+        precondition(model.taskProgressTitle == L("工具执行中") && action("type-1")?.facts?.evaluation == "suspected_noop", "进行中阶段优先于旧事实")
+        emit("action_status", ["action_id": "type-1", "stage": "receipt_received"])
+        // 结果未知是最强事实：较弱事实或 stage=verified 都不能把它改写为成功。
+        emit("action_status", ["action_id": "send-1", "stage": "outcome_unknown", "rule_feedback": rule("outcome_unknown", ["operation": "key_press"])])
+        emit("action_status", ["action_id": "send-1", "stage": "receipt_received", "rule_feedback": rule("receipt_unverified")])
+        emit("action_status", ["action_id": "send-1", "stage": "receipt_received", "rule_feedback": rule("suspected_noop")])
+        emit("action_status", ["action_id": "send-1", "stage": "verified"])
+        let sent = action("send-1")!
+        precondition(sent.facts?.evaluation == "outcome_unknown" && sent.facts?.operation == "key_press" && sent.unresolved)
+        precondition(model.taskProgressTitle == L("动作结果未知，请核实") && sent.verification == "unverified" && sent.symbol == "exclamationmark.triangle",
+                     "不同 status 不能把结果未知误显示为已核验")
+        emit("approval", ["approval_id": "facts-approval", "text": "确认前台"])
+        precondition(model.taskProgressTitle == L("等待前台审批"), "审批优先于事实")
+        emit("approval_closed", ["approval_id": "facts-approval"])
+        model.phase = .waiting
+        precondition(model.taskProgressTitle == TaskPhase.waiting.label, "提问优先于事实")
+        model.phase = .running
+        precondition(model.unresolvedActionCount == 0 && model.unresolvedActionNotice.isEmpty, "进行中不显示独立未知提示")
+        emit("turn_finished", ["state": "completed", "text": "已保存"])
+        precondition(model.phase == .completed && model.controls.activeAction == nil)
+        precondition(model.unresolvedActionCount == 1 && model.unresolvedActionNotice == L("本轮已结束，但仍有 %@ 个动作结果未知；请核实，不会自动重试。", "1"))
+        emit("action_status", ["action_id": "late-1", "stage": "outcome_unknown"])
+        precondition(action("late-1") != nil && model.controls.activeAction == nil && model.unresolvedActionCount == 2 && model.phase == .completed,
+                     "同轮迟到动作只更新诊断与提示，不改变终态")
+        index = 1
+        emit("turn_started", ["text": "下一轮"])
+        precondition(model.unresolvedActionCount == 0, "新轮不继承上一轮的未知提示")
+        emit("action_status", ["action_id": "type-1", "stage": "receipt_received"])
+        precondition(model.controls.activeAction == nil && action("type-1")?.turn == 0 && action("type-1")?.facts?.evaluation == "suspected_noop",
+                     "新轮不能复活旧动作")
+        emit("action_status", ["action_id": "click-2", "stage": "running"])
+        precondition(model.controls.activeAction?.id == "click-2" && model.controls.activeAction?.turn == 1)
+        let current = model.controls.recentActions
+        emit("action_status", ["turn_id": "facts-turn-0", "turn_index": 0, "action_id": "stale-1", "stage": "outcome_unknown"])
+        precondition(model.controls.recentActions == current, "旧轮帧必须拒绝")
+        let dump = String(describing: model.controls) + String(describing: model.conversationMessages) + model.error + model.answer + model.taskProgressTitle
+        for secret in ["SUMMARY-SECRET", "hunter2", "PRIVATE", "forged_proof", "伪造诊断", "bad code"] {
+            precondition(!dump.contains(secret), "自由文字或未列入白名单的值不得保存：" + secret)
+        }
+        precondition(model.bridge.commands.count == commands && !model.controls.foregroundAllowed && model.controls.askUserEnabled,
+                     "事实投影不得发送请求或改变授权")
+        print("环境事实契约通过：rule_feedback 白名单/有界、\(malformed.count) 种畸形整份丢弃、隐私、优先级合并、warning 不完成、迟到/新轮不复活、无派发。")
+    }
+    // 真实 AppModel 入口：context_status 只投影估算，不改变 phase/授权/队列/错误/发送状态，也不发请求。
+    @MainActor static func contextStatusContracts(directory: URL) throws {
+        let model = AppModel(dataDirectory: directory)
+        model.ready = true; model.bridge.acknowledge = false
+        model.taskID = "context-native"; model.conversationOpen = true; model.phase = .running
+        precondition(model.controls.context == nil && model.contextStatusTitle == L("上下文估算（尚未收到）"))
+        var sequence = 0, index = 0
+        func frame(_ kind: String, _ fields: [String: Any] = [:]) -> [String: Any] {
+            sequence += 1
+            var event: [String: Any] = ["schema_version": 1, "event_id": "context-\(sequence)", "sequence": sequence,
+                "session_id": "context-session", "stream_id": "context-stream", "task_id": "harness-context", "native_task_id": model.taskID,
+                "turn_id": "context-turn-\(index)", "turn_index": index, "step_id": NSNull(), "step": NSNull(), "timestamp": "2026-10-22T00:00:00Z",
+                "kind": kind, "origin": "harness", "policy_revision": 0, "text": ""]
+            for (key, value) in fields { event[key] = value }
+            return event
+        }
+        func emit(_ kind: String, _ fields: [String: Any] = [:]) { model.receive(frame(kind, fields)) }
+        // 与主代理 flat wire 同形；components 合计（9800）刻意不等于 input_tokens 或 heuristic_input_tokens。
+        func status(_ fields: [String: Any] = [:]) -> [String: Any] {
+            var event = frame("context_status", ["input_tokens": 12000, "reserve_tokens": 4000, "total_tokens": 16000, "context_limit": 200000,
+                "visible_turns": 3, "total_turns": 5, "summary_cutoff": 2, "image_count": 1, "memory_count": 4, "estimate_source": "usage_delta",
+                "components": ["text": 6000, "images": 1500, "opaque_reasoning": 1800, "overhead": 500],
+                "active_skill": "pdf-form", "heuristic_input_tokens": 10400])
+            for (key, value) in fields { event[key] = value }
+            return event
+        }
+        func invariants() -> [String] {
+            let c = model.controls
+            return [model.phase.rawValue, String(model.sendingMessage), model.error, c.attemptID ?? "-", String(c.attempt), c.stage, c.stageText,
+                    String(c.queue.count), String(c.queueSuspended), String(c.foregroundAllowed), String(c.askUserEnabled), String(c.approvals.count),
+                    c.activeActionID ?? "-", String(model.bridge.commands.count), model.currentIntent, String(c.turnIndex), c.canonicalTurnID ?? "-",
+                    String(c.compacting), String(c.turnClosed)]
+        }
+        emit("turn_started", ["text": "上下文"])
+        emit("model_status", ["stage": "waiting", "text": "API 等待", "attempt": 1, "attempt_id": "ctx-a"])
+        emit("intent", ["text": "整理表格"])
+        model.sendingMessage = true; model.error = "fixture-error"
+        var base = invariants()
+        let valid = status()
+        model.receive(valid)
+        let context = model.controls.context!
+        precondition(context.inputTokens == 12000 && context.reserveTokens == 4000 && context.totalTokens == 16000 && context.contextLimit == 200000)
+        precondition(context.visibleTurns == 3 && context.totalTurns == 5 && context.summaryCutoff == 2 && context.imageCount == 1 && context.memoryCount == 4)
+        precondition(context.percentText == "8%" && abs(context.fraction - 0.08) < 1e-9 && !context.overLimit)
+        precondition(context.components == ["text": 6000, "images": 1500, "opaque_reasoning": 1800, "overhead": 500] && context.componentsTotal == 9800,
+                     "启发式分项按原值呈现，不强行校准到 input_tokens")
+        precondition(context.inputTokens != context.componentsTotal && context.heuristicInputTokens == 10400 && context.activeSkill == "pdf-form")
+        precondition(context.sourceLabel == L("上次实际 usage + 增量估算") && model.contextStatusTitle == L("上下文估算（%@）", "8%"))
+        precondition(model.controls.envelopeSequence == valid["sequence"] as? Int && model.controls.seenEventIDs.contains(valid["event_id"] as! String))
+        precondition(invariants() == base, "估算不改变 phase/attempt/授权/队列/错误/发送状态")
+        var mutations: [(String, (inout [String: Any]) -> Void)] = [
+            ("context_limit=0", { $0["context_limit"] = 0 }), ("total_tokens>limit", { $0["total_tokens"] = ContextStatus.tokenLimit + 1 }),
+            ("estimate_source=exact", { $0["estimate_source"] = "exact" }), ("estimate_source missing", { $0["estimate_source"] = nil }),
+            ("estimate_source=1", { $0["estimate_source"] = 1 }),
+            ("components missing key", { $0["components"] = ["text": 1, "images": 1, "opaque_reasoning": 1] }),
+            ("components float", { $0["components"] = ["text": 1.5, "images": 1, "opaque_reasoning": 1, "overhead": 1] }),
+            ("components bool", { $0["components"] = ["text": true, "images": 1, "opaque_reasoning": 1, "overhead": 1] }),
+            ("components negative", { $0["components"] = ["text": -1, "images": 1, "opaque_reasoning": 1, "overhead": 1] }),
+            ("components array", { $0["components"] = [1, 2, 3, 4] }), ("components missing", { $0["components"] = nil }),
+            ("active_skill=7", { $0["active_skill"] = 7 }), ("active_skill too long", { $0["active_skill"] = String(repeating: "s", count: 129) }),
+        ]
+        for key in ["input_tokens", "reserve_tokens", "total_tokens", "context_limit", "visible_turns", "total_turns", "summary_cutoff",
+                    "image_count", "memory_count", "heuristic_input_tokens"] {
+            mutations += [("\(key)=true", { $0[key] = true }), ("\(key)=1.0", { $0[key] = 1.0 }), ("\(key)=-1", { $0[key] = -1 }),
+                          ("\(key)=\"1\"", { $0[key] = "1" }), ("\(key)=null", { $0[key] = NSNull() }), ("\(key) missing", { $0[key] = nil })]
+        }
+        for (name, mutate) in mutations {
+            var event = status(); mutate(&event)
+            let before = model.controls.envelopeSequence
+            model.receive(event)
+            precondition(model.controls.context == context && model.controls.envelopeSequence == before
+                         && !model.controls.seenEventIDs.contains(event["event_id"] as! String), "畸形 context_status 必须整帧丢弃：" + name)
+            precondition(invariants() == base, "畸形估算不得改变会话：" + name)
+        }
+        // JSON 解码后的 NSNumber：整数接受、浮点拒绝。
+        let decoded = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: status(["total_tokens": 20000]))) as! [String: Any]
+        model.receive(decoded)
+        precondition(model.controls.context?.totalTokens == 20000 && model.contextStatusTitle == L("上下文估算（%@）", "10%"))
+        var text = String(data: try JSONSerialization.data(withJSONObject: status(["total_tokens": 21000]), options: [.sortedKeys]), encoding: .utf8)!
+        precondition(text.contains("\"total_tokens\":21000"))
+        text = text.replacingOccurrences(of: "\"total_tokens\":21000", with: "\"total_tokens\":21000.0")
+        model.receive(try JSONSerialization.jsonObject(with: Data(text.utf8)) as! [String: Any])
+        precondition(model.controls.context?.totalTokens == 20000, "JSON 21000.0 必须拒绝")
+        // null/缺失/空 Skill 都表示未启用；多余分项忽略；超过上限如实显示且进度条夹紧。
+        for skill in [NSNull() as Any, "" as Any] {
+            model.receive(status(["active_skill": skill]))
+            precondition(model.controls.context != nil && model.controls.context?.activeSkill == nil)
+        }
+        var missingSkill = status(["total_tokens": 240000, "estimate_source": "heuristic",
+                                   "components": ["text": 1, "images": 2, "opaque_reasoning": 3, "overhead": 4, "future": 5]])
+        missingSkill["active_skill"] = nil
+        model.receive(missingSkill)
+        let over = model.controls.context!
+        precondition(over.activeSkill == nil && over.components.count == 4 && over.componentsTotal == 10 && over.percentText == "120%" && over.fraction == 1 && over.overLimit)
+        precondition(over.sourceLabel == L("字符启发式（未经 usage 校准）") && invariants() == base)
+        // 围栏：重复 event_id、迟到 sequence、其他 task/session、退役 attempt、未来/未知/旧轮次全部拒绝。
+        var replay = status(["total_tokens": 30000])
+        model.receive(replay)
+        precondition(model.controls.context?.totalTokens == 30000)
+        let marker = model.controls.context
+        replay["total_tokens"] = 1; replay["sequence"] = sequence + 50
+        model.receive(replay)
+        var late = status(["total_tokens": 2]); late["sequence"] = 1
+        model.receive(late)
+        model.receive(status(["native_task_id": "other-native", "total_tokens": 3]))
+        model.receive(status(["session_id": "old-session", "total_tokens": 4]))
+        model.receive(status(["native_task_id": NSNull(), "task_id": NSNull(), "total_tokens": 5]))
+        model.receive(status(["turn_id": "context-future", "turn_index": 9, "total_tokens": 6]))
+        model.receive(status(["turn_index": 9, "total_tokens": 7]))
+        var unknownTurn = status(["turn_id": "context-mystery", "total_tokens": 8]); unknownTurn["turn_index"] = nil
+        model.receive(unknownTurn)
+        precondition(model.controls.context == marker && model.controls.turnIndex == 0 && invariants() == base, "迟到或越界估算必须拒绝")
+        emit("model_status", ["stage": "waiting", "text": "新请求", "attempt": 1, "attempt_id": "ctx-b"])
+        base = invariants()
+        model.receive(status(["attempt_id": "ctx-a", "total_tokens": 9]))
+        precondition(model.controls.context == marker, "已退役 attempt 的估算必须拒绝")
+        model.receive(status(["attempt_id": "ctx-unknown", "total_tokens": 31000]))
+        precondition(model.controls.context?.totalTokens == 31000 && model.controls.attemptID == "ctx-b" && invariants() == base,
+                     "估算不建立或切换 attempt")
+        // 未知 kind 安全忽略（Python 先于 UI 上线时的前向兼容）。
+        let known = model.controls.context
+        emit("context_status_v2", ["total_tokens": 1])
+        emit("future_diagnostic", ["text": "unknown"])
+        precondition(model.controls.context == known && invariants() == base)
+        // 轮次结束后压缩产生的新估算只更新面板，不算模型重试，也不改变终态。
+        emit("turn_finished", ["state": "completed", "text": "完成"])
+        precondition(model.phase == .completed)
+        emit("model_status", ["stage": "waiting", "purpose": "compaction", "text": "整理上下文", "attempt": 1, "attempt_id": "ctx-compaction"])
+        base = invariants()
+        model.receive(status(["input_tokens": 3000, "total_tokens": 7000, "summary_cutoff": 4, "visible_turns": 1, "attempt_id": "ctx-compaction"]))
+        precondition(model.controls.context?.summaryCutoff == 4 && model.controls.context?.totalTokens == 7000 && invariants() == base,
+                     "压缩后的估算不作为模型重试，也不改变 phase")
+        index = 1
+        emit("turn_started", ["text": "下一轮"])
+        precondition(model.controls.context?.summaryCutoff == 4, "同一会话跨轮保留最近估算")
+        let carried = model.controls.context
+        model.receive(status(["turn_id": "context-turn-0", "turn_index": 0, "total_tokens": 10]))
+        precondition(model.controls.context == carried, "旧轮估算必须拒绝")
+        emit("turn_finished", ["state": "completed", "text": "完成"])
+        precondition(model.bridge.commands.isEmpty, "估算事件不得触发任何后端请求")
+        // 跨会话重置清空估算；唯一请求来自用户显式的新对话。
+        model.sendingMessage = false; model.error = ""
+        model.reset()
+        precondition(model.bridge.commands.count == 1 && model.bridge.commands.last?["command"] as? String == "end")
+        model.receive(["event": "command_ack", "command_id": model.bridge.commands.last!["command_id"]!, "task_id": model.taskID])
+        precondition(!model.conversationOpen && model.controls.context == nil && model.contextStatusTitle == L("上下文估算（尚未收到）"),
+                     "跨会话重置必须清空估算")
+        print("上下文估算契约通过：flat 字段整帧校验（\(mutations.count) 种畸形）、分项与校准值独立呈现、围栏/迟到/未知 kind、压缩后不算重试、跨会话清空、无请求。")
     }
     @MainActor static func previewContracts(directory: URL) {
         let model = AppModel(dataDirectory: directory)

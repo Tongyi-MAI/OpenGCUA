@@ -198,7 +198,7 @@ enum TaskPhase: String {
         if !controls.stageText.isEmpty && phase == .running { return controls.stageText }
         guard phase == .running else { return phase.label }
         if !apiProgressTitle.isEmpty { return apiProgressTitle }
-        if let action = controls.activeAction { return action.label }
+        if let action = controls.activeAction { return action.progressTitle }
         switch executionPhase {
         case "planning": return L("思考中")
         case "execution": return L("正在操作")
@@ -233,6 +233,19 @@ enum TaskPhase: String {
     var taskProgressSymbol: String { displayedAction?.symbol ?? phase.symbol }
     var recoveryNotice: String {
         [controls.recoverySummary, controls.recoveryText].filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+    // 本轮已结束但仍有结果未知的动作：只提示核实，不改变本轮状态，也不自动重试。
+    var unresolvedActionCount: Int {
+        guard !phase.active else { return 0 }
+        return controls.recentActions.filter { $0.turn == controls.turnIndex && $0.unresolved }.count
+    }
+    var unresolvedActionNotice: String {
+        let count = unresolvedActionCount
+        return count == 0 ? "" : L("本轮已结束，但仍有 %@ 个动作结果未知；请核实，不会自动重试。", String(count))
+    }
+    var contextStatusTitle: String {
+        guard let context = controls.context else { return L("上下文估算（尚未收到）") }
+        return L("上下文估算（%@）", context.percentText)
     }
     var currentIntent: String {
         let preview = controls.intentPreview.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -653,7 +666,7 @@ enum TaskPhase: String {
         if voiceMode { content = showsCompactResult ? 334 : showsVoiceTaskProgress ? 274 : 208 }
         else { content = showsCompactResult || phase == .waiting ? 248 : phase == .paused ? 204 : phase == .idle ? 156 : 164 }
         let intentHeight: CGFloat = !voiceMode && phase.active && !currentIntent.isEmpty ? 28 : 0
-        return content + intentHeight + (foregroundWarning.isEmpty ? 0 : 32) + (error.isEmpty ? 0 : 32) + (controls.approvals.isEmpty ? 0 : 24) + (controls.result.isEmpty ? 0 : 18) + (recoveryNotice.isEmpty ? 0 : 40)
+        return content + intentHeight + (foregroundWarning.isEmpty ? 0 : 32) + (error.isEmpty ? 0 : 32) + (controls.approvals.isEmpty ? 0 : 24) + (controls.result.isEmpty ? 0 : 18) + (recoveryNotice.isEmpty ? 0 : 40) + (voiceMode || unresolvedActionNotice.isEmpty ? 0 : 18)
     }
     var inputText: String {
         get { phase == .waiting ? reply : messageDraft }

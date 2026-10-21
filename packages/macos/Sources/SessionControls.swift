@@ -96,6 +96,108 @@ struct NativeEventEnvelope {
     }
 }
 
+// action_status.rule_feedback 的只读事实，白名单与 action_feedback.py 一致。
+// summary、text 与原生自由文字一律不保存；condition/verification 只接受固定值，任何事实都不升级核验。
+struct ActionRuleFacts: Equatable {
+    static let evaluations = ["not_dispatched", "not_applied", "outcome_unknown", "execution_failed",
+                              "suspected_noop", "partial", "receipt_unverified", "observation_unavailable"]
+    static let evidenceKinds = ["exact_window_activation", "native_observation", "device_receipt"]
+    static let listLimit = 8
+    // 执行端可能调整 AX 诊断措辞；仅精确匹配的同义原文归一为同一条，仍由 Swift 固定标签展示。
+    static let diagnosticAliases = ["原生报告 AXValue 不可设置：只说明 ax.set_text 写值路径不可用，不代表控件不能输入，也不证明是静态文本":
+                                         "AXValue 不可直接写入；可读文本不等于输入控件"]
+    var evaluation: String
+    var operation: String?
+    var reportedStage: String?
+    var execution: String?
+    var effect: String?
+    var errorCode: String?
+    var nativeErrorCode: String?
+    var mechanism: String?
+    var observationID: String?
+    var durationMS: Double?
+    var diagnostics: [String] = []
+    var evidenceKinds: [String] = []
+    var incompleteComponents: Int?
+    var truncated = false
+    var errorCodes: [String] = []
+    // 与 Python _TOKEN 相同：[A-Za-z0-9_.:/-]{1,160}。
+    static func token(_ value: Any?) -> String? {
+        guard let text = value as? String, (1...160).contains(text.unicodeScalars.count),
+              text.unicodeScalars.allSatisfy({ $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "_.:/-".unicodeScalars.contains($0)) })
+        else { return nil }
+        return text
+    }
+    // 版本、evaluation、固定 condition/verification 或动作身份不符时整份丢弃；其余字段逐项清洗。
+    init?(_ value: Any?, actionID: String) {
+        guard let row = value as? [String: Any], NativeEventEnvelope.integer(row["rule_version"]) == 1,
+              let evaluation = row["evaluation"] as? String, Self.evaluations.contains(evaluation),
+              row["verification"] as? String == "unverified", row["condition"] as? String == "not_checked" else { return nil }
+        if let raw = row["action_id"], Self.token(raw) != actionID { return nil }
+        self.evaluation = evaluation
+        operation = Self.token(row["operation"]); reportedStage = Self.token(row["reported_stage"])
+        execution = Self.token(row["execution"]); effect = Self.token(row["effect"])
+        errorCode = Self.token(row["error_code"]); nativeErrorCode = Self.token(row["native_error_code"])
+        mechanism = Self.token(row["mechanism"]); observationID = Self.token(row["observation_id"])
+        if let number = row["duration_ms"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+           number.doubleValue.isFinite, (0...86_400_000).contains(number.doubleValue) { durationMS = number.doubleValue }
+        func bounded(_ key: String, _ accept: (Any) -> String?) -> [String] {
+            var result: [String] = []
+            for item in (row[key] as? [Any] ?? []).prefix(Self.listLimit) {
+                if let value = accept(item), !result.contains(value) { result.append(value) }
+            }
+            return result
+        }
+        diagnostics = bounded("diagnostics") { item in
+            (item as? String).map { Self.diagnosticAliases[$0] ?? $0 }.flatMap { Self.diagnosticLabel($0) == nil ? nil : $0 }
+        }
+        evidenceKinds = bounded("evidence_kinds") { item in (item as? String).flatMap { Self.evidenceKinds.contains($0) ? $0 : nil } }
+        errorCodes = bounded("error_codes") { Self.token($0) }
+        if let count = NativeEventEnvelope.integer(row["incomplete_components"]), count >= 0 {
+            incompleteComponents = count; truncated = MemoryJSON.boolean(row["truncated"]) == true
+        }
+    }
+    // Python _PRIORITY：数值越小越强；较弱事实不覆盖结果未知或拒绝等较强事实。
+    var priority: Int { evaluation == "outcome_unknown" ? 0 : evaluation == "receipt_unverified" ? 2 : 1 }
+    // 技术回执仅表示未核验，不是警告；其余事实都需要核实且不能显示为完成。
+    var isWarning: Bool { evaluation != "receipt_unverified" }
+    var label: String {
+        switch evaluation {
+        case "not_dispatched": return L("动作未派发：在派发前被拒绝，未执行")
+        case "not_applied": return L("回执报告未应用；不据此推断失败阶段")
+        case "outcome_unknown": return L("派发结果未知，可能已有副作用；请先核实，勿直接重试")
+        case "execution_failed": return L("调用报告失败；业务结果未确定")
+        case "suspected_noop": return L("疑似无效操作；原因未确定，不代表完全未执行")
+        case "partial": return L("仅部分生效；业务结果未核验")
+        case "observation_unavailable": return L("观察不完整或不可用；不能据此证明目标不存在")
+        default: return L("已收到技术回执；预期变化未核验")
+        }
+    }
+    // 气泡只放一行事实；技术回执沿用阶段标签，避免把普通点击显示成失败。
+    var shortLabel: String? {
+        switch evaluation {
+        case "not_dispatched": return L("动作未派发")
+        case "not_applied": return L("动作未应用")
+        case "outcome_unknown": return L("动作结果未知，请核实")
+        case "execution_failed": return L("动作报告失败")
+        case "suspected_noop": return L("疑似无效操作")
+        case "partial": return L("动作仅部分生效")
+        case "observation_unavailable": return L("观察不完整")
+        default: return nil
+        }
+    }
+    static func diagnosticLabel(_ raw: String) -> String? {
+        switch raw {
+        case "AXValue 不可直接写入；可读文本不等于输入控件": return L("AXValue 不可直接写入：这不等于该元素是静态控件，可读文本也不等于输入控件")
+        case "同进程多个窗口导致键盘目标歧义": return L("同进程多个窗口导致键盘目标歧义")
+        case "元素不在绑定的目标窗口内": return L("元素不在绑定的目标窗口内")
+        case "目标应用或窗口已不在前台": return L("目标应用或窗口已不在前台")
+        case "原生 AX 窗口映射未解析": return L("原生 AX 窗口映射未解析")
+        default: return nil
+        }
+    }
+}
+
 struct NativeActionStatus: Identifiable, Equatable {
     var id: String
     var stage: String
@@ -103,6 +205,9 @@ struct NativeActionStatus: Identifiable, Equatable {
     var effect: String
     var verification: String
     var metadata: [String: String]
+    var facts: ActionRuleFacts?
+    // 首次出现时的轮次；旧轮动作的迟到增量只更新诊断，不重新成为当前动作。
+    var turn = -1
     init?(_ event: [String: Any], recovery: Bool = false) {
         guard let id = event["action_id"] as? String, !id.isEmpty else { return nil }
         self.id = id
@@ -112,7 +217,13 @@ struct NativeActionStatus: Identifiable, Equatable {
         let verification = NativeEventEnvelope.diagnostic(event["verification"])
         self.verification = verification.isEmpty ? "unverified" : verification
         metadata = NativeEventEnvelope(fields: event).metadata
+        facts = ActionRuleFacts(event["rule_feedback"], actionID: id)
     }
+    var progressTitle: String {
+        guard !progressing, let short = facts?.shortLabel else { return label }
+        return short
+    }
+    var unresolved: Bool { stage == "outcome_unknown" || facts?.evaluation == "outcome_unknown" }
     var label: String {
         switch stage {
         case "intent_recorded": return L("工具意图已记录，尚未派发")
@@ -131,6 +242,7 @@ struct NativeActionStatus: Identifiable, Equatable {
     }
     var progressing: Bool { ["waiting_resource", "dispatching", "running"].contains(stage) }
     var symbol: String {
+        if !progressing, facts?.isWarning == true { return "exclamationmark.triangle" }
         switch stage {
         case "waiting_resource", "intent_recorded", "not_dispatched": return "clock"
         case "dispatching", "running": return "arrow.triangle.2.circlepath"
@@ -138,6 +250,70 @@ struct NativeActionStatus: Identifiable, Equatable {
         case "rejected", "cancelled_before_dispatch": return "xmark.circle"
         case "verified": return "checkmark.shield"
         default: return "doc.text.magnifyingglass"
+        }
+    }
+}
+
+// context_status 只是执行端的上下文估算诊断：整帧校验后原样呈现。
+// App 不自算预算，也不把 components 合计校准成 input_tokens；分项是启发式剖分，不是实际 usage。
+struct ContextStatus: Equatable {
+    static let tokenLimit = 1_000_000_000, countLimit = 1_000_000, skillLimit = 128
+    static let sources = ["heuristic", "usage_delta"]
+    static let componentKeys = ["text", "images", "opaque_reasoning", "overhead"]
+    var inputTokens: Int
+    var reserveTokens: Int
+    var totalTokens: Int
+    var contextLimit: Int
+    var visibleTurns: Int
+    var totalTurns: Int
+    var summaryCutoff: Int
+    var imageCount: Int
+    var memoryCount: Int
+    var heuristicInputTokens: Int
+    var estimateSource: String
+    var components: [String: Int]
+    var activeSkill: String?
+    init?(_ event: [String: Any]) {
+        func bounded(_ value: Any?, _ limit: Int) -> Int? {
+            NativeEventEnvelope.integer(value).flatMap { (0...limit).contains($0) ? $0 : nil }
+        }
+        func count(_ key: String, _ limit: Int) -> Int? { bounded(event[key], limit) }
+        guard let input = count("input_tokens", Self.tokenLimit), let reserve = count("reserve_tokens", Self.tokenLimit),
+              let total = count("total_tokens", Self.tokenLimit), let limit = count("context_limit", Self.tokenLimit), limit >= 1,
+              let visible = count("visible_turns", Self.countLimit), let turns = count("total_turns", Self.countLimit),
+              let cutoff = count("summary_cutoff", Self.countLimit), let images = count("image_count", Self.countLimit),
+              let memories = count("memory_count", Self.countLimit), let heuristic = count("heuristic_input_tokens", Self.tokenLimit),
+              let source = event["estimate_source"] as? String, Self.sources.contains(source),
+              let raw = event["components"] as? [String: Any] else { return nil }
+        var components: [String: Int] = [:]
+        for key in Self.componentKeys {
+            guard let value = bounded(raw[key], Self.tokenLimit) else { return nil }
+            components[key] = value
+        }
+        // 缺失或 null 都表示未启用 Skill；类型错误或超长整帧丢弃。
+        if let value = event["active_skill"], !(value is NSNull) {
+            guard let name = MemoryJSON.text(value, limit: Self.skillLimit) else { return nil }
+            activeSkill = name.isEmpty ? nil : name
+        }
+        inputTokens = input; reserveTokens = reserve; totalTokens = total; contextLimit = limit
+        visibleTurns = visible; totalTurns = turns; summaryCutoff = cutoff; imageCount = images; memoryCount = memories
+        heuristicInputTokens = heuristic; estimateSource = source; self.components = components
+    }
+    var fraction: Double { min(1, max(0, Double(totalTokens) / Double(contextLimit))) }
+    // 不夹紧：超过上限时如实显示超过 100。
+    var percentText: String { String(Int((Double(totalTokens) / Double(contextLimit) * 100).rounded())) + "%" }
+    var overLimit: Bool { totalTokens > contextLimit }
+    var componentsTotal: Int { components.values.reduce(0, +) }
+    var sourceLabel: String {
+        estimateSource == "usage_delta" ? L("上次实际 usage + 增量估算") : L("字符启发式（未经 usage 校准）")
+    }
+    static func componentLabel(_ key: String) -> String {
+        switch key {
+        case "text": return L("文本")
+        case "images": return L("图片")
+        case "opaque_reasoning": return L("不透明推理")
+        case "overhead": return L("固定开销")
+        default: return key
         }
     }
 }
@@ -441,6 +617,8 @@ struct SessionControlsState {
     static let recentActionLimit = 64
     static let seenEventLimit = 256
     var recentActions: [NativeActionStatus] = []
+    // 仅随会话保留最近一次合法估算；reset 新建状态即清空。
+    var context: ContextStatus?
     var activeActionID: String?
     var activeAction: NativeActionStatus? { recentActions.last { $0.id == activeActionID } }
     var recoveryActions: [NativeActionStatus] = []
@@ -459,11 +637,15 @@ struct SessionControlsState {
             action.metadata = previous.metadata.merging(action.metadata) { _, value in value }
             if event["execution"] == nil { action.execution = previous.execution }
             if event["effect"] == nil { action.effect = previous.effect }
+            action.turn = previous.turn
+            // 只带 stage 的增量或较弱事实不覆盖已有环境事实（与 Python _PRIORITY 一致）。
+            if let old = previous.facts, action.facts.map({ $0.priority > old.priority }) ?? true { action.facts = old }
         }
+        if action.turn < 0 { action.turn = turnIndex }
         recentActions.removeAll { $0.id == action.id }
         recentActions.append(action)
         recentActions = Array(recentActions.suffix(Self.recentActionLimit))
-        if !turnClosed && !awaitingNextTurn && !interrupted { activeActionID = action.id }
+        if !turnClosed && !awaitingNextTurn && !interrupted && action.turn >= turnIndex { activeActionID = action.id }
     }
     mutating func receiveRecovery(_ event: [String: Any]) {
         let actions = event["actions"] as? [[String: Any]] ?? []
@@ -557,14 +739,16 @@ struct SessionControlsState {
     }
     private mutating func acceptTurn(_ event: [String: Any]) -> Bool {
         let kind = event["event"] as? String ?? ""
-        let sessionEvents = ["skills_catalog", "skill_state", "session_info", "policy", "queue_state", "message", "control_result", "command_ack", "error", "approval_closed", "trajectory", "finished", "skill_loaded", "skill_warning", "action_status", "recovery_report"]
+        // 畸形估算整帧拒绝，不消费 sequence/event_id。
+        if kind == "context_status", ContextStatus(event) == nil { return false }
+        let sessionEvents = ["skills_catalog", "skill_state", "session_info", "policy", "queue_state", "message", "control_result", "command_ack", "error", "approval_closed", "trajectory", "finished", "skill_loaded", "skill_warning", "action_status", "recovery_report", "context_status"]
         let sessionReply = kind == "control_result" && control(for: event)?.sessionScoped == true
         let turn = event["turn_id"] as? String
         if let turn, retiredTurnIDs.contains(turn), !sessionReply { return false }
         // opaque turn_id 只作相等/退役判断，绝不按字符串字典序比较。
         if let turn, let current = canonicalTurnID, turn != current, !sessionReply {
             if let index = event["turn_index"] as? Int {
-                guard index > turnIndex, kind != "action_status", kind != "recovery_report" else { return false }
+                guard index > turnIndex, !["action_status", "recovery_report", "context_status"].contains(kind) else { return false }
             } else {
                 guard kind == "turn_started" || (kind == "model_status" && ["waiting", "api_wait"].contains(event["stage"] as? String ?? "")) else { return false }
                 if kind != "turn_started" { beginTurn(turnIndex + 1) }
@@ -588,7 +772,7 @@ struct SessionControlsState {
             hasTurnStarted = true
         } else if let index, index > turnIndex {
             // 动作不是轮次启动信号；只允许真实模型/轮次事件推进轮次。
-            guard kind != "action_status", kind != "recovery_report" else { return false }
+            guard !["action_status", "recovery_report", "context_status"].contains(kind) else { return false }
             // 新轮可能先发送 session_info/progress；仍不接受旧轮的迟到事件。
             beginTurn(index)
         }
@@ -603,7 +787,10 @@ struct SessionControlsState {
         // 每步新请求（stage=waiting）从 attempt 1 重新计数，不能被上一步的重试次数拦截。
         let newRequest = !compaction && kind == "model_status" && ["waiting", "api_wait"].contains(event["stage"] as? String ?? "")
         if !compaction && (kind == "model_status" || kind == "action_status") && !newRequest, let number = event["attempt"] as? Int, number < attempt { return false }
-        if !compaction, let raw = event["attempt_id"], !(raw is NSNull) {
+        if kind == "context_status" {
+            // 估算只是诊断：不建立或切换 attempt，压缩后的新估算也不算模型重试；仅拒绝已退役 attempt。
+            if let raw = event["attempt_id"], !(raw is NSNull), retiredAttempts.contains(String(describing: raw)) { return false }
+        } else if !compaction, let raw = event["attempt_id"], !(raw is NSNull) {
             let id = String(describing: raw)
             guard !retiredAttempts.contains(id) else { return false }
             if let current = attemptID, current != id {
@@ -789,6 +976,8 @@ struct SessionControlsState {
         switch kind {
         case "action_status": controls.receiveAction(event)
         case "recovery_report": controls.receiveRecovery(event)
+        // 只投影估算；不改 phase、授权、队列、错误或发送状态。
+        case "context_status": if let status = ContextStatus(event) { controls.context = status }
         case "skills_catalog": receiveCatalog(event)
         case "skill_state":
             let name = event["name"] as? String
