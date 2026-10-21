@@ -988,6 +988,7 @@ class CodeExecutor:
         self._active_run: asyncio.Task | None = None
         self._closed = False
         self._reset_pending = False
+        self._reset_reason = None
         self._task_reset_pending = False
         self._skill_reset_pending = False
         self._output_reset_revision = 0
@@ -1162,6 +1163,8 @@ class CodeExecutor:
             self._stop_child_groups()
             if self._process is process:
                 self._reset_pending = True
+                if self._reset_reason is None:
+                    self._reset_reason = "worker_exited"
             try:
                 # 活动请求先读完已到达的错误输出；空闲或取消时直接关闭传输。
                 while (
@@ -1273,10 +1276,15 @@ class CodeExecutor:
             ):
                 await self._stop_worker()
                 self._reset_pending = False
+                reason = self._reset_reason or "worker_exited"
+                self._reset_reason = None
                 # 此请求尚未执行；先让主循环获得丢失上下文的反馈，禁止自动重放 UI。
                 control["stop_reason"] = "session_reset"
+                control["reset_reason"] = reason
+                notice = ("上一轮执行被中止，worker 已回收；本轮代码未执行，须先重新观察并重建引用。"
+                          if reason == "interrupted" else "worker 在空闲时退出；本轮代码未执行。")
                 return CodeExecutionResult(
-                    "", "worker 在空闲时退出；本轮代码未执行。", -1, False,
+                    "", notice, -1, False,
                     control, session_reset=True,
                 )
             self._active_run = asyncio.current_task()
@@ -1444,6 +1452,7 @@ class CodeExecutor:
             except asyncio.CancelledError:
                 await _finish_cancelled_cleanup(self._stop_worker())
                 self._reset_pending = True
+                self._reset_reason = "interrupted"
                 raise
             except (TimeoutError, OSError, ValueError, TypeError, KeyError) as exc:
                 timed_out = isinstance(exc, TimeoutError)
@@ -1456,6 +1465,7 @@ class CodeExecutor:
                 returncode = process.returncode if process and process.returncode not in (None, 0) else -1
                 await asyncio.shield(self._stop_worker())
                 self._reset_pending = False
+                self._reset_reason = None
                 control["completed"] = False
                 control["exit_code"] = None
                 control["stop_reason"] = "timeout" if timed_out else "session_fault"
@@ -1467,6 +1477,7 @@ class CodeExecutor:
                 if not self.persistent:
                     await asyncio.shield(self._stop_worker())
                     self._reset_pending = False
+                    self._reset_reason = None
                 self._active_run = None
             stdout = output["stdout"].decode("utf-8", "replace").strip()
             stderr = output["stderr"].decode("utf-8", "replace").strip()

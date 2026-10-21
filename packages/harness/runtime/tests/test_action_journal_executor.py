@@ -402,6 +402,11 @@ def test_inflight_cancellation_or_timeout_recovers_unknown(tmp_path, cancel):
                 instance.interrupt_active()
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(run, 1)
+                notice = await instance.run("await device.act('not-to-replay')", [])
+                assert notice.session_reset and notice.control["reset_reason"] == "interrupted"
+                assert "上一轮执行被中止" in notice.stderr and "空闲时退出" not in notice.stderr
+                assert "本轮代码未执行" in notice.stderr
+                assert [item["action_id"] for item in calls(tmp_path)] == ["a"]
             else:
                 result = await run
                 assert result.timed_out and result.session_reset
