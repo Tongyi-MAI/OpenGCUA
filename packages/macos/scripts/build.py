@@ -35,13 +35,16 @@ def copy_bundled_skills(source: Path, destination: Path) -> None:
 
 
 def main():
+    global BUILD
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-runtime", action="store_true", help="Recompile UI in an existing local bundle")
     parser.add_argument("--identity", default=os.environ.get("SIGNING_IDENTITY"), help="Certificate name/hash; '-' explicitly selects ad-hoc signing")
     parser.add_argument("--require-stable-signing", action="store_true", help="Fail instead of using an ad-hoc identity")
     parser.add_argument("--app-version", default="0.1.2", help="Numeric MAJOR.MINOR.PATCH bundle version")
     parser.add_argument("--build-number", default="1", help="Numeric bundle build number")
+    parser.add_argument("--build-dir", type=Path, default=APP_ROOT / "build", help="Separate output directory; leaves other builds untouched")
     args = parser.parse_args()
+    BUILD = args.build_dir.expanduser().resolve()
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.app_version):
         parser.error("--app-version must be MAJOR.MINOR.PATCH")
     if not re.fullmatch(r"[1-9][0-9]*", args.build_number):
@@ -76,7 +79,7 @@ def main():
         "CFBundleExecutable": "OpenGCUA", "CFBundleIdentifier": "app.generalist.mac",
         "CFBundleName": "OpenGCUA", "CFBundleDisplayName": "OpenGCUA", "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": args.app_version, "CFBundleVersion": args.build_number, "LSMinimumSystemVersion": "14.0",
-        "LSUIElement": True, "NSHighResolutionCapable": True,
+        "LSUIElement": False, "NSHighResolutionCapable": True,
         "CFBundleIconFile": "OpenGCUA.icns",
         "NSMicrophoneUsageDescription": "OpenGCUA uses your microphone for voice conversations and to carry out or stop tasks you request.",
         "NSScreenCaptureUsageDescription": "OpenGCUA views the apps you select to carry out your tasks.",
@@ -117,7 +120,11 @@ def main():
         cache.mkdir(exist_ok=True)
         archive = cache / f"cua-driver-{lock['version']}.tar.gz"
         if not archive.exists():
-            urllib.request.urlretrieve(lock["archive"]["url"], archive)
+            shared_archive = APP_ROOT / "build/cache" / archive.name
+            if shared_archive.is_file() and hashlib.sha256(shared_archive.read_bytes()).hexdigest() == lock["archive"]["sha256"]:
+                shutil.copy2(shared_archive, archive)
+            else:
+                urllib.request.urlretrieve(lock["archive"]["url"], archive)
         if hashlib.sha256(archive.read_bytes()).hexdigest() != lock["archive"]["sha256"]:
             raise SystemExit("CuaDriver archive checksum mismatch")
         # Extract to a fresh staging directory: never modify a previously registered

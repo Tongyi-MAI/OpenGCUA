@@ -207,6 +207,7 @@ def test_real_agent_hooks_pause_before_execution_ask_and_finish(tmp_path, monkey
             with pytest.raises(ValueError):
                 await host.command({"command": "message", "task_id": "stale", "message_id": "u1", "text": "wrong task"})
             await host.command({"command": "message", "task_id": "a", "message_id": "u1", "text": "Only browse Chrome"})
+            host.control.suspended = True
         allow_plan.set()
         for _ in range(100):
             if events[-1].get("state") == "paused": break
@@ -225,16 +226,16 @@ def test_real_agent_hooks_pause_before_execution_ask_and_finish(tmp_path, monkey
         await host.command({"command": "end", "task_id": "a", "command_id": "end-turn"})
         assert closed and host.task.done()
         assert events[-1]["event"] == "command_ack" and events[-1]["command_id"] == "end-turn"
-        first_executed = 1 if steering else 0
+        first_executed = 0
         data = json.loads((host.control.run_dir / f"steps/step_{first_executed}.json").read_text())
         assert data["execution"]["user_response"] == "yes"
         if steering:
-            assert all("plan 1" not in call for call in calls)
-            assert "Only browse Chrome" in plans[1]
+            assert "plan 1" in calls[0]
+            assert "Only browse Chrome" not in plans[1]
             trajectory = json.loads((host.control.run_dir / "traj.json").read_text())
-            assert trajectory["superseded_plans"][0]["step"] == 0
-            assert trajectory["user_messages"][0]["text"] == "Only browse Chrome"
-            assert [e["state"] for e in events if e["event"] == "message"] == ["queued", "applied"]
+            assert not trajectory.get("superseded_plans")
+            assert host.control.messages[0]["text"] == "Only browse Chrome"
+            assert [e["state"] for e in events if e["event"] == "message"] == ["queued"]
     asyncio.run(scenario())
 
 
@@ -362,7 +363,7 @@ def test_multi_round_preserves_worker_context_budget_and_new_chat_cleanup(tmp_pa
             trajectory = json.loads((host.control.run_dir / "traj.json").read_text())
             assert [t["status"] for t in trajectory["tasks"]] == ["success", "success"]
             assert [t["first_step"] for t in trajectory["tasks"]] == [0, 2]
-            assert [e["state"] for e in events if e["event"] == "message"] == ["queued", "applied"]
+            assert [e["state"] for e in events if e["event"] == "message"] == ["queued", "consumed"]
             old_control = host.control
             # Starting a distinct conversation gracefully closes the idle worker.
             await host.command(start_command("fresh"))

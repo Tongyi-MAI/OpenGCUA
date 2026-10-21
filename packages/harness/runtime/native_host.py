@@ -18,6 +18,104 @@ from urllib.parse import urlsplit
 
 PROTOCOL = 1
 
+
+class NativeFrontend:
+    """原生 UI 只消费语义事件，不解析控制台文本。"""
+    interactive = True
+
+    def __init__(self, control):
+        self.control = control
+        self._delta = None
+        self._delta_timer = None
+        self._preview_chars = 0
+
+    def flush(self):
+        if self._delta_timer is not None:
+            self._delta_timer.cancel()
+            self._delta_timer = None
+        if self._delta is not None:
+            kind, fields = self._delta
+            self._delta = None
+            self.control.emit(kind, **fields)
+
+    def bind_abort(self, callback):
+        self.control.interrupt_callback = callback
+
+    def handle_sigint(self):
+        if self.control.interrupt_callback:
+            self.control.interrupt_callback(False)
+
+    def emit(self, event):
+        c = self.control
+        if event.kind not in {"reasoning_delta", "code_delta", "intent_delta"}:
+            self.flush()
+        if event.kind == "phase":
+            phase = event.payload.get("phase") or event.text
+            c.active_turn = phase not in {"waiting", "complete"}
+            c.emit("progress", phase=phase, step=(event.step or 0) + 1,
+                   manual=event.payload.get("manual", False), command_id=c.current_command_id,
+                   purpose="compaction" if phase == "compaction" else "action")
+        elif event.kind == "aborted":
+            c.active_turn = False
+            c.waiting_for_follow_up = True
+            c.suspended = True
+            c.cancel_waits()
+            c.emit("interrupted", text=event.text, worker_reset=getattr(c, "worker_reset", False))
+            c.queue_snapshot()
+        elif event.kind in {"reasoning_delta", "reasoning_end", "intent_delta", "intent_end", "code_start", "code_delta", "code_end", "code_reset", "model_status", "control_result"}:
+            fields = dict(event.payload)
+            fields.pop("type", None)
+            fields.update(text=event.text, step=event.step)
+            if c.current_command_id is not None:
+                fields["command_id"] = c.current_command_id
+                fields["purpose"] = "compaction"
+            if event.kind == "control_result":
+                fields["command_id"] = c.current_command_id
+            if event.kind == "model_status":
+                c.attempt_id = fields.get("attempt_id")
+            elif event.kind in {"code_reset", "code_start", "code_delta", "code_end", "reasoning_delta", "reasoning_end", "intent_delta", "intent_end"}:
+                fields.setdefault("attempt_id", getattr(c, "attempt_id", None))
+            if event.kind == "code_reset":
+                self._preview_chars = 0
+            if event.kind in {"reasoning_delta", "code_delta", "intent_delta"}:
+                room = max(0, 131072 - self._preview_chars)
+                fields["text"] = fields["text"][:room]
+                self._preview_chars += len(fields["text"])
+                if not fields["text"]:
+                    if event.kind == "intent_delta" and fields.get("start"):
+                        self.flush()
+                        c.emit(event.kind, **fields)
+                    return
+                if self._delta is not None and (self._delta[0] != event.kind or any(self._delta[1].get(key) != fields.get(key) for key in ("block_index", "attempt_id", "turn_index"))):
+                    self.flush()
+                if self._delta is None:
+                    self._delta = (event.kind, fields)
+                else:
+                    self._delta[1]["text"] += fields["text"]
+                if self._delta_timer is None:
+                    try:
+                        self._delta_timer = asyncio.get_running_loop().call_later(0.03, self.flush)
+                    except RuntimeError:
+                        self.flush()
+            else:
+                c.emit(event.kind, **fields)
+        elif event.kind == "foreground_consent":
+            c.emit("policy", foreground_allowed=c.foreground_allowed, ask_user_enabled=c.ask_user_enabled)
+        elif event.kind == "session":
+            c.emit("session_info", session_id=event.payload.get("session_id", ""),
+                   model=event.payload.get("model", ""), protocol=c.config.get("llm_protocol", "openai"),
+                   reasoning_effort=c.config.get("reasoning_effort", "low"),
+                   foreground_allowed=c.foreground_allowed, ask_user_enabled=c.ask_user_enabled)
+
+    async def read(self, prompt):
+        return await self.control.follow_up()
+
+    async def choose_approval(self, prompt):
+        return await self.control.choose_approval(prompt)
+
+    def close(self):
+        self.flush()
+
 # These settings belong to the native host's process/task lifecycle, not a file.
 _HOST_ARGUMENTS = frozenset({"config", "task", "resume", "ui", "ui_api", "driver_mode",
                             "driver_socket", "session_id", "runs_dir", "multi_task", "countdown"})
@@ -98,11 +196,99 @@ class TaskControl:
         self.paused = False
         self.messages = []
         self.message_states = {}
+        self.message_orders = {}
         self.message_event = asyncio.Event()
         self.waiting_for_follow_up = False
         self.ended = False
         self.turn_index = 0
         self.overlay_waits = {}
+        self.sequence = 0
+        self.active_turn = True
+        self.suspended = False
+        self.commands = []
+        self.config = {}
+        self.foreground_allowed = False
+        self.ask_user_enabled = True
+        self.approval_wait = None
+        self.approval_id = None
+        self.interrupt_callback = None
+        self.policy_callback = None
+        self.skill_callback = None
+        self.compaction_callback = None
+        self.current_command_id = None
+        self.authorization_epoch = 0
+        self._queue_order = 0
+
+    def next_order(self):
+        self._queue_order += 1
+        return self._queue_order
+
+    def queue_snapshot(self):
+        items = [{"id": m["id"], "text": m["text"], "kind": "message"} for m in self.messages]
+        items += [{"id": c.get("command_id", ""), "text": c["command"], "kind": "control"} for c in self.commands]
+        orders = dict(self.message_orders)
+        orders.update({c.get("command_id", ""): c.get("order", 0) for c in self.commands})
+        items.sort(key=lambda item: orders.get(item["id"], 0))
+        self.emit("queue_state", items=items, suspended=self.suspended)
+
+    def cancel_waits(self):
+        if self.answer is not None and not self.answer.done():
+            self.answer.cancel()
+        if self.approval_wait is not None and not self.approval_wait.done():
+            self.approval_wait.set_result("cancel")
+        self.resume_event.set()
+
+    async def choose_approval(self, prompt):
+        if self.foreground_allowed:
+            return "allow"
+        epoch = self.authorization_epoch
+        self.approval_id = prompt.request_id
+        self.approval_wait = asyncio.get_running_loop().create_future()
+        choice = "cancel"
+        self.emit("approval", approval_id=self.approval_id, app_id=prompt.app_id,
+                  window_id=prompt.window_id,
+                  text=prompt.text.replace("本次任务", "本 session").replace("直到任务结束", "直到结束或切换 session"), scope="session")
+        try:
+            choice = await self.approval_wait
+            if epoch != self.authorization_epoch:
+                choice = "cancel"
+            if choice == "allow":
+                self.foreground_allowed = True
+                if self.policy_callback:
+                    self.policy_callback()
+                self.emit("policy", foreground_allowed=True, ask_user_enabled=self.ask_user_enabled)
+            return choice
+        finally:
+            self.emit("approval_closed", approval_id=self.approval_id, choice=choice)
+            self.approval_wait = None
+            self.approval_id = None
+
+    def bind_runtime(self, *, policy, skill, compaction):
+        self.policy_callback, self.skill_callback, self.compaction_callback = policy, skill, compaction
+        policy()
+
+    async def process_controls(self):
+        while self.commands and not self.suspended:
+            if self.messages and self.message_orders.get(self.messages[0]["id"], 0) < self.commands[0].get("order", 0):
+                break
+            command = self.commands.pop(0)
+            self.current_command_id = command.get("command_id")
+            try:
+                if command["command"] == "compaction":
+                    if self.compaction_callback is None:
+                        raise ValueError("没有可压缩的历史")
+                    self.emit("control_result", command_id=self.current_command_id, status="started", text="正在压缩上下文")
+                    await self.compaction_callback()
+                elif command["command"] == "skill_select":
+                    if self.skill_callback is None:
+                        raise ValueError("Skill 尚未准备就绪")
+                    self.skill_callback(command.get("name"))
+                    self.emit("control_result", command_id=self.current_command_id, status="completed", text="Skill 选择已生效")
+            except Exception as exc:
+                self.emit("control_result", command_id=self.current_command_id, status="failed", text=self.sanitize(exc))
+            finally:
+                self.current_command_id = None
+                self.queue_snapshot()
 
     async def overlay(self, event):
         fields = {k: event[k] for k in ("phase", "guard_id", "points") if k in event}
@@ -134,21 +320,32 @@ class TaskControl:
             raise ValueError("任务正在提问，请使用当前问题的回复入口。")
         if not text.strip() or len(text) > 8000 or len(self.messages) >= 20:
             raise ValueError("消息为空、过长，或待处理消息过多。")
-        self.messages.append({"id": message_id, "text": text.strip()})
+        item = {"id": message_id, "text": text.strip()}
+        if self.suspended and not self.active_turn:
+            item["correction"] = True
+            position = next((i for i, m in enumerate(self.messages) if not m.get("correction")), len(self.messages))
+            self.messages.insert(position, item)
+        else:
+            self.messages.append(item)
+        # 顺序独立于展示字段，保证普通消息与控制命令共享边界 FIFO。
+        self.message_orders[message_id] = self.next_order()
         self.message_states[message_id] = "queued"
         self.emit("message", message_id=message_id, state="queued")
         self.message_event.set()
+        self.queue_snapshot()
 
     def complete_turn(self, status, answer):
         # A pause requested during the final cell belongs to the completed turn.
         self.resume_event.set()
         self.waiting_for_follow_up = True
+        self.active_turn = False
         self.emit("turn_finished", turn_index=self.turn_index,
                   state="completed" if status == "success" else "failed",
                   text=self.sanitize(answer), path=str(self.run_dir or ""))
 
     def begin_turn(self, text):
         self.waiting_for_follow_up = False
+        self.active_turn = True
         self.turn_index += 1
         self.emit("turn_started", turn_index=self.turn_index, text=text)
 
@@ -158,8 +355,14 @@ class TaskControl:
             await self.boundary()
             if self.ended:
                 return None
-            if self.messages:
-                return "\n\n".join(m["text"] for m in self.take_messages())
+            if self.commands and not self.suspended:
+                await self.process_controls()
+            if self.messages and (not self.suspended or self.messages[0].get("correction")):
+                message = self.messages.pop(0)
+                self.message_states[message["id"]] = "consumed"
+                self.emit("message", message_id=message["id"], state="consumed")
+                self.queue_snapshot()
+                return message["text"]
             self.message_event.clear()
             await self.message_event.wait()
 
@@ -178,7 +381,9 @@ class TaskControl:
     def emit(self, kind, **fields):
         if kind == "trajectory":
             self.run_dir = Path(fields["path"])
-        self.send({"event": kind, "task_id": self.task_id, **fields})
+        self.sequence += 1
+        self.send({"event": kind, "task_id": self.task_id, "turn_index": self.turn_index,
+                   "sequence": self.sequence, **fields})
 
     def pause(self):
         self.resume_event.clear()
@@ -200,6 +405,8 @@ class TaskControl:
             self.emit("state", state="running")
 
     async def ask(self, question):
+        if not self.ask_user_enabled:
+            raise ValueError("ASK_USER_DISABLED：用户已关闭业务提问，请使用已知信息或说明阻塞")
         self.question_id = uuid.uuid4().hex
         self.answer = asyncio.get_running_loop().create_future()
         self.emit("question", question_id=self.question_id, text=question)
@@ -229,6 +436,7 @@ class NativeHost:
         self.key = ""
         self.driver = None
         self.socket_dir = None
+        self.command_receipts = {}
 
     async def start_driver(self):
         app = os.environ.get("GENERALIST_DRIVER_APP")
@@ -319,7 +527,10 @@ class NativeHost:
             await self.start_driver()
             await self.preflight()
             control.emit("state", state="running")
-            await (self.runner or mac_agent.run_agent)(args, host_control=control)
+            if self.runner is not None:
+                await self.runner(args, host_control=control)
+            else:
+                await mac_agent.run_agent(args, host_control=control, frontend=NativeFrontend(control))
             # The trajectory is the authoritative terminal result, not process exit 0.
             data = json.loads((control.run_dir / "traj.json").read_text()) if control.run_dir else {}
             status = data.get("status", "error")
@@ -339,6 +550,14 @@ class NativeHost:
 
     async def command(self, command):
         kind = command.get("command")
+        command_id = command.get("command_id")
+        if command_id in self.command_receipts:
+            previous = self.command_receipts[command_id]
+            if previous != command:
+                raise ValueError("相同 command_id 不能用于不同命令")
+            self.send({"event": "command_ack", "command_id": command_id,
+                       "task_id": command.get("task_id"), "command": kind})
+            return
         if kind == "overlay_ack":
             if self.control and command.get("task_id") == self.control.task_id:
                 self.control.acknowledge_overlay(command.get("guard_id"))
@@ -356,12 +575,99 @@ class NativeHost:
             if not task_id or len(task_id) > 100:
                 raise ValueError("任务标识无效。")
             self.control = TaskControl(task_id, self.send, self.public_text)
+            self.control.config = dict(command.get("config") or {})
+            if type(self.control.config.get("ask_user_enabled", True)) is not bool:
+                raise ValueError("ask_user_enabled 必须为布尔值")
+            self.control.ask_user_enabled = self.control.config.get("ask_user_enabled", True)
             self.task = asyncio.create_task(self.run(command, self.control))
             control = self.control
             # Cancellation may precede the coroutine's first instruction.
             self.task.add_done_callback(lambda task: control.emit(
                 "finished", state="stopped", text="任务已停止。", path=""
             ) if task.cancelled() else None)
+        elif kind in {"skills_list", "skills_reload"}:
+            from skill_registry import SkillRegistry, default_skill_roots
+            roots = default_skill_roots(__file__)
+            extra = (self.control.config.get("skills_dirs") or ()) if self.control else ()
+            registry = SkillRegistry(*roots, extra)
+            infos = registry.discover()
+            event = {"event": "skills_catalog", "skills": [{"name": i.name, "description": i.description, "source": i.source} for i in infos],
+                     "selected_name": self.control.config.get("selected_skill") if self.control else None}
+            if self.control and command.get("task_id") == self.control.task_id:
+                self.control.emit("skills_catalog", skills=event["skills"], selected_name=event["selected_name"])
+            else:
+                self.send(event)
+        elif kind in {"interrupt", "compaction_cancel", "set_policy", "approval_reply", "queue_list", "queue_resume", "queue_clear", "compaction", "skill_select"}:
+            if not self.control or not self.task or self.task.done() or command.get("task_id") != self.control.task_id:
+                raise ValueError("会话标识已过期")
+            c = self.control
+            if kind in {"interrupt", "compaction_cancel"}:
+                if kind == "compaction_cancel" and c.current_command_id is None:
+                    pending = [item for item in c.commands if item["command"] == "compaction"]
+                    if not pending:
+                        raise ValueError("当前没有待执行的压缩")
+                    c.commands = [item for item in c.commands if item["command"] != "compaction"]
+                    for item in pending:
+                        c.emit("control_result", command_id=item.get("command_id"), status="cancelled", text="待执行压缩已取消")
+                else:
+                    if c.interrupt_callback is None:
+                        raise ValueError("当前没有可中止的操作")
+                    if kind == "interrupt":
+                        if not c.active_turn and c.current_command_id is None:
+                            raise ValueError("当前没有活动轮次")
+                        c.suspended = True
+                    c.interrupt_callback(command.get("force") is True)
+            elif kind == "set_policy":
+                fields = ("foreground_allowed", "ask_user_enabled")
+                if any(field in command and type(command[field]) is not bool for field in fields):
+                    raise ValueError("策略必须是布尔值")
+                for field in fields:
+                    if field in command:
+                        setattr(c, field, command[field])
+                if command.get("foreground_allowed") is False:
+                    c.authorization_epoch += 1
+                if not c.ask_user_enabled and c.answer is not None and not c.answer.done():
+                    if c.interrupt_callback:
+                        c.interrupt_callback(False)
+                if "foreground_allowed" in command and c.approval_wait is not None and not c.approval_wait.done():
+                    c.approval_wait.set_result("allow" if command["foreground_allowed"] else "cancel")
+                if c.policy_callback:
+                    c.policy_callback()
+                c.emit("policy", foreground_allowed=c.foreground_allowed, ask_user_enabled=c.ask_user_enabled)
+            elif kind == "approval_reply":
+                if c.approval_id != command.get("approval_id") or c.approval_wait is None or c.approval_wait.done():
+                    raise ValueError("授权卡已过期")
+                choice = command.get("choice")
+                if choice not in {"allow", "reject", "cancel"}:
+                    raise ValueError("授权选项无效")
+                c.approval_wait.set_result(choice)
+            elif kind == "queue_clear":
+                for pending in c.commands:
+                    c.emit("control_result", command_id=pending.get("command_id"), status="cancelled", text="待执行控制已清空")
+                for m in c.messages:
+                    c.message_states[m["id"]] = "cancelled"
+                    c.emit("message", message_id=m["id"], state="cancelled")
+                c.messages.clear()
+                c.commands.clear()
+            elif kind == "queue_resume":
+                c.suspended = False
+                c.message_event.set()
+            elif kind in {"compaction", "skill_select"}:
+                if len(c.commands) >= 20:
+                    raise ValueError("控制队列已满")
+                if kind == "skill_select":
+                    from skill_registry import SkillRegistry, default_skill_roots
+                    name = command.get("name")
+                    if name is not None:
+                        registry = SkillRegistry(*default_skill_roots(__file__), c.config.get("skills_dirs") or ())
+                        registry.discover()
+                        registry.load(name)
+                    c.emit("skill_state", name=name, pending=c.active_turn)
+                c.commands.append({**command, "order": c.next_order()})
+                c.message_event.set()
+            c.queue_snapshot()
+            if kind not in {"compaction", "skill_select", "interrupt", "approval_reply"}:
+                c.emit("control_result", command_id=command.get("command_id"), status="completed", text="控制已应用")
         elif kind in {"pause", "resume", "reply", "stop", "message", "end"}:
             if (not self.control or command.get("task_id") != self.control.task_id
                     or not self.task or self.task.done()):
@@ -386,7 +692,10 @@ class NativeHost:
                 self.task.cancel()
         else:
             raise ValueError("不支持的命令。")
-        if isinstance(command.get("command_id"), str):
+        if isinstance(command_id, str):
+            if len(self.command_receipts) >= 256:
+                self.command_receipts.pop(next(iter(self.command_receipts)))
+            self.command_receipts[command_id] = dict(command)
             self.send({"event": "command_ack", "command_id": command["command_id"],
                        "task_id": command.get("task_id"), "command": kind})
 

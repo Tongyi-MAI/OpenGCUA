@@ -101,6 +101,11 @@ import AppKit
         let badge = MiniWindowPlacement.fit(anchor: badgeAnchor, expanded: false, detailHeight: 248, screen: screen)
         let card = MiniWindowPlacement.fit(anchor: badgeAnchor, expanded: true, detailHeight: 248, screen: screen)
         precondition(badge.frame.size == NSSize(width: 44, height: 44))
+        let progress = MiniWindowPlacement.fit(anchor: badgeAnchor, expanded: false, detailHeight: 248,
+                                                screen: screen, badgeWidth: FloatingPanel.progressWidth)
+        precondition(progress.frame.width == FloatingPanel.progressWidth && progress.frame.height == 44)
+        precondition(progress.frame.maxX == badge.frame.maxX && progress.frame.minY == badge.frame.minY)
+        precondition(screen.contains(progress.frame))
         precondition(card.expandsUpward && card.frame.maxX == badge.frame.maxX && card.frame.minY == badge.frame.minY)
         let top = NSPoint(x: -50, y: screen.maxY - 60)
         let topBadge = MiniWindowPlacement.fit(anchor: top, expanded: false, detailHeight: 248, screen: screen)
@@ -163,6 +168,19 @@ import AppKit
             try await Task.sleep(nanoseconds: 110_000_000)
             precondition(!fading.expanded && !fading.detailsVisible)
         }
-        print("Mini window pointer dragging, click discrimination, title drag forwarding, visibility and screen geometry passed")
+        let visibility = MiniWindowPresentation(enterDelay: 0, exitDelay: 0)
+        visibility.update(requested: true, suppressed: false)
+        visibility.hideBubble()
+        for suppressed in [false, true, false, false] {
+            visibility.update(requested: true, suppressed: suppressed)
+            visibility.hover(true)
+            try await Task.sleep(nanoseconds: 10_000_000)
+            precondition(visibility.manuallyHidden && !visibility.requested && !visibility.expanded,
+                         "手动隐藏后，进度和遮挡状态更新不能重新显示气泡")
+        }
+        visibility.allowBubble()
+        visibility.update(requested: true, suppressed: false)
+        precondition(visibility.requested && !visibility.manuallyHidden)
+        print("Mini window progress badge, manual hiding, pointer dragging and screen geometry passed")
     }
 }

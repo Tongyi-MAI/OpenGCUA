@@ -11,6 +11,8 @@ struct Preferences: Codable {
     var appearance = "跟随系统"
     var language = "system"
     var sendWithEnter = true
+    var showReasoning = false
+    var showCode = false
     var allowEmptyKey = false
     var speechProvider = "Qwen 实时语音"
     var speechRegion = "北京"
@@ -18,7 +20,7 @@ struct Preferences: Codable {
     var speechWorkspaceID = ""
     var audioInputUID = ""
     init() {}
-    enum CodingKeys: String, CodingKey { case endpoint, model, llmProtocol, reasoningEffort, configFilePath, appearance, language, sendWithEnter, allowEmptyKey, speechProvider, speechRegion, speechModel, speechWorkspaceID, audioInputUID }
+    enum CodingKeys: String, CodingKey { case endpoint, model, llmProtocol, reasoningEffort, configFilePath, appearance, language, sendWithEnter, showReasoning, showCode, allowEmptyKey, speechProvider, speechRegion, speechModel, speechWorkspaceID, audioInputUID }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         endpoint = try c.decodeIfPresent(String.self, forKey: .endpoint) ?? endpoint
@@ -30,6 +32,8 @@ struct Preferences: Codable {
         let savedLanguage = try c.decodeIfPresent(String.self, forKey: .language) ?? "system"
         language = AppLanguage.choices.contains(savedLanguage) ? savedLanguage : "system"
         sendWithEnter = try c.decodeIfPresent(Bool.self, forKey: .sendWithEnter) ?? sendWithEnter
+        showReasoning = try c.decodeIfPresent(Bool.self, forKey: .showReasoning) ?? false
+        showCode = try c.decodeIfPresent(Bool.self, forKey: .showCode) ?? false
         allowEmptyKey = try c.decodeIfPresent(Bool.self, forKey: .allowEmptyKey) ?? allowEmptyKey
         speechProvider = try c.decodeIfPresent(String.self, forKey: .speechProvider) ?? speechProvider
         speechRegion = try c.decodeIfPresent(String.self, forKey: .speechRegion) ?? speechRegion

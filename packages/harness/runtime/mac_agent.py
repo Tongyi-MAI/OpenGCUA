@@ -1260,8 +1260,23 @@ class ContextManager:
         current_step: int | None = None,
         current_lifecycle_observation: bool = False,
     ) -> list[dict[str, Any]]:
+        policy_note = ""
+        if not getattr(self, "ask_user_enabled", True):
+            policy_note = "\n## ask_user 已关闭\n禁止调用 ask_user；仅依靠已知信息和已授权路径执行，必要信息缺失则 terminate(failure) 并说明阻塞，不编造、不借前台审批提问。\n"
+        consent = getattr(self, "foreground_consent", None)
+        if consent is not None:
+            consent_text = {
+                "allowed": "本 session 已允许前台接管。不要再通过 ask_user 请求相同键鼠/窗口激活许可。",
+                "denied": "本 session 前台接管已拒绝或撤回；禁止把普通聊天回复当作门禁批准。",
+                "unset": "本 session 尚未允许前台接管；需要前台动作时走宿主的专用授权卡，不要用 ask_user 重复询问接管。",
+            }.get(consent, "本 session 前台授权状态未知；以宿主门禁为准。")
+            policy_note += ("\n## 当前前台授权状态（宿主实时提供）\n" + consent_text
+                            + "授权与窗口焦点是两回事。INPUT_REFUSED / target app is no longer frontmost 不代表授权失效；"
+                            "已允许时重新激活已绑定的准确窗口、核实焦点和观察后继续，不重复请求接管。"
+                            "该许可不授权付款、发送或其他未获准的业务副作用；业务信息缺失仍按用户要求澄清。\n")
+        slot = self.skill_context.system_slot() if self.skill_context is not None else ""
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt}
+            {"role": "system", "content": self.system_prompt + policy_note + ("\n## Session Skill 插槽\n" + slot if slot else "")}
         ]
         if self.skill_context is not None:
             catalog = self.skill_context.catalog_message()
@@ -2205,6 +2220,8 @@ async def run_agent(
             selected = tuple(dict.fromkeys((pending_skill_name, *selected)))
             pending_skill_name = None
             present("skill_consumed")
+        if len(selected) > 1:
+            raise ValueError("一次只能选择一个 Skill")
         return cleaned, selected
 
 
@@ -2227,10 +2244,21 @@ async def run_agent(
                         present("error", f"Cannot create Skill: {exc}")
                 else:
                     try:
-                        info = skill_registry.load(value.target or "").info
-                        pending_skill_name = info.name
-                        present("skill_selected", f"Skill {info.name} selected for the next task message.",
-                                payload={"name": info.name})
+                        if value.target == "none":
+                            pending_skill_name = None
+                            selector = getattr(frontend, "select_session_skill", None)
+                            if selector:
+                                selector(None)
+                            present("skill_selected", "Skill 已清空", payload={"name": None})
+                        else:
+                            info = skill_registry.load(value.target or "").info
+                            selector = getattr(frontend, "select_session_skill", None)
+                            if selector:
+                                selector(info.name)
+                            else:
+                                pending_skill_name = info.name
+                            present("skill_selected", f"Skill {info.name} selected for the session.",
+                                    payload={"name": info.name})
                     except (OSError, ValueError) as exc:
                         present("error", f"Cannot select Skill: {exc}")
                 continue
@@ -2404,7 +2432,7 @@ async def run_agent(
     def activate_selected(names: tuple[str, ...], task_index: int) -> None:
         for name in names:
             try:
-                selected = skill_context.activate(name)
+                selected = skill_context.select(name)
             except (OSError, ValueError) as exc:
                 skill_warning(f"Skill '{name}' not activated: {exc}")
                 continue
@@ -2416,6 +2444,8 @@ async def run_agent(
             if host_control is not None:
                 host_control.emit("skill_loaded", name=name, source=selected.info.source)
 
+    if host_control is not None and host_control.config.get("selected_skill"):
+        initial_skill_names = (host_control.config["selected_skill"],)
     if initial_skill_names:
         activate_selected(initial_skill_names, 0)
     if resume_dir is not None:
@@ -2482,7 +2512,7 @@ async def run_agent(
 
     def clear_gui_grants() -> None:
         gui_grants.clear()
-        present("foreground_consent", payload={"state": "unset"})
+        present("foreground_consent", payload={"state": "allowed" if gui_grants.session_allowed else "unset"})
 
     async def approve_gui(event: dict[str, Any]) -> bool:
         decision = "cancel"
@@ -2490,7 +2520,7 @@ async def run_agent(
         async def choose(prompt: ForegroundApprovalPrompt) -> str:
             nonlocal decision
             if host_control is not None:
-                answer = await host_control.ask(prompt.text)
+                answer = await host_control.choose_approval(prompt)
             else:
                 chooser = getattr(frontend, "choose_approval", None)
                 if callable(chooser):
@@ -2508,8 +2538,13 @@ async def run_agent(
             return decision
 
         previous = gui_grants.state(task_index)
+        epoch = host_control.authorization_epoch if host_control is not None else None
         result = await request_gui_approval(gui_grants, task_index, event, choose)
+        if host_control is not None and epoch != host_control.authorization_epoch:
+            gui_grants.set_session_allowed(False)
+            return False
         state = gui_grants.state(task_index)
+        context.foreground_consent = state
         if state != previous:
             present("foreground_consent", payload={"state": state})
         if decision in {"allow", "reject"}:
@@ -2519,7 +2554,7 @@ async def run_agent(
                 "app_id": event["app_id"],
                 "window_id": event["window_id"],
                 "decision": decision,
-                "scope": "task",
+                "scope": "session" if host_control is not None else "task",
                 "explicit_retry": event.get("explicit_retry") is True,
             })
             writer.flush()
@@ -2769,13 +2804,27 @@ async def run_agent(
                 )
 
             reasoning_streamed = {"on": False}
+            attempt_origins = {}
 
             def model_event(event: dict[str, Any]) -> None:
+                attempt_id = event.get("attempt_id")
+                turn_identity = host_control.turn_index if host_control is not None else task_index
+                if event.get("type") == "request_start" and attempt_id is not None:
+                    attempt_origins[attempt_id] = (turn_identity, step)
+                    if len(attempt_origins) > 256:
+                        attempt_origins.pop(next(iter(attempt_origins)))
+                origin = attempt_origins.get(attempt_id, (turn_identity, step))
+                if origin != (turn_identity, step):
+                    return
+
+                def preview(kind, text="", *, step=None, payload=None):
+                    present(kind, text, step=step, payload={**(payload or {}),
+                            "attempt_id": attempt_id, "turn_index": origin[0], "purpose": event.get("purpose", "action")})
                 # 事件只用于预览；消费失败不能令已接收的模型响应被重试。
-                if os.environ.get("MAC_AGENT_HUB_EVENTS") == "1":
+                if os.environ.get("MAC_AGENT_HUB_EVENTS") == "1" or host_control is not None or frontend.interactive:
                     status_event = model_status_event(event, step)
                     if status_event is not None:
-                        present("model_status", status_event["text"], step=step, payload=status_event)
+                        preview("model_status", status_event["text"], step=step, payload=status_event)
                 if on_model_event is not None:
                     try:
                         on_model_event({**event, "run_id": run_id, "session_id": session_id,
@@ -2796,12 +2845,12 @@ async def run_agent(
                     logger.info(
                         "step %03d model request attempt %s start", step, event.get("attempt")
                     )
-                    present("code_reset", step=step)
+                    preview("code_reset", step=step)
                 if kind == "reasoning_delta":
                     # reasoning 流式预览：只展示不入库（完整 reasoning 仍随 step 落盘）。
                     start = not reasoning_streamed["on"]
                     reasoning_streamed["on"] = True
-                    present(
+                    preview(
                         "reasoning_delta",
                         event.get("delta", ""),
                         step=step,
@@ -2810,28 +2859,29 @@ async def run_agent(
                     return
                 if kind in ("intent_start", "code_start", "response_complete", "request_aborted",
                             "response_rejected", "preview_reset") and reasoning_streamed["on"]:
-                    present("reasoning_end", step=step)
+                    preview("reasoning_end", step=step)
                     reasoning_streamed["on"] = False
                 if kind == "intent_start":
-                    present(
+                    preview(
                         "intent_delta",
                         "",
                         step=step,
                         payload={"start": True, "block_index": event["block_index"]},
                     )
                 elif kind == "intent_delta":
-                    present("intent_delta", event["delta"], step=step)
+                    preview("intent_delta", event["delta"], step=step,
+                            payload={"block_index": event.get("block_index")})
                 elif kind == "intent_end":
-                    present("intent_end", step=step)
+                    preview("intent_end", step=step, payload={"block_index": event.get("block_index")})
                 elif kind in {"code_start", "code_delta", "code_end"}:
-                    present(
+                    preview(
                         kind,
                         event.get("delta", "") if kind == "code_delta" else "",
                         step=step,
                         payload={"block_index": event.get("block_index")},
                     )
                 elif kind in {"request_aborted", "response_rejected", "preview_reset"}:
-                    present("code_reset", step=step)
+                    preview("code_reset", step=step)
                     logger.warning(
                         "step %03d model event %s: %s retrying=%s",
                         step, kind, event.get("error") or event.get("reason") or "", event.get("retrying"),
@@ -2923,7 +2973,7 @@ async def run_agent(
                         present("control_result", (
                             f"上下文压缩完成：revision {context.compaction_state.revision}，"
                             f"累计覆盖 {context.compaction_state.cutoff} 轮。"
-                        ), step=step, payload={"status": "completed"})
+                        ), step=step, payload={"status": "completed", "budget_before": attempt.get("estimated_tokens_before"), "budget_after": attempt.get("estimated_tokens_after")})
                     else:
                         present("control_result", f"上下文压缩未完成：{attempt.get('error') or '未满足压缩条件'}",
                                 step=step, payload={"status": "failed"})
@@ -2933,6 +2983,64 @@ async def run_agent(
                     manual_running = False
 
             manual_compact_callback = manual_compact_run
+
+            def select_session_skill(name):
+                skill_registry.discover()
+                skill_context.select(name)
+                sync_session_controls()
+
+            last_skill_state = [None]
+
+            def sync_session_controls():
+                records = skill_context.records()
+                selected = records[0] if records else {}
+                updater = getattr(executor, "set_skill_selection", None)
+                if updater:
+                    updater(selected.get("name"), selected.get("digest"), skill_context.revision)
+                state = (skill_context.revision, repr(records))
+                if last_skill_state[0] == state:
+                    return
+                last_skill_state[0] = state
+                writer.data["session_skill"] = records
+                writer.flush()
+                if host_control is not None:
+                    host_control.config["selected_skill"] = skill_context.selected_name
+                    host_control.emit("skill_state", name=skill_context.selected_name,
+                                      source=selected.get("source", ""), digest=selected.get("digest", ""), pending=False,
+                                      command_id=host_control.current_command_id)
+
+            def apply_policy():
+                if host_control is not None:
+                    enabled = host_control.ask_user_enabled
+                    if gui_grants.session_allowed != host_control.foreground_allowed:
+                        gui_grants.set_session_allowed(host_control.foreground_allowed)
+                    context.ask_user_enabled = enabled
+                    context.foreground_consent = gui_grants.state(task_index)
+                    executor.ask_user_enabled = enabled
+
+            skill_override = host_control is not None and host_control.config.get("selected_skill_override") is True
+            if skill_override:
+                skill_context.select(host_control.config.get("selected_skill"))
+            elif resume_dir is not None and not initial_skill_names:
+                records = loaded["session_skill"] if "session_skill" in loaded else loaded_tasks[-1].get("skills", ())
+                for warning in skill_context.restore(records):
+                    skill_warning(warning)
+
+            def commit_worker_skill(event):
+                name, digest, source = event["name"], event["digest"], event["source"]
+                records = skill_context.records()
+                info = skill_registry.load(name).info if not records else records[0]
+                expected_source = info.source if not records else info["source"]
+                if expected_source != source:
+                    raise ValueError("Skill source root mismatch")
+                skill_context.activate(name, expected_digest=digest)
+                sync_session_controls()
+
+            executor.skill_handler = commit_worker_skill
+            setattr(frontend, "select_session_skill", select_session_skill)
+            sync_session_controls()
+            if host_control is not None:
+                host_control.bind_runtime(policy=apply_policy, skill=select_session_skill, compaction=manual_compact_run)
 
             async def prepare_context(*, force: bool = False) -> None:
                 sync_output_context()
@@ -2985,16 +3093,9 @@ async def run_agent(
             while True:
                 try:
                     if host_control is not None:
-                        await host_control.boundary()
-                        updates = host_control.take_messages()
-                        if updates:
-                            current_user_response = "\n\n".join(filter(None, [
-                                current_user_response,
-                                "用户补充指令：\n" + "\n".join(m["text"] for m in updates),
-                            ]))
-                            writer.data.setdefault("user_messages", []).extend(
-                                {**m, "step": step, "timestamp": now_iso()} for m in updates
-                            )
+                        await with_abort(host_control.boundary())
+                        apply_policy()
+                        sync_session_controls()
                     step_started = time.monotonic()
                     step_metrics = {
                         "schema_version": 1, "revision": 0, "step": step, "task_index": task_index,
@@ -3108,6 +3209,8 @@ async def run_agent(
                         except AgentError as exc:
                             # 模型请求/解析失败不直接杀死整个会话：交互式环境交给用户决定。
                             logger.error("step %03d model failure: %s", step, exc)
+                            if host_control is not None:
+                                raise StepAborted(f"模型请求失败：{str(exc)[:600]}；可发送新消息重试，原队列保持挂起") from exc
                             if not interactive:
                                 raise
                             checkpoint(phase="user_wait", error=str(exc))
@@ -3141,29 +3244,8 @@ async def run_agent(
                     anthropic_content = copy.deepcopy(getattr(client, "last_anthropic_content", None))
                     if host_control is not None:
                         host_control.emit("intent", text=action.intent)
-                        await host_control.boundary()
-                        if host_control.messages:
-                            # New instructions arrived during planning. Do not execute
-                            # code based on an obsolete user request.
-                            writer.data.setdefault("superseded_plans", []).append({
-                                "step": step, "timestamp": now_iso(), "intent": action.intent,
-                                "reason": "new_user_message_before_execution",
-                            })
-                            writer.update_step_reply(step, {
-                                "intent": action.intent, "code": action.code,
-                                "blocks": [asdict(block) for block in action.ordered_blocks],
-                            })
-                            checkpoint(status="superseded", phase="complete")
-                            if args.max_steps > 0 and step + 1 - writer.data["tasks"][task_index]["first_step"] >= args.max_steps:
-                                final_status = "max_steps"
-                                final_answer = (
-                                    f"Stopped after {args.max_steps} planning steps; "
-                                    "new instructions were not executed."
-                                )
-                                writer.close_task(final_status, final_answer)
-                                break
-                            step += 1
-                            continue
+                        await with_abort(host_control.boundary())
+                        # 普通补充消息排到整轮结束；只有显式 interrupt 才取消当前计划。
                     writer.update_step_reply(step, {
                         "intent": action.intent, "code": action.code,
                         "blocks": [asdict(block) for block in action.ordered_blocks],
@@ -3216,6 +3298,8 @@ async def run_agent(
                     action_started = time.monotonic()
                     try:
                         # 先协作取消，超出宽限期则硬停旧 worker；下一轮不得与旧代码并行。
+                        apply_policy()
+                        sync_session_controls()
                         execution = await with_abort(executor.run(
                             action.execution_source, context.ledger.as_dicts() if args.todo else [],
                         ), force_stop=getattr(executor, "force_stop_active", None))
@@ -3227,16 +3311,13 @@ async def run_agent(
                             continue
                         name = str(skill_event.get("name") or "")
                         try:
-                            selected = skill_context.activate(
-                                name, expected_digest=str(skill_event.get("digest") or "")
-                            )
-                            if selected.info.source != skill_event.get("source"):
-                                raise ValueError("source root mismatch")
+                            commit_worker_skill(skill_event)
+                            selected = skill_context.activate(name)
                         except (OSError, ValueError) as exc:
                             skill_warning(f"Skill '{name}' not activated: {exc}", step=step)
                             continue
                         writer.data["tasks"][task_index]["skills"] = skill_context.records()
-                        writer.flush()
+                        sync_session_controls()
                         present("skill_loaded", f"Skill loaded: {name}", step=step,
                                 payload={"name": name, "source": selected.info.source})
                         if host_control is not None:
@@ -3287,7 +3368,7 @@ async def run_agent(
                         wait_started = time.monotonic()
                         try:
                             if host_control is not None:
-                                user_response = await host_control.ask(question)
+                                user_response = await with_abort(host_control.ask(question))
                             else:
                                 present("question", question, step=step)
                                 response = await frontend.read(AgentPrompt(
@@ -3577,13 +3658,15 @@ async def run_agent(
                             current_screenshots = emitted_images
                             current_screenshot = emitted_images[0] if emitted_images else None
                     step += 1
-                except StepAborted:
+                except StepAborted as interruption:
                     # 用户中止本轮：不杀会话、不清上下文；把中止事实交回模型，并等下一条指令。
                     _abort_event().clear()
                     logger.warning("step %03d aborted by user", step)
+                    if host_control is not None:
+                        host_control.worker_reset = bool(getattr(executor, "_reset_pending", False))
                     present(
                         "aborted",
-                        "本轮已停止；上下文保留。已经发出的界面或命令操作不会回滚，请先核实当前状态。",
+                        str(interruption) + "；本轮已停止，上下文保留。已经发出的操作不会回滚，请先核实当前状态。",
                         step=step,
                     )
                     writer.data.setdefault("aborts", []).append(
@@ -3627,6 +3710,8 @@ async def run_agent(
                         # Ordinary correction stays inside the current task boundary. It is
                         # included in the next model input and then persisted with that turn.
                         current_user_response = follow_up
+                        if host_control is not None:
+                            host_control.begin_turn(follow_up)
                     stall.reset()
                     current_payload = None
                     current_screenshot = None

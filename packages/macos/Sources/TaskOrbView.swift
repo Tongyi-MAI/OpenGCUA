@@ -13,6 +13,33 @@ struct MiniWindowView: View {
                                       visible: presentation.detailsVisible)
                     .accessibilityIdentifier("MiniWindowDetails")
             }
+            if !presentation.expanded {
+                HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(model.taskProgressTitle).font(.system(size: 10, weight: .semibold))
+                            .lineLimit(1).help(model.taskProgressTitle)
+                        Text(model.currentIntent.isEmpty
+                             ? (model.step > 0 ? L("第 %@ 步", String(model.step)) : "OpenGCUA")
+                             : model.currentIntent)
+                            .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                            .help(model.currentIntent)
+                        if !model.foregroundWarning.isEmpty {
+                            Text(model.foregroundWarning).font(.system(size: 9)).foregroundStyle(.orange)
+                                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                                .help(model.foregroundWarning).accessibilityIdentifier("ForegroundWarning")
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                        .overlay(WindowDragHandle())
+                    Button { model.delegate?.closeCompact() } label: {
+                        Image(systemName: "xmark").font(.system(size: 10)).frame(width: 24, height: 24)
+                    }.buttonStyle(.plain).help(L("隐藏进度气泡")).accessibilityLabel(L("隐藏进度气泡"))
+                    Color.clear.frame(width: FloatingPanel.iconSize)
+                }.padding(.leading, 12)
+                    .frame(width: FloatingPanel.progressWidth, height: model.progressBubbleHeight)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .accessibilityIdentifier("ProgressBubble")
+            }
             TaskOrbView(model: model, animates: presentation.requested && !presentation.suppressed)
                 .transaction { $0.animation = nil }
         }.frame(maxWidth: .infinity, maxHeight: .infinity,
@@ -59,7 +86,7 @@ struct TaskOrbView: View {
         }
     }
     var body: some View {
-        Button { model.delegate?.expand() } label: {
+        Button { model.delegate?.showMain() } label: {
             TimelineView(.animation(minimumInterval: 1.0 / 24, paused: !moving)) { context in
                 let time = moving ? context.date.timeIntervalSinceReferenceDate : 0
                 let breathing = moving ? sin(time * 2.5) : 0
@@ -88,9 +115,9 @@ struct TaskOrbView: View {
                     .padding(4)
             }
         }.buttonStyle(.plain).frame(width: FloatingPanel.iconSize, height: FloatingPanel.iconSize)
-            .overlay(OrbInteraction(openChat: { model.delegate?.expand() }))
+            .overlay(OrbInteraction(openChat: { model.delegate?.showMain() }))
             .accessibilityLabel(L("任务状态图标"))
-            .accessibilityValue(model.voiceMode ? L(model.speechStatus) : model.phase.label + ". " + model.taskProgressDetail)
+            .accessibilityValue(model.voiceMode ? L(model.speechStatus) : model.taskProgressTitle + ". " + model.taskProgressDetail)
             .accessibilityHint(L("悬停查看详情，点击打开对话，拖动移动"))
             .help(L("悬停查看详情，点击打开对话，拖动移动"))
     }

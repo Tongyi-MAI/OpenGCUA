@@ -50,6 +50,18 @@ enum AppError: LocalizedError {
         let count = keys.count
         editor.modelKey = "unsaved-draft"
         precondition(keys.count == count && keys["https://file.example/v1"] == "file-endpoint-fallback")
+        editor.modelKey = ""
+        try Data(#"{"llm_base_url":"https://file.example/v1","model_name":"","api_key":"file-only-key"}"#.utf8).write(to: file)
+        precondition(editor.configuration == nil)
+        do { try editor.persist(includeVoice: false); preconditionFailure("配置文件模型名称必须非空") } catch {}
+        precondition(keys.count == count && saved?.configFilePath == file.path && !keys.values.contains("file-only-key"))
+        editor.useManualConfiguration()
+        precondition(editor.draft.configFilePath.isEmpty && editor.draft.model == "qwen3.8-max")
+        for name in ["", "  "] {
+            editor.draft.model = name
+            do { try editor.persist(includeVoice: false); preconditionFailure("手工模型名称必须非空") } catch {}
+            precondition(keys.count == count && saved?.model == "qwen3.8-max")
+        }
         print("Settings draft, cancellation, endpoint isolation and JSON credential contracts passed")
     }
 }

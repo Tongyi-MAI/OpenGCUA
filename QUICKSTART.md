@@ -21,6 +21,19 @@ you need to customize or diagnose the harness.
 > extension (`mai_ui/_native*.so`) is built against that module path. `qwen_intelligence`
 > re-exports it for the frozen public path.
 
+## Native macOS App
+
+For an existing build, open `packages/macos/build/OpenGCUA-macOS-arm64.dmg` and drag the App to
+Applications after quitting the old version. A local ad-hoc build is not notarized and may need
+fresh macOS permissions. Grant Accessibility and Screen Recording to OpenGCUA itself; no global
+Gatekeeper/TCC changes are required. Build instructions are in [macOS README](packages/macos/README.md).
+
+The main panel offers session resume, one Skill, session-only foreground access, an independent
+ask_user switch, FIFO queue controls, turn interruption, manual compaction and optional
+reasoning/code with API status. Foreground access is reset on session switch/reconnect/restart;
+it is not permission to perform payments or other consequential business actions. Closing ask_user
+blocks business questions without disabling the separate foreground approval card.
+
 ## Prerequisites
 
 - macOS 14+ and **CPython 3.11–3.14** (examples below use 3.12).
@@ -343,14 +356,16 @@ description: Use when a task needs this specific workflow.
 Describe the trigger, prerequisites, steps, verification, and when to stop and ask.
 ```
 
-Use `/skills` to list, `/skill <name>` to select for the next task message, `/skill new <name>`
-to create a personal starter, and `/skills reload` after editing. A task can also contain an
-exact `$name` marker; the known marker is removed from model-facing task text while the original
-message remains in the trajectory. Unknown markers stay as text and produce a warning. Slash
-commands are TUI-only and wait for the next safe task boundary; `$name` works in plain CLI and
-demo hub too. A selected Skill applies to one task, not the entire conversation. A resumed
-unfinished task reloads its Skill only if its content digest still matches; `/resume` with a new
-message starts a new task and does not reactivate it.
+Use `/skills` to list, `/skill <name>` to select the session's single Skill, `/skill none` to
+clear it, `/skill new <name>` to create a personal starter, and `/skills reload` after editing.
+A message can also contain one exact `$name` marker; the known marker is removed from model-facing
+text while the original remains in the trajectory. Unknown markers stay as text with a warning.
+Slash commands are host controls and wait for a safe message boundary; `$name` also works in plain
+CLI and demo hub. The native App offers a Skill selector instead of requiring slash commands.
+The selected body occupies one system-prompt slot throughout the session, including after
+terminate and compaction. When no Skill is selected, the model may load one; loading a different
+one then requires an explicit user replacement or clear. Resume checks the saved source/digest;
+changed content is disabled until explicitly re-selected, and an explicitly cleared slot stays empty.
 
 Discovery rejects duplicate names across roots, malformed metadata, out-of-root symlinks,
 files above the size limits, and relative `skills_dirs` entries. The limits are 64 Skills,

@@ -48,7 +48,7 @@ jobs:
       - name: Test native task lifecycle and SDK integration
         run: |
           sdk_wheel="$(python3 -c 'from pathlib import Path; wheels = list(Path("packages/macos/build/wheels").glob("qwen_intelligence_sdk-*-cp312-*-macosx*.whl")); assert len(wheels) == 1, wheels; print(wheels[0].resolve())')"
-          uv run --no-project --python 3.12 --with ./packages/harness/runtime --with "$sdk_wheel" --with pytest pytest packages/harness/runtime/tests/test_native_host.py packages/harness/runtime/tests/test_sdk_runtime.py packages/harness/runtime/tests/test_overlay_guard.py packages/harness/runtime/tests/test_image_store.py -q
+          uv run --no-project --python 3.12 --with ./packages/harness/runtime --with "$sdk_wheel" --with pytest pytest packages/harness/runtime/tests/test_native_host.py packages/harness/runtime/tests/test_native_session_controls.py packages/harness/runtime/tests/test_sdk_runtime.py packages/harness/runtime/tests/test_overlay_guard.py packages/harness/runtime/tests/test_image_store.py -q
       - name: Test localization and system language defaults
         run: |
           python3 packages/macos/tests/test_localization.py
@@ -60,7 +60,7 @@ jobs:
           packages/macos/build/generalist-voice-contracts
       - name: Test voice task routing
         run: |
-          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/AudioInputDevices.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/SpeechInput.swift packages/macos/Sources/QwenSpeechInput.swift packages/macos/Sources/AppModel.swift packages/macos/tests/VoiceRouterContracts.swift -o packages/macos/build/generalist-voice-router-contracts
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/AudioInputDevices.swift packages/macos/Sources/VoiceTaskTools.swift packages/macos/Sources/Settings.swift packages/macos/Sources/SpeechInput.swift packages/macos/Sources/QwenSpeechInput.swift packages/macos/Sources/AppModel.swift packages/macos/Sources/SessionControls.swift packages/macos/tests/VoiceRouterContracts.swift -o packages/macos/build/generalist-voice-router-contracts
           packages/macos/build/generalist-voice-router-contracts
       - name: Test configuration file reload and credential isolation
         run: |
@@ -76,7 +76,7 @@ jobs:
           packages/macos/build/generalist-settings-editor-contracts
       - name: Test menu popover desktop transitions
         run: |
-          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/MenuPopoverBehavior.swift packages/macos/tests/PopoverContracts.swift -o packages/macos/build/generalist-popover-contracts
+          swiftc -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/MenuPopoverBehavior.swift packages/macos/Sources/MainWindow.swift packages/macos/tests/PopoverContracts.swift -o packages/macos/build/generalist-popover-contracts
           packages/macos/build/generalist-popover-contracts
       - name: Test mini window dragging and automation visibility
         run: |

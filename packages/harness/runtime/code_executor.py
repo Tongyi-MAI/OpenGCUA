@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import os
 import re
@@ -843,6 +844,29 @@ def _apply_event(control: dict[str, Any], event: dict[str, Any]) -> None:
         control.update({key: event[key] for key in BLOCK_PROGRESS_FIELDS if key in event})
 
 
+def _skill_event_problem(event: dict[str, Any], revision: int) -> str | None:
+    """只接受 worker 按本请求配置 revision 发出的完整 skill_loaded；其余视为伪造。"""
+    missing = [key for key in ("name", "source", "digest") if not isinstance(event.get(key), str) or not event[key]]
+    if missing:
+        return "skill_loaded 缺少 " + "/".join(missing)
+    if type(event.get("revision")) is not int or event["revision"] != revision:
+        return f"skill_loaded revision={event.get('revision')!r} 与本轮配置 revision={revision} 不符"
+    return None
+
+
+def _stop_on_event(
+    control: dict[str, Any], event: dict[str, Any], *,
+    event_type: str, error_code: str, stop_reason: str, message: str, **extra: Any,
+) -> None:
+    control["stop_reason"] = stop_reason
+    control["exit_code"] = 1
+    control["stopped_block"] = event.get("block_index") or control["started_blocks"] or None
+    control["events"].append({
+        "type": event_type, "error_code": error_code,
+        "message": message, "block_index": control["stopped_block"], **extra,
+    })
+
+
 def parse_control_stdout(stdout: str) -> tuple[str, dict[str, Any]]:
     """仅用于旧单步 CLI 输出；常驻协议绝不解析模型的 stdout。"""
     control = empty_control()
@@ -899,16 +923,24 @@ class CodeExecutor:
         ui_api: str = "mai-ui",
         overlay_handler=None,
         approval_handler=None,
+        skill_handler=None,
         image_dir: Path | None = None,
         skill_roots: tuple[Path, ...] = (),
+        ask_user_enabled: bool = True,
     ) -> None:
         if ui_api not in {"mai-ui", "legacy-cua"}:
             raise ValueError("ui_api 必须是 mai-ui 或 legacy-cua")
         self.ui_api = ui_api
         self.overlay_handler = overlay_handler
         self.approval_handler = approval_handler
+        # 同步 host 提交回调：收到当前请求的 skill_loaded 即调用，抛错则本轮失败停止。
+        self.skill_handler = skill_handler
         self.image_dir = image_dir.resolve() if image_dir is not None else None
         self.skill_roots = tuple(Path(root).resolve() for root in skill_roots)
+        self.ask_user_enabled = ask_user_enabled
+        self._selected_skill: str | None = None
+        self._skill_digest: str | None = None
+        self._skill_revision = 0
         self.runtime_path = runtime_path.resolve()
         self.work_dir = work_dir.resolve()
         self.rpc_socket = rpc_socket.resolve()
@@ -933,6 +965,20 @@ class CodeExecutor:
         self._output_reset_sent = 0
         self._rpc_generation = 0
         self._child_groups: set[int] = set()
+
+    def set_skill_selection(self, name: str | None, digest: str | None, revision: int) -> None:
+        """保存 host 的 session 选择，在下一 cell 同步，不接受模型命名空间变量。"""
+        if name is not None and (not isinstance(name, str) or not name):
+            raise ValueError("selected_skill 必须是非空名称或 None")
+        if digest is not None and (not isinstance(digest, str) or not digest):
+            raise ValueError("skill_digest 必须是非空字符串或 None")
+        if name is None and digest is not None:
+            raise ValueError("空 Skill 槽不能携带 digest")
+        if type(revision) is not int or revision < 0:
+            raise ValueError("skill_revision 必须是非负整数")
+        self._selected_skill = name
+        self._skill_digest = digest
+        self._skill_revision = revision
 
     def set_rpc_generation(self, generation: int) -> None:
         """同步更新下一轮携带的 RPC 代次，不改变正在执行的请求上下文。"""
@@ -971,6 +1017,10 @@ class CodeExecutor:
             "work_dir": str(self.work_dir),
             "image_dir": str(self.image_dir) if self.image_dir is not None else None,
             "skill_roots": [str(root) for root in self.skill_roots],
+            "ask_user_enabled": self.ask_user_enabled,
+            "selected_skill": self._selected_skill,
+            "skill_digest": self._skill_digest,
+            "skill_revision": self._skill_revision,
         }
 
     async def _watch_worker(
@@ -1119,6 +1169,7 @@ class CodeExecutor:
                         await self._start_worker()
                     assert self._writer is not None and self._reader is not None
                     output_reset_revision = self._output_reset_revision
+                    config = self._config()
                     payload = {
                         "request_id": request_id,
                         "code": code,
@@ -1126,7 +1177,7 @@ class CodeExecutor:
                         "reset_task": self._task_reset_pending,
                         "reset_skills": self._skill_reset_pending,
                         "reset_output_context": output_reset_revision != self._output_reset_sent,
-                        "config": self._config(),
+                        "config": config,
                     }
                     self._writer.write(json.dumps(payload, ensure_ascii=True).encode() + b"\n")
                     await self._writer.drain()
@@ -1158,7 +1209,47 @@ class CodeExecutor:
                                 raise ValueError("worker 控制事件无效")
                             if kind == "event":
                                 # 只有专用 done 帧能够完成本轮，普通 end 事件也不能提前完成。
-                                if event.get("type") == "overlay_guard" and self.overlay_handler is not None:
+                                if event.get("type") == "ask_user" and not self.ask_user_enabled:
+                                    error = "ASK_USER_DISABLED：host 已禁用 ask_user；未向业务转交问题，本轮执行已停止。"
+                                    control["ask_user"] = None
+                                    returncode = 1
+                                    _stop_on_event(control, event, event_type="ask_user_disabled",
+                                                   error_code="ASK_USER_DISABLED", stop_reason="ask_user_disabled",
+                                                   message=error)
+                                    # 不等待伪造事件后的 worker：它可能仍在等人类答复。
+                                    reset = True
+                                    await asyncio.shield(self._stop_worker())
+                                    self._reset_pending = False
+                                    break
+                                elif event.get("type") == "skill_loaded" and self.skill_handler is not None:
+                                    # 首次 load 立即由 host 提交 pin，不等 done；之后取消 cell 也不会撤销选择。
+                                    problem = _skill_event_problem(event, config["skill_revision"])
+                                    if problem is None:
+                                        try:
+                                            outcome = self.skill_handler(dict(event))
+                                            if inspect.isawaitable(outcome):
+                                                if inspect.iscoroutine(outcome):
+                                                    outcome.close()
+                                                raise TypeError("skill_handler 必须是同步函数")
+                                        except Exception as exc:
+                                            problem = f"host 提交失败（{type(exc).__name__}: {exc}）"
+                                    if problem is None:
+                                        _apply_event(control, event)
+                                    else:
+                                        name = event.get("name")
+                                        error = (f"SKILL_COMMIT_FAILED：Skill {name!r} 未提交到 session：{problem}；"
+                                                 "本轮执行已停止，worker 已重置。")
+                                        returncode = 1
+                                        # 未提交的 skill_loaded 不进入轨迹，避免伪造事件被后续流程当作已加载。
+                                        _stop_on_event(control, event, event_type="skill_commit_failed",
+                                                       error_code="SKILL_COMMIT_FAILED", stop_reason="skill_commit_failed",
+                                                       message=error, name=name if isinstance(name, str) else None)
+                                        # worker 已持有 host 未认可的 pin，不能继续执行或复用。
+                                        reset = True
+                                        await asyncio.shield(self._stop_worker())
+                                        self._reset_pending = False
+                                        break
+                                elif event.get("type") == "overlay_guard" and self.overlay_handler is not None:
                                     ready = False
                                     try:
                                         await self.overlay_handler(event)

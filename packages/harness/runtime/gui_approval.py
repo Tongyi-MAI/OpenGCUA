@@ -13,8 +13,18 @@ ConsentState = Literal["unset", "allowed", "denied"]
 class GuiGrantStore:
     def __init__(self) -> None:
         self._states: dict[int, ConsentState] = {}
+        self.session_allowed = False
+
+    def set_session_allowed(self, allowed: bool) -> None:
+        if type(allowed) is not bool:
+            raise ValueError("session_allowed 必须是 bool")
+        self.session_allowed = allowed
+        if not allowed:
+            self.clear()
 
     def state(self, task_index: int) -> ConsentState:
+        if self.session_allowed:
+            return "allowed"
         return self._states.get(task_index, "unset")
 
     def decide(self, task_index: int, *, allow: bool) -> None:
@@ -22,6 +32,9 @@ class GuiGrantStore:
 
     def clear(self) -> None:
         self._states.clear()
+
+    def clear_session(self) -> None:
+        self.set_session_allowed(False)
 
 
 async def request_gui_approval(

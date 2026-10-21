@@ -15,11 +15,15 @@ struct VoiceBar: View {
                 if !model.recording && !model.speechPending {
                     SymbolButton(symbol: "arrow.clockwise", title: L("重新连接语音")) { model.retryVoice() }
                 }
-                SymbolButton(symbol: "arrow.up.left.and.arrow.down.right", title: L("展开任务")) { model.delegate?.expand() }
+                SymbolButton(symbol: "arrow.up.left.and.arrow.down.right", title: L("展开任务")) { model.delegate?.showMain() }
                 SymbolButton(symbol: "keyboard", title: L("切换为文字输入")) { model.stopSpeech() }
                 SymbolButton(symbol: "xmark", title: L("关闭小窗")) { model.delegate?.closeCompact() }
                     .help(L("关闭小窗并停止收音，电脑任务继续执行"))
                 if !orbAtBottom { Color.clear.frame(width: 42, height: 32).allowsHitTesting(false) }
+            }
+            if !model.foregroundWarning.isEmpty {
+                Text(model.foregroundWarning).font(.system(size: 10)).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true).help(model.foregroundWarning)
             }
             HStack(spacing: 8) {
                 Menu {
@@ -94,10 +98,18 @@ struct VoiceBar: View {
                     .accessibilityLabel(L("电脑任务进度"))
                     .accessibilityValue(model.taskProgressTitle + L("，第 %@ 步，", String(describing: model.step)) + model.taskProgressDetail)
             }
-            Spacer(minLength: 0)
-            if orbAtBottom {
-                HStack { TaskControls(model: model); Spacer(minLength: 0); Color.clear.frame(width: 42).allowsHitTesting(false) }.frame(height: 32)
+            if !model.controls.result.isEmpty {
+                Text(model.controls.result).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).help(model.controls.result)
             }
+            Spacer(minLength: 0)
+            if !model.controls.approvals.isEmpty {
+                Button(L("查看前台审批（默认拒绝）")) { model.delegate?.showMain() }.font(.caption)
+            }
+            HStack {
+                TaskControls(model: model, compact: true)
+                Spacer(minLength: 0)
+                if orbAtBottom { Color.clear.frame(width: 42).allowsHitTesting(false) }
+            }.frame(height: orbAtBottom ? 32 : 24)
         }.padding(10).frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(MaterialView(material: .popover)).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color(nsColor: .separatorColor).opacity(0.5)))

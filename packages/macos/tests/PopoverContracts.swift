@@ -43,6 +43,17 @@ final class VisibilityWindow: NSWindow {
         center.post(name: NSApplication.willResignActiveNotification, object: nil)
         precondition(dismissals == 4, "Reopening must install a single observer")
         behavior.detach()
-        print("Popover transient behavior, visibility, deactivation, Spaces and observer lifecycle contracts passed")
+        let main = MainWindow(content: NSView())
+        precondition(main.styleMask.contains(.titled) && main.styleMask.contains(.closable))
+        precondition(main.styleMask.contains(.miniaturizable) && main.styleMask.contains(.resizable))
+        precondition(!main.isReleasedWhenClosed && main.level == .normal)
+        precondition(main.contentMinSize == NSSize(width: 480, height: 600))
+        precondition(!main.requested && !main.isVisible)
+        main.present(suppressed: true)
+        precondition(main.requested && !main.isVisible, "电脑操作期间打开 Dock 窗口不能遮挡目标")
+        main.hide()
+        main.updateOcclusion(false)
+        precondition(!main.requested && !main.isVisible, "主动关闭的主窗口不能被自动恢复")
+        print("Popover and independent Dock window lifecycle contracts passed")
     }
 }

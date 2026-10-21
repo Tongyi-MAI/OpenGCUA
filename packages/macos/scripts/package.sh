@@ -2,8 +2,9 @@
 # Build a drag-to-Applications DMG; optionally notarize the enclosed app.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-app="build/OpenGCUA.app"
-archive="build/OpenGCUA-macOS-arm64.dmg"
+build_dir="${1:-build}"
+app="$build_dir/OpenGCUA.app"
+archive="$build_dir/OpenGCUA-macOS-arm64.dmg"
 stage="$(mktemp -d "${TMPDIR:-/tmp}/generalist-dmg.XXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
 codesign --verify --deep --strict "$app"
@@ -25,4 +26,4 @@ hdiutil create -volname "OpenGCUA" -srcfolder "$stage" -fs HFS+ \
   -format UDZO -imagekey zlib-level=9 -ov "$archive"
 hdiutil verify "$archive"
 (cd "$(dirname "$archive")" && shasum -a 256 "$(basename "$archive")") > "$archive.sha256"
-echo "$PWD/$archive"
+echo "$(cd "$(dirname "$archive")" && pwd)/$(basename "$archive")"

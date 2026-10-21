@@ -39,6 +39,7 @@ struct MainView: View {
                 }
                 SymbolButton(symbol: "gearshape", title: L("设置")) { model.delegate?.showSettings() }
             }.padding(18)
+            SessionPicker(model: model).padding(.horizontal, 18).padding(.bottom, 10)
             Divider()
             if model.disconnected {
                 HStack { Text(L("连接已断开")); Spacer(); Button(L("重新连接")) { model.connect() } }
@@ -47,6 +48,10 @@ struct MainView: View {
             ScrollViewReader { scroll in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
+                        SessionControlPanel(model: model)
+                        ForEach(model.controls.approvals) { approval in
+                            ApprovalCard(model: model, approval: approval).id(approval.id)
+                        }
                         if model.phase == .idle {
                             VStack(spacing: 10) {
                                 Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 32, weight: .light)).foregroundStyle(.secondary)
@@ -59,7 +64,7 @@ struct MainView: View {
                                 if model.phase != .waiting {
                                     HStack(spacing: 8) {
                                         if model.phase != .paused { ProgressView().controlSize(.small) }
-                                        Text(model.intent.isEmpty ? model.taskProgressTitle : model.intent)
+                                        Text(model.taskProgressTitle)
                                             .font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
                                     }.padding(.horizontal, 14).padding(.vertical, 11)
                                         .background(Color(nsColor: .quaternaryLabelColor).opacity(0.4), in: RoundedRectangle(cornerRadius: 18))
@@ -69,6 +74,7 @@ struct MainView: View {
                                     .buttonStyle(.borderless).font(.caption).foregroundStyle(.secondary)
                             }
                         }
+                        ExecutionDetailsView(model: model)
                         Color.clear.frame(height: 1).id("latest")
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(18)
                 }.scrollIndicators(.never)
@@ -77,6 +83,9 @@ struct MainView: View {
                         withAnimation(.easeOut(duration: 0.2)) { scroll.scrollTo("latest", anchor: .bottom) }
                     }
                     .onChange(of: model.phase) { _, _ in scroll.scrollTo("latest", anchor: .bottom) }
+                    .onChange(of: model.controls.approvals.map(\.id)) { _, ids in
+                        if let id = ids.first { scroll.scrollTo(id, anchor: .top) }
+                    }
             }
             VStack(alignment: .leading, spacing: 10) {
                 if !model.error.isEmpty {
@@ -93,6 +102,8 @@ struct MainView: View {
                     SymbolButton(symbol: "rectangle.bottomthird.inset.filled", title: L("打开小窗")) { model.delegate?.collapse() }
                     Menu {
                         Button(L("设置…")) { model.delegate?.showSettings() }
+                        Button(L("显示进度气泡")) { model.delegate?.showProgressBubble() }
+                        Button(L("隐藏进度气泡")) { model.delegate?.hideProgressBubble() }
                         Button(L("Mac 控制权限…")) { MacPermissions.showGuide(model: model) }
                         Button(L("打开对话记录文件夹")) { NSWorkspace.shared.open(model.dataDirectory) }
                         Divider()
@@ -134,8 +145,24 @@ struct ChatTranscript: View {
 
 struct TaskControls: View {
     @ObservedObject var model: AppModel
+    var compact = false
     var body: some View {
         HStack(spacing: 4) {
+            if model.canInterrupt {
+                if model.controls.interruptPending {
+                    Menu {
+                        Button(L("强制中止（重置 worker）")) { model.interruptTurn(force: true) }
+                    } label: {
+                        if compact { Image(systemName: "bolt.slash").frame(width: 24, height: 24) }
+                        else { Text(L("正在中止本轮…")) }
+                    }.menuStyle(.borderlessButton).fixedSize().font(.caption).accessibilityLabel(L("正在中止本轮…"))
+                } else if compact {
+                    SymbolButton(symbol: "bolt.slash", title: L("中止本轮")) { model.interruptTurn() }
+                } else {
+                    Button(L("中止本轮"), systemImage: "bolt.slash") { model.interruptTurn() }
+                        .buttonStyle(.borderless).font(.caption).help(L("中止当前轮次，保留会话以发送纠正；不会撤销已执行的操作。"))
+                }
+            }
             if model.phase == .running {
                 SymbolButton(symbol: "pause.fill", title: L("暂停任务")) { model.command("pause") }
             } else if model.phase == .paused || model.phase == .pausing {
@@ -171,31 +198,40 @@ struct CompactView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(model.phase.label).font(.system(size: 12, weight: .semibold)).foregroundStyle(model.tint).lineLimit(1)
+                    Text(model.phase.active || model.controls.interrupted ? model.taskProgressTitle : model.phase.label).font(.system(size: 12, weight: .semibold)).foregroundStyle(model.tint).lineLimit(1)
                     Text(model.phase == .idle ? L("有什么可以交给我？") : model.taskTitle)
                         .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                 }.frame(maxWidth: .infinity, alignment: .leading).frame(minHeight: 30).overlay(WindowDragHandle())
-                SymbolButton(symbol: "arrow.up.left.and.arrow.down.right", title: L("展开任务")) { model.delegate?.expand() }
+                SymbolButton(symbol: "arrow.up.left.and.arrow.down.right", title: L("展开任务")) { model.delegate?.showMain() }
                 SymbolButton(symbol: "xmark", title: L("关闭小窗")) { model.delegate?.closeCompact() }
                     .help(L("隐藏小窗，电脑任务继续执行；可从菜单栏重新打开"))
                 if !orbAtBottom { Color.clear.frame(width: 42, height: 32).allowsHitTesting(false) }
             }
+            if !model.foregroundWarning.isEmpty {
+                Text(model.foregroundWarning).font(.system(size: 10)).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true).help(model.foregroundWarning)
+            }
+            if model.phase.active && !model.currentIntent.isEmpty {
+                Text("Intent: " + model.currentIntent).font(.system(size: 11)).lineLimit(2)
+                    .help(model.currentIntent).textSelection(.enabled)
+            }
             if model.showsCompactResult { CompactResultView(text: model.compactResultText, height: 84).id(model.taskID) }
             else if model.phase == .waiting {
                 ScrollView { ChatBubble(text: model.question) }.frame(height: 84)
-            } else if model.phase.active {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(model.taskProgressTitle).font(.system(size: 11, weight: .medium))
-                    Text(model.taskProgressDetail).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
-                        .help(model.taskProgressDetail)
-                }.frame(maxWidth: .infinity, alignment: .leading)
+            } else if model.phase.active && model.currentIntent.isEmpty {
+                Text(model.taskProgressDetail).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+                    .help(model.taskProgressDetail).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if !model.controls.approvals.isEmpty {
+                Button(L("查看前台审批（默认拒绝）")) { model.delegate?.showMain() }.font(.caption)
             }
             if !model.compactYieldsToAutomation { InputComposer(model: model, compact: true) }
+            if !model.controls.result.isEmpty { Text(model.controls.result).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1).help(model.controls.result) }
             if !model.error.isEmpty { Text(L(model.error)).font(.system(size: 10)).foregroundStyle(.orange).lineLimit(2).help(model.error) }
             Spacer(minLength: 0)
             HStack(spacing: 6) {
                 if model.step > 0 { Text(L("第 %@ 步", String(model.step))).font(.system(size: 10)).foregroundStyle(.secondary).monospacedDigit() }
-                TaskControls(model: model)
+                TaskControls(model: model, compact: true)
                 Menu {
                     Button(L("设置…")) { model.delegate?.showSettings() }
                     if !model.runPath.isEmpty { Button(L("查看运行记录")) { model.revealRun(model.runPath) } }
@@ -254,7 +290,7 @@ struct InputComposer: View {
                 }.buttonStyle(.plain).foregroundStyle(model.canSendInput ? .white : .secondary)
                     .background(model.canSendInput ? Color.accentColor : Color.primary.opacity(0.06), in: Circle())
                     .disabled(!model.canSendInput).keyboardShortcut(.return, modifiers: .command)
-                    .help(model.preferences.sendShortcutHint).accessibilityLabel(model.phase == .waiting ? L("发送回复") : model.phase.active ? L("发送补充要求") : model.conversationOpen || model.restoresHistory ? L("继续对话") : L("开始新任务"))
+                    .help(model.preferences.sendShortcutHint).accessibilityLabel(model.phase == .waiting ? L("发送回复") : model.phase.active ? L("发送补充要求") : model.conversationOpen || model.restoresHistory ? L("继续对话") : L("发送消息"))
             }.padding(9).background(Color(nsColor: .textBackgroundColor).opacity(0.7), in: RoundedRectangle(cornerRadius: 20))
                 .overlay(RoundedRectangle(cornerRadius: 20).stroke(.primary.opacity(0.12)))
             if !compact && !statusText.isEmpty {

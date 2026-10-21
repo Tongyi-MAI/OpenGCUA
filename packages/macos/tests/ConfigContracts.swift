@@ -12,6 +12,15 @@ enum AppError: Error { case message(String) }
         precondition(preferences.llmProtocol == "openai" && preferences.configFilePath.isEmpty)
         precondition(preferences.reasoningEffort == "low")
         precondition(preferences.sendWithEnter)
+        precondition(Preferences().model == "qwen3.8-max")
+        precondition(!preferences.showReasoning && !preferences.showCode)
+        let nullDisplay = try JSONDecoder().decode(Preferences.self, from: Data(#"{"showReasoning":null,"showCode":null,"foreground_allowed":true,"ask_user_enabled":false}"#.utf8))
+        precondition(!nullDisplay.showReasoning && !nullDisplay.showCode)
+        var display = preferences; display.showReasoning = true; display.showCode = true
+        let displayRoundtrip = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(display))
+        precondition(displayRoundtrip.showReasoning && displayRoundtrip.showCode)
+        let encodedDisplay = String(decoding: try JSONEncoder().encode(display), as: UTF8.self)
+        precondition(!encodedDisplay.contains("foreground_allowed") && !encodedDisplay.contains("ask_user_enabled"))
         let suite = "Generalist-setup-test-" + UUID().uuidString
         let defaultsStore = UserDefaults(suiteName: suite)!
         defer { defaultsStore.removePersistentDomain(forName: suite) }
@@ -43,6 +52,14 @@ enum AppError: Error { case message(String) }
         precondition(first["llm_protocol"] as? String == "anthropic")
         precondition(first["reasoning_effort"] as? String == "high")
         precondition(first["max_tokens"] as? Int == 4096 && first["_note"] == nil)
+        precondition(first["model_name"] as? String == "first")
+        for name in ["", " \n\t "] {
+            var emptyModel = Preferences(); emptyModel.model = name
+            do { try emptyModel.validate(); preconditionFailure("手工模型名称必须非空") } catch {}
+            do { _ = try emptyModel.taskConfiguration(); preconditionFailure("任务模型名称必须非空") } catch {}
+        }
+        let displayConfiguration = try display.taskConfiguration()
+        precondition(displayConfiguration["show_reasoning"] == nil && displayConfiguration["show_code"] == nil)
         try preferences.validateTaskCredentials(manualKey: "", readKey: { _ in preconditionFailure("File key should take precedence") })
         let saved = try JSONEncoder().encode(preferences)
         precondition(!String(decoding: saved, as: UTF8.self).contains("fixture-secret"))
@@ -65,7 +82,7 @@ enum AppError: Error { case message(String) }
         } catch {}
         for invalid in ["[]", "not json", #"{"llm_protocol":"unsupported"}"#, #"{"api_key":17}"#,
                         #"{"reasoning_effort":"unsupported"}"#, #"{"reasoning_effort":17}"#,
-                        #"{"reasoning_effort":null}"#] {
+                        #"{"reasoning_effort":null}"#, #"{"model_name":""}"#, #"{"model_name":"  "}"#] {
             try Data(invalid.utf8).write(to: file)
             do { _ = try restored.taskConfiguration(); preconditionFailure("Invalid config accepted") }
             catch {}

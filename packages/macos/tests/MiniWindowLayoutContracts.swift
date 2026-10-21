@@ -5,10 +5,16 @@ enum TaskPhase { case idle, running, paused, waiting, completed, failed, stopped
     var active: Bool { self == .running || self == .paused || self == .waiting }
     var label: String { "Ready" }
 }
-@MainActor final class AppDelegate { func expand() {} }
+@MainActor final class AppDelegate {
+    func showMain() {}
+    func closeCompact() {}
+}
 @MainActor final class AppModel: ObservableObject {
     var phase = TaskPhase.idle, voiceMode = false, recording = false, speechPending = false
     var tint = Color.blue, speechStatus = "Ready", taskProgressDetail = ""
+    var taskProgressTitle = "Waiting for API", currentIntent = "Open DingTalk meeting room booking", step = 3
+    @Published var foregroundWarning = ""
+    var progressBubbleHeight: CGFloat { foregroundWarning.isEmpty ? 44 : 72 }
     var colorScheme: ColorScheme? = .light
     var delegate: AppDelegate?
 }
@@ -26,7 +32,8 @@ struct CompactView: View {
             let screen = NSRect(x: 0, y: 0, width: 1512, height: 982)
             let anchor = NSPoint(x: 652, y: upward ? 200 : 900)
             presentation.expandsUpward = upward
-            let initial = MiniWindowPlacement.fit(anchor: anchor, expanded: false, detailHeight: 156, screen: screen).frame
+            let initial = MiniWindowPlacement.fit(anchor: anchor, expanded: false, detailHeight: 156, screen: screen,
+                                                   badgeWidth: FloatingPanel.progressWidth, badgeHeight: model.progressBubbleHeight).frame
             let host = NSHostingView(rootView: MiniWindowView(model: model, presentation: presentation))
             host.sizingOptions = []
             let panel = FloatingPanel(contentRect: initial, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -41,14 +48,29 @@ struct CompactView: View {
             func verify(_ label: String) {
                 guard let handle = orb(host) else { preconditionFailure("Missing actual orb interaction view") }
                 let frame = panel.convertToScreen(handle.convert(handle.bounds, to: nil))
-                precondition(abs(frame.minX - initial.minX) < 0.5 && abs(frame.minY - initial.minY) < 0.5,
+                precondition(abs(frame.maxX - initial.maxX) < 0.5 && abs(frame.minY - initial.minY) < 0.5,
                              "Badge jumped during \(label): \(frame), expected \(initial)")
-                precondition(frame.size == initial.size)
+                precondition(frame.size == NSSize(width: FloatingPanel.iconSize, height: FloatingPanel.iconSize))
                 samples += 1
             }
             verify("initial layout")
+            func updateFrame() {
+                let placement = MiniWindowPlacement.fit(anchor: anchor, expanded: presentation.expanded, detailHeight: 156,
+                                                         screen: screen, badgeWidth: FloatingPanel.progressWidth,
+                                                         badgeHeight: model.progressBubbleHeight)
+                presentation.expandsUpward = placement.expandsUpward
+                panel.setPresentationFrame(placement.frame)
+            }
+            for warning in ["前台授权中：请勿操作电脑，以免打断 Agent 当前行为。", ""] {
+                model.foregroundWarning = warning
+                updateFrame()
+                verify("permission warning height change")
+                precondition(panel.frame.height == model.progressBubbleHeight)
+                precondition(screen.contains(panel.frame))
+            }
             presentation.onChange = {
-                let placement = MiniWindowPlacement.fit(anchor: anchor, expanded: presentation.expanded, detailHeight: 156, screen: screen)
+                let placement = MiniWindowPlacement.fit(anchor: anchor, expanded: presentation.expanded, detailHeight: 156, screen: screen,
+                                                         badgeWidth: FloatingPanel.progressWidth, badgeHeight: model.progressBubbleHeight)
                 presentation.expandsUpward = placement.expandsUpward
                 panel.setPresentationFrame(placement.frame)
                 verify("the synchronous resize, before the next render turn")

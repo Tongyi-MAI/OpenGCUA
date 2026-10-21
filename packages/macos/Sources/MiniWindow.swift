@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor class FloatingPanel: NSPanel {
     static let compactWidth: CGFloat = 320
     static let iconSize: CGFloat = 44
+    static let progressWidth: CGFloat = 288
     var detailsExpanded = false
     private(set) var dragging = false
     var onHover: ((Bool) -> Void)?
@@ -146,14 +147,22 @@ final class OrbHandleView: DragHandleView {
 @MainActor struct MiniWindowPlacement {
     let frame: NSRect
     let expandsUpward: Bool
-    static func fit(anchor: NSPoint, expanded: Bool, detailHeight: CGFloat, screen: NSRect) -> Self {
+    static func fit(anchor: NSPoint, expanded: Bool, detailHeight: CGFloat, screen: NSRect,
+                    badgeWidth: CGFloat? = nil, badgeHeight: CGFloat? = nil) -> Self {
+        let badgeWidth = badgeWidth ?? FloatingPanel.iconSize
+        let badgeHeight = min(badgeHeight ?? FloatingPanel.iconSize, screen.height)
         let icon = FloatingPanel.fittedFrame(NSRect(x: anchor.x - FloatingPanel.iconSize, y: anchor.y,
                                                     width: FloatingPanel.iconSize, height: FloatingPanel.iconSize),
                                             height: FloatingPanel.iconSize, screen: screen, width: FloatingPanel.iconSize)
-        let height = min(detailHeight, screen.height)
+        let height = min(max(detailHeight, badgeHeight), screen.height)
         let above = screen.maxY - icon.minY, below = icon.maxY - screen.minY
         let upward = above >= height || above >= below
-        guard expanded else { return Self(frame: icon, expandsUpward: upward) }
+        guard expanded else {
+            let badge = NSRect(x: icon.maxX - badgeWidth, y: upward ? icon.minY : icon.maxY - badgeHeight,
+                               width: badgeWidth, height: badgeHeight)
+            return Self(frame: FloatingPanel.fittedFrame(badge, height: badgeHeight,
+                                                         screen: screen, width: badgeWidth), expandsUpward: upward)
+        }
         let proposed = NSRect(x: icon.maxX - FloatingPanel.compactWidth,
                               y: upward ? icon.minY : icon.maxY - height,
                               width: FloatingPanel.compactWidth, height: height)
@@ -195,6 +204,7 @@ enum OverlayOcclusion {
     @Published private(set) var detailsVisible = false
     @Published private(set) var requested = false
     @Published private(set) var suppressed = false
+    @Published private(set) var manuallyHidden = false
     @Published var expandsUpward = true
     var onChange: (() -> Void)?
     var keepExpanded: () -> Bool = { false }
@@ -210,7 +220,13 @@ enum OverlayOcclusion {
          fadeDuration: UInt64 = 140_000_000) {
         self.enterDelay = enterDelay; self.exitDelay = exitDelay; self.fadeDuration = fadeDuration
     }
+    func allowBubble() { manuallyHidden = false }
+    func hideBubble() {
+        manuallyHidden = true
+        update(requested: false, suppressed: suppressed)
+    }
     func update(requested: Bool, suppressed: Bool) {
+        let requested = requested && !manuallyHidden
         if self.requested != requested { self.requested = requested }
         if self.suppressed != suppressed { self.suppressed = suppressed }
         if !requested || suppressed {

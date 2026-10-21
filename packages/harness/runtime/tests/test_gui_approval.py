@@ -109,6 +109,45 @@ def test_retry_only_after_reject_and_requires_new_allow():
     asyncio.run(scenario())
 
 
+def test_session_override_survives_task_clear_and_disable_clears_all_cached_decisions():
+    from gui_approval import GuiGrantStore
+    grants = GuiGrantStore()
+    assert grants.session_allowed is False
+    grants.decide(1, allow=True)
+    grants.decide(2, allow=False)
+    grants.set_session_allowed(True)
+    assert grants.session_allowed is True
+    assert [grants.state(task) for task in (1, 2, 3)] == ["allowed"] * 3
+    grants.clear()
+    assert grants.state(4) == "allowed"
+    grants.decide(5, allow=False)
+    grants.decide(6, allow=True)
+    grants.set_session_allowed(False)
+    assert [grants.state(task) for task in range(1, 7)] == ["unset"] * 6
+    grants.decide(7, allow=False)
+    grants.set_session_allowed(True)
+    grants.clear_session()
+    assert grants.session_allowed is False and grants.state(7) == "unset"
+    assert GuiGrantStore().session_allowed is False
+
+
+def test_session_approval_keeps_target_and_explicit_retry_validation():
+    from gui_approval import GuiGrantStore, request_gui_approval
+    async def scenario():
+        grants = GuiGrantStore()
+        grants.set_session_allowed(True)
+        async def choose(_prompt):
+            pytest.fail("session 批准时有效普通动作不应再次展示批准卡")
+        event = {"request_id": "r", "app_id": "app:a", "window_id": "window:7"}
+        assert await request_gui_approval(grants, 3, event, choose)
+        assert await request_gui_approval(grants, 4, {**event, "window_id": "window:8"}, choose)
+        assert not await request_gui_approval(grants, 3, {**event, "window_id": ""}, choose)
+        assert not await request_gui_approval(grants, 3, {**event, "explicit_retry": True}, choose)
+        grants.clear()
+        assert await request_gui_approval(grants, 5, event, choose)
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("approved,wrong_id,expected", [
     (True, False, True), (False, False, False), (True, True, False),
 ])
@@ -180,6 +219,72 @@ print('continued after approval response')
         finally:
             await executor.close()
 
+    asyncio.run(scenario())
+
+
+def test_sdk_actions_consult_parent_again_after_session_approval_is_revoked(tmp_path):
+    from gui_approval import GuiGrantStore, request_gui_approval
+
+    async def scenario():
+        worker = tmp_path / "revocation_worker.py"
+        worker.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(Path(__file__).parents[1])!r})\n"
+            "import code_runtime as rt\n"
+            "rt._bootstrap = lambda loop: {}\n"
+            "raise SystemExit(rt.main(sys.argv))\n", encoding="utf-8",
+        )
+        grants = GuiGrantStore()
+        grants.set_session_allowed(True)
+        grants.decide(1, allow=True)
+        consulted = []
+        prompts = []
+        async def reject(prompt):
+            prompts.append(prompt)
+            return "reject"
+        async def approve(event):
+            consulted.append(event)
+            approved = await request_gui_approval(grants, 1, event, reject)
+            if len(consulted) == 1:
+                grants.set_session_allowed(False)
+            return approved
+        executor = CodeExecutor(
+            runtime_path=worker, work_dir=tmp_path, rpc_socket=tmp_path / "unused.sock",
+            timeout=10, rpc_timeout=3, coordinate_range=1000, pyautogui_pause=0,
+            enable_bash=False, ui_api="legacy-cua", approval_handler=approve,
+        )
+        try:
+            result = await executor.run("""import asyncio
+import types
+import code_runtime as rt
+from mai_ui import MuError
+class FakeSession:
+    async def _request(self, device, message):
+        print('fake dispatch')
+        return {'execution': 'completed'}
+session = FakeSession()
+rt._instrument_sdk_session(session)
+rt._record_tool = lambda *args, **kwargs: None
+device = types.SimpleNamespace(platform='macos', _app_id='app:a', _window_id='window:7')
+async def actions():
+    await session._request(device, {'op': 'action', 'action': 'point_click', 'delivery': 'foreground'})
+    for window in ('window:7', 'window:8'):
+        device._window_id = window
+        try:
+            await session._request(device, {'op': 'action', 'action': 'activate'})
+        except MuError as exc:
+            assert exc.code == 'PERMISSION_DENIED'
+        else:
+            raise AssertionError('撤回批准后不得派发')
+asyncio.run(actions())
+""", [])
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.count("fake dispatch") == 1
+            assert [event["window_id"] for event in consulted] == ["window:7", "window:7", "window:8"]
+            assert len({event["request_id"] for event in consulted}) == 3
+            assert len(prompts) == 1 and grants.state(1) == "denied"
+        finally:
+            await executor.close()
     asyncio.run(scenario())
 
 

@@ -6,6 +6,7 @@ import SwiftUI
     var panel: FloatingPanel?
     var status: NSStatusItem!
     var popover: NSPopover?
+    private var mainWindow: MainWindow?
     var compact = false
     let miniPresentation = MiniWindowPresentation()
     private var miniAnchor: NSPoint?
@@ -15,7 +16,7 @@ import SwiftUI
     var quitting = false
     private let globalShortcut = GlobalShortcut()
     private var shortcutResultCode = 0
-    var mainSize: NSSize { NSSize(width: 420, height: model.phase == .idle ? 380 : 520) }
+    var mainSize: NSSize { NSSize(width: 480, height: model.phase == .idle ? 600 : 680) }
     func refreshMainSize() {
         guard let popover else { return }
         popover.contentSize = mainSize
@@ -27,7 +28,7 @@ import SwiftUI
     private lazy var menuBehavior = MenuPopoverBehavior { [weak self] in self?.dismissMenuPopover() }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
         model.delegate = self
         miniPresentation.onChange = { [weak self] in self?.refreshCompact() }
         miniPresentation.keepExpanded = { [weak self] in
@@ -44,12 +45,16 @@ import SwiftUI
                 }
             })
         }
-        let menu = NSMenu(), root = NSMenuItem(), commands = NSMenu()
+        let menu = NSMenu(), root = NSMenuItem(title: "OpenGCUA", action: nil, keyEquivalent: ""), commands = NSMenu(title: "OpenGCUA")
         commands.addItem(withTitle: L("打开 OpenGCUA"), action: #selector(showMain), keyEquivalent: "1")
         commands.addItem(withTitle: L("呼出 / 收起 OpenGCUA（⌃⌥Space）"), action: #selector(togglePresentation), keyEquivalent: "")
         commands.addItem(withTitle: L("设置…"), action: #selector(showSettings), keyEquivalent: ",")
         commands.addItem(withTitle: L("对话记录…"), action: #selector(showHistory), keyEquivalent: "")
         commands.addItem(withTitle: L("Mac 控制权限…"), action: #selector(showPermissions), keyEquivalent: "")
+        commands.addItem(.separator())
+        commands.addItem(withTitle: L("隐藏主界面，显示进度气泡"), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        commands.addItem(withTitle: L("显示进度气泡"), action: #selector(showProgressBubble), keyEquivalent: "")
+        commands.addItem(withTitle: L("隐藏进度气泡"), action: #selector(hideProgressBubble), keyEquivalent: "")
         commands.addItem(.separator())
         commands.addItem(withTitle: L("退出 OpenGCUA"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         root.submenu = commands; menu.addItem(root)
@@ -61,7 +66,9 @@ import SwiftUI
         edit.addItem(withTitle: L("粘贴"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: L("全选"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editRoot.submenu = edit; menu.addItem(editRoot); NSApp.mainMenu = menu
-        status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        status.button?.title = "OG"
+        status.button?.imagePosition = .imageLeading
         status.button?.image = AppBrand.menuBarImage(description: "OpenGCUA")
         status.button?.toolTip = L("OpenGCUA · ⌃⌥Space 呼出 / 收起")
         status.button?.target = self; status.button?.action = #selector(statusClick)
@@ -80,11 +87,12 @@ import SwiftUI
             model.globalShortcutStatus = L("⌃⌥Space 未启用（%@）。请检查快捷键冲突后重新启动。", String(describing: shortcutResult))
             status.button?.toolTip = L("OpenGCUA · 全局快捷键未启用，请查看设置")
         }
-        if FirstLaunch.needsSetup() { showSetup() }
+        if FirstLaunch.needsSetup() { showSetup() } else { showMain() }
     }
     func languageChanged() {
         let titles = ["showMain": "打开 OpenGCUA", "togglePresentation": "呼出 / 收起 OpenGCUA（⌃⌥Space）",
                       "showSettings": "设置…", "showHistory": "对话记录…", "showPermissions": "Mac 控制权限…",
+                      "hide:": "隐藏主界面，显示进度气泡", "showProgressBubble": "显示进度气泡", "hideProgressBubble": "隐藏进度气泡",
                       "terminate:": "退出 OpenGCUA", "undo:": "撤销", "cut:": "剪切", "copy:": "复制", "paste:": "粘贴", "selectAll:": "全选"]
         func update(_ menu: NSMenu) {
             for item in menu.items {
@@ -113,7 +121,23 @@ import SwiftUI
         }
         historyWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
-    @objc func showMain() { expand() }
+    @objc func showMain() {
+        // Dock、应用菜单和重新打开均走独立窗口，不需要可见的菜单栏按钮。
+        dismissMenuPopover()
+        closeCompact()
+        miniPresentation.allowBubble()
+        if NSApp.isHidden { NSApp.unhideWithoutActivation() }
+        if mainWindow == nil {
+            let content = NSHostingView(rootView: MainView(model: model))
+            content.sizingOptions = []
+            let window = MainWindow(content: content)
+            window.delegate = self
+            mainWindow = window
+        }
+        let suppressed = model.compactHidesForComputerAction
+        if !suppressed { NSApp.activate(ignoringOtherApps: true) }
+        mainWindow?.present(suppressed: suppressed)
+    }
     @objc func showSettings() {
         dismissMenuPopover(); model.stopSpeech()
         if settingsWindow?.isVisible == true {
@@ -153,22 +177,54 @@ import SwiftUI
         togglePresentation()
     }
     @objc func togglePresentation() {
+        if mainWindow?.isVisible == true && mainWindow?.isMiniaturized != true {
+            collapse(automatically: true)
+            return
+        }
         if popover?.isShown == true || panel?.isVisible == true {
             closeCompact()
             popover?.performClose(nil)
         } else { expand() }
     }
     func expand() {
+        if mainWindow?.requested == true { showMain(); return }
         if setupWindow?.isVisible == true { showSetup(); return }
         model.stopSpeech(); compact = false; miniPresentation.update(requested: false, suppressed: false); panel?.orderOut(nil)
-        guard let button = status.button, let popover else { return }
+        guard status?.isVisible == true, let button = status?.button,
+              button.window?.screen != nil, let popover else { showMain(); return }
         NSApp.activate(ignoringOtherApps: true)
         refreshMainSize()
         if !popover.isShown { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
         popover.contentViewController?.view.window?.makeKey()
     }
-    func collapse() {
-        if !model.voiceMode { model.stopSpeech() }; compact = true; popover?.performClose(nil)
+    @objc func showProgressBubble() { collapse() }
+    @objc func hideProgressBubble() { closeCompact() }
+
+    func applicationWillHide(_ notification: Notification) {
+        mainWindow?.hide()
+        settingsWindow?.orderOut(nil)
+        historyWindow?.orderOut(nil)
+        setupWindow?.orderOut(nil)
+        MacPermissions.closeGuide()
+        collapse(automatically: true)
+    }
+    func applicationDidHide(_ notification: Notification) {
+        // 系统隐藏会连 NSPanel 一起隐藏；只恢复气泡，不恢复主窗口或激活应用。
+        guard compact, !quitting else { return }
+        NSApp.unhideWithoutActivation()
+        refreshCompact()
+    }
+    func windowDidMiniaturize(_ notification: Notification) {
+        if notification.object as? NSWindow === mainWindow { collapse(automatically: true) }
+    }
+
+    func collapse(automatically: Bool = false) {
+        if !automatically { miniPresentation.allowBubble() }
+        if !model.voiceMode { model.stopSpeech() }
+        compact = !miniPresentation.manuallyHidden
+        popover?.performClose(nil)
+        mainWindow?.hide()
+        guard compact else { refreshCompact(); return }
         if panel == nil {
             let p = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: FloatingPanel.iconSize, height: FloatingPanel.iconSize), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
             p.title = L("OpenGCUA · 执行状态")
@@ -198,13 +254,14 @@ import SwiftUI
             p.onCancelDetails = { [weak self] in self?.miniPresentation.dismiss() }
             panel = p
         }
+        if NSApp.isHidden && compact { NSApp.unhideWithoutActivation() }
         refreshCompact()
     }
     func closeCompact() {
         // Closing the presentation must not send a stop command to the task runtime.
         compact = false
         model.stopSpeech()
-        miniPresentation.update(requested: false, suppressed: false)
+        miniPresentation.hideBubble()
         panel?.orderOut(nil)
     }
     func refreshCompact() {
@@ -217,6 +274,7 @@ import SwiftUI
         default:
             status?.button?.image = AppBrand.menuBarImage(description: description)
         }
+        mainWindow?.updateOcclusion(model.compactHidesForComputerAction)
         guard let panel, !refreshingMini else { return }
         refreshingMini = true; defer { refreshingMini = false }
         miniPresentation.setPointerOperation(model.overlayPointerBusy)
@@ -229,7 +287,8 @@ import SwiftUI
         let iconRect = NSRect(x: anchor.x - FloatingPanel.iconSize, y: anchor.y, width: FloatingPanel.iconSize, height: FloatingPanel.iconSize)
         guard let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(iconRect) }) ?? NSScreen.main else { return }
         let placement = MiniWindowPlacement.fit(anchor: anchor, expanded: miniPresentation.expanded,
-                                                detailHeight: model.compactPanelHeight, screen: screen.visibleFrame)
+                                                detailHeight: model.compactPanelHeight, screen: screen.visibleFrame,
+                                                badgeWidth: FloatingPanel.progressWidth, badgeHeight: model.progressBubbleHeight)
         if miniPresentation.expandsUpward != placement.expandsUpward { miniPresentation.expandsUpward = placement.expandsUpward }
         panel.detailsExpanded = miniPresentation.expanded
         if !panel.detailsExpanded && panel.isKeyWindow { panel.makeFirstResponder(nil); panel.resignKey() }
@@ -239,17 +298,21 @@ import SwiftUI
     }
     func clampPanel() { refreshCompact() }
     func overlayWouldObstruct(_ event: [String: Any]) -> Bool {
-        guard let panel, panel.isVisible, let primary = NSScreen.screens.first,
+        guard let primary = NSScreen.screens.first,
               event["impact"] as? String == "pointer",
               let points = event["points"] as? [[String: Any]] else { return false }
-        let frame = NSRect(x: panel.frame.minX, y: primary.frame.maxY - panel.frame.maxY,
-                           width: panel.frame.width, height: panel.frame.height)
-        return OverlayOcclusion.intersects(points: points, frame: frame)
+        let windows: [NSWindow] = [panel, mainWindow].compactMap { $0 }
+        return windows.contains { window in
+            guard window.isVisible, !window.isMiniaturized else { return false }
+            let frame = NSRect(x: window.frame.minX, y: primary.frame.maxY - window.frame.maxY,
+                               width: window.frame.width, height: window.frame.height)
+            return OverlayOcclusion.intersects(points: points, frame: frame)
+        }
     }
     private func rememberMiniPosition() {
         guard let panel else { return }
         miniAnchor = NSPoint(x: panel.frame.maxX,
-                             y: miniPresentation.expanded && !miniPresentation.expandsUpward ? panel.frame.maxY - FloatingPanel.iconSize : panel.frame.minY)
+                             y: !miniPresentation.expandsUpward ? panel.frame.maxY - FloatingPanel.iconSize : panel.frame.minY)
         UserDefaults.standard.set([miniAnchor!.x, miniAnchor!.y], forKey: "floatingOrbAnchor")
     }
     func windowDidMove(_ notification: Notification) {
@@ -277,11 +340,12 @@ import SwiftUI
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if sender === panel { closeCompact() }
+        else if sender === mainWindow { collapse(automatically: true) }
         else { model.stopSpeech(); sender.orderOut(nil) }
         return false
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if FirstLaunch.needsSetup() { showSetup() } else { expand() }
+        showMain()
         return true
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

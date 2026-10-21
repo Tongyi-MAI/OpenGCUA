@@ -187,6 +187,10 @@ class _ControlExit(SystemExit):
     pass
 
 
+class _AskUserDisabledError(RuntimeError):
+    code = "ASK_USER_DISABLED"
+
+
 class _LimitedStream(io.TextIOBase):
     encoding = "utf-8"
     errors = "replace"
@@ -1924,6 +1928,9 @@ def terminate(status: str = "success", answer: Any = None) -> None:
 
 
 def ask_user(question: Any) -> None:
+    enabled = getattr(_REQUEST_CONTEXT, "ask_user_enabled", _CONFIG.get("ask_user_enabled", True))
+    if not enabled:
+        raise _AskUserDisabledError("ASK_USER_DISABLED：host 已禁用 ask_user；不能请求用户答复，请继续执行或明确报告无法完成。")
     _check_active_request()
     value = str(question).strip()
     if not value:
@@ -2757,6 +2764,9 @@ def _bootstrap(loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
     )
     skill_registry.discover()
     skill_runtime = SkillRuntime(skill_registry, _emit)
+    skill_runtime.configure(
+        _CONFIG.get("selected_skill"), _CONFIG.get("skill_digest"), _CONFIG.get("skill_revision", 0),
+    )
     namespace: dict[str, Any] = {
         "__name__": "__main__",
         "__builtins__": __builtins__,
@@ -2913,7 +2923,7 @@ def _execute(source: str | list[str], namespace: dict[str, Any], *, loop=None) -
     except BaseException as exc:
         ok = False
         error = type(exc).__name__
-        stop_reason = phase
+        stop_reason = "ask_user_disabled" if getattr(exc, "code", None) == "ASK_USER_DISABLED" else phase
         stopped_block = active_block or stopped_block
         exit_code = int(exc.code) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
         error_stream.write(_format_exception(exc))
@@ -2993,6 +3003,7 @@ def _worker_readline(loop: asyncio.AbstractEventLoop, buffer: bytearray) -> byte
 
 def _worker_requests(loop, namespace) -> int:
     global _CONFIG, _SDK_REVIVE_PENDING
+    skill_runtime = namespace.get("skills") if namespace is not None else None
     buffer = bytearray()
     _CONTROL_SOCKET.settimeout(1.0)
     with _CONTROL_SOCKET:
@@ -3008,18 +3019,29 @@ def _worker_requests(loop, namespace) -> int:
             _REQUEST_CONTEXT.generation = request["config"].get("rpc_generation", 0)
             fatal = False
             if namespace is None:
-                _CONFIG = request["config"]
+                _CONFIG = dict(request["config"])
+            # 仅从专用 host 控制帧同步；普通 cell 变量和旧 _CONFIG 值不能覆盖。
+            _CONFIG.update({key: request["config"].get(key, default) for key, default in (
+                ("ask_user_enabled", True), ("selected_skill", None),
+                ("skill_digest", None), ("skill_revision", 0),
+            )})
+            _REQUEST_CONTEXT.ask_user_enabled = request["config"].get("ask_user_enabled", True)
             with _RequestOutput(request_id):
                 try:
                     _reset_round(request.get("todo_items") or [])
                     if namespace is None:
                         namespace = _bootstrap(loop)
+                        skill_runtime = namespace.get("skills")
+                    if skill_runtime is not None:
+                        skill_runtime.configure(
+                            _CONFIG["selected_skill"], _CONFIG["skill_digest"], _CONFIG["skill_revision"],
+                        )
+                        namespace["skills"] = skill_runtime
+                        if request.get("reset_skills") or request.get("reset_task"):
+                            skill_runtime.reset_task()
                     # 每轮更新账本内容，始终使用同一个 todo 对象。
                     namespace["todo"] = todo
-                    if request.get("reset_skills"):
-                        namespace["skills"].reset_task()
                     if request.get("reset_task"):
-                        namespace["skills"].reset_task()
                         session, device = loop.run_until_complete(_reset_sdk_session())
                         namespace.update(mu=session, device=device, ui=device.ui)
                     if request.get("reset_output_context") and _MAI_SESSION is not None:
@@ -3045,6 +3067,7 @@ def _worker_requests(loop, namespace) -> int:
             _send_frame({"kind": "done", "request_id": request_id, "event": end, "fatal": fatal})
             del _REQUEST_CONTEXT.request_id
             del _REQUEST_CONTEXT.generation
+            del _REQUEST_CONTEXT.ask_user_enabled
             if fatal:
                 return 1
 

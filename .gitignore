@@ -21,3 +21,4 @@ target/
 node_modules/
 /packages/sdk/adapters/android/out/
 HANDOFF.md
+docs/*

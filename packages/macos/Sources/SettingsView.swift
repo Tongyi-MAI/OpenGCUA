@@ -60,6 +60,11 @@ import SwiftUI
                 LabeledContent(L("全局快捷键"), value: model.globalShortcutStatus).textSelection(.enabled)
             } header: { Text(L("键盘")) }
             footer: { Text(L("开启后，Shift+Enter 换行；关闭后，Enter 换行、⌘Enter 发送。中文输入法确认候选词时不会发送。")) }
+            Section(L("执行详情显示")) {
+                Toggle(L("显示推理"), isOn: $editor.draft.showReasoning)
+                Toggle(L("显示代码"), isOn: $editor.draft.showCode)
+                Text(L("仅控制界面显示，不改变模型请求或执行。")).font(.caption).foregroundStyle(.secondary)
+            }
             Section("OpenGCUA") {
                 Button(L("打开设置助理…")) { onClose(); model.delegate?.showSetup() }
                 Button(L("打开任务记录文件夹"), systemImage: "folder") { NSWorkspace.shared.open(model.dataDirectory) }

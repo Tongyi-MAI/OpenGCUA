@@ -57,6 +57,7 @@ enum TaskPhase: String {
 
 @MainActor final class AppModel: ObservableObject {
     @Published var preferences = Preferences.load()
+    @Published var controls = SessionControlsState()
     @Published var instruction = ""
     @Published var phase: TaskPhase = .idle
     @Published var ready = false
@@ -146,6 +147,8 @@ enum TaskPhase: String {
             self.error = L("运行组件已退出，可以重新连接。")
             if self.phase.active { self.finish(.failed, text: L("运行组件意外退出。部分操作可能已生效，请核实后再试。")) }
             self.conversationOpen = false
+            self.resetSessionControls(clearCatalog: true)
+            self.taskID = ""
             self.resetCommandID = ""; self.pendingHistoryRecord = nil; self.sendingMessage = false
             self.delegate?.runtimeExited()
         }
@@ -186,6 +189,12 @@ enum TaskPhase: String {
     var tint: Color { phase == .failed || phase == .waiting ? .orange : phase == .completed ? .green : .accentColor }
     var showsVoiceTaskProgress: Bool { phase != .idle }
     var taskProgressTitle: String {
+        if disconnected { return L("连接已断开") }
+        if controls.compactionRunning { return L("正在整理上下文") }
+        if controls.interrupted { return L("本轮已中止") }
+        if controls.interruptPending { return L("正在中止本轮…") }
+        if !controls.approvals.isEmpty { return L("等待前台审批") }
+        if !controls.stageText.isEmpty && phase == .running { return controls.stageText }
         guard phase == .running else { return phase.label }
         switch executionPhase {
         case "planning": return L("思考中")
@@ -198,14 +207,21 @@ enum TaskPhase: String {
         default: return L("正在准备")
         }
     }
+    var currentIntent: String {
+        let preview = controls.intentPreview.trimmingCharacters(in: .whitespacesAndNewlines)
+        return preview.isEmpty ? intent : preview
+    }
     var taskProgressDetail: String {
         if phase == .waiting { return question }
         if !phase.active { return answer.isEmpty ? taskTitle : answer }
-        if executionPhase == "execution", !intent.isEmpty { return intent }
+        if !currentIntent.isEmpty { return currentIntent }
         if !recentAction.isEmpty { return L("最近动作：") + recentAction }
         return taskTitle
     }
     func connect() {
+        guard !bridge.running else { return }
+        resetSessionControls(clearCatalog: true)
+        conversationOpen = false; ready = false; taskID = ""
         disconnected = false; error = ""
         do { try bridge.launch(dataDirectory: dataDirectory) }
         catch { self.error = error.localizedDescription; disconnected = true }
@@ -218,6 +234,7 @@ enum TaskPhase: String {
             MacPermissions.showGuide(model: self)
             return
         }
+        let skillOverride = controls.skillOverride
         do {
             var config = try preferences.taskConfiguration()
             let endpoint = config["llm_base_url"] as! String
@@ -225,6 +242,19 @@ enum TaskPhase: String {
             let key = fileKey.isEmpty ? try CredentialStore.read(endpoint) : fileKey
             guard !key.isEmpty || config["allow_empty_api_key"] as? Bool == true else { delegate?.showSettings(); error = L("请在配置文件或此服务对应的钥匙串中保存 API Key。"); return }
             config["api_key"] = key
+            // 只有用户显式选择才覆盖；未指定时由 host 恢复历史 Skill（含摘要校验）或使用默认值。
+            config["selected_skill"] = nil; config["selected_skill_override"] = nil
+            if skillOverride != .unspecified {
+                config["selected_skill_override"] = true
+                config["selected_skill"] = skillOverride.name.map { $0 as Any } ?? NSNull()
+            }
+            config["ask_user_enabled"] = controls.askUserEnabled
+            config["foreground_allowed"] = false
+            let initialAskUser = controls.askUserEnabled
+            resetSessionControls()
+            controls.askUserEnabled = initialAskUser
+            controls.selectedSkill = skillOverride.name
+            controls.turnStartedAt = Date()
             if !voiceMode { stopSpeech() }
             let resuming = !resumeRunPath.isEmpty
             taskID = UUID().uuidString
@@ -245,10 +275,15 @@ enum TaskPhase: String {
             if resuming { request["resume_path"] = resumeRunPath }
             if let commandID { request["command_id"] = commandID }
             // Start in the compact presentation; each pointer operation guards its own footprint.
-            delegate?.collapse()
+            delegate?.collapse(automatically: true)
             try bridge.send(request)
             persistCurrent()
-        } catch { self.error = error.localizedDescription; if phase == .starting { finish(.failed, text: error.localizedDescription) } }
+        } catch {
+            self.error = error.localizedDescription
+            if phase == .starting { finish(.failed, text: error.localizedDescription) }
+            // 未送达 host 的启动不能吞掉用户的显式 Skill 选择。
+            controls.skillOverride = skillOverride; controls.selectedSkill = skillOverride.name
+        }
     }
     func command(_ name: String) {
         let previousPhase = phase
@@ -271,6 +306,22 @@ enum TaskPhase: String {
     }
     func receive(_ event: [String: Any]) {
         let kind = event["event"] as? String ?? ""
+        if let id = event["task_id"] as? String {
+            let previousTurn = controls.turnIndex
+            guard !taskID.isEmpty, id == taskID, controls.accept(event) else { return }
+            if controls.turnIndex > previousTurn {
+                overlayInteractions.removeAll(); overlayOcclusions.removeAll()
+            }
+        } else if kind == "skills_catalog" {
+            receiveCatalog(event); delegate?.refreshCompact(); return
+        } else if kind == "control_result" {
+            _ = receiveControlEvent(event); delegate?.refreshCompact(); return
+        } else if !["ready", "command_ack", "error"].contains(kind) { return }
+        if event["task_id"] == nil, let id = event["command_id"] as? String,
+           ["command_ack", "error"].contains(kind), controls.pending[id] == nil, id != resetCommandID { return }
+        if ["command_ack", "error"].contains(kind), receiveControlAcknowledgement(event) {
+            delegate?.refreshCompact(); return
+        }
         if let id = event["command_id"] as? String, id == resetCommandID,
            kind == "command_ack" || kind == "error" {
             resetCommandID = ""; sendingMessage = false
@@ -290,7 +341,9 @@ enum TaskPhase: String {
         }
         if kind == "ready" {
             guard event["protocol"] as? Int == 1 else { error = L("运行组件版本不兼容。"); return }
-            ready = true; return
+            ready = true
+            refreshSkills()
+            return
         }
         if kind == "error" {
             if let id = event["task_id"] as? String, id != taskID { return }
@@ -304,7 +357,12 @@ enum TaskPhase: String {
             delegate?.refreshCompact()
             return
         }
-        guard event["task_id"] as? String == taskID else { return }
+        guard !taskID.isEmpty, event["task_id"] as? String == taskID else { return }
+        if receiveControlEvent(event) {
+            if voiceMode && kind == "interrupted" { syncVoiceContext() }
+            delegate?.refreshCompact()
+            return
+        }
         switch kind {
         case "overlay":
             let id = event["guard_id"] as? String ?? ""
@@ -324,27 +382,53 @@ enum TaskPhase: String {
         case "state":
             if let state = event["state"] as? String, let value = TaskPhase(rawValue: state) { phase = value }
         case "message":
-            guard let id = event["message_id"] as? String, let text = sentMessages[id] else { return }
+            guard let id = event["message_id"] as? String else { return }
+            let text = sentMessages[id] ?? event["text"] as? String ?? ""
             let state = event["state"] as? String
-            appendChat(id: id, text: text, isUser: true)
+            if let previous = controls.messageStates[id], ["consumed", "applied", "cancelled"].contains(previous) { return }
+            controls.messageStates[id] = state
+            if state != "cancelled" { appendChat(id: id, text: text, isUser: true) }
+            if state == "queued", !controls.queue.contains(where: { $0.id == id }) {
+                controls.queue.append(QueuedInput(id: id, text: text, kind: event["kind"] as? String ?? "message"))
+            }
+            if state == "consumed" || state == "applied" || state == "cancelled" { controls.queue.removeAll { $0.id == id } }
             if id == awaitingMessageID {
                 sendingMessage = false
                 if messageDraft == text { messageDraft = "" }
             }
-            if state == "applied" {
-                sentMessages[id] = nil; sentMessageOrder.removeAll { $0 == id }; messageStatus = L("补充要求已进入规划")
-            } else { messageStatus = phase == .paused ? L("已收到，继续任务后处理") : L("已收到，将在下一轮规划中处理") }
+            if state == "applied" || state == "consumed" || state == "cancelled" {
+                sentMessages[id] = nil; sentMessageOrder.removeAll { $0 == id }
+                messageStatus = state == "cancelled" ? L("队列消息已取消") : L("补充要求已进入规划")
+            } else { messageStatus = phase == .paused || controls.queueSuspended ? L("已收到，继续任务后处理") : L("已收到，将在下一轮规划中处理") }
+            if state == "cancelled", controls.awaitingNextTurn, sentMessages.isEmpty {
+                // 触发下一轮的消息被取消：恢复发送前的阶段与草稿，不再等待不会开始的轮次。
+                controls.awaitingNextTurn = false; controls.turnEndedAt = Date(); sendingMessage = false
+                if messageDraft.isEmpty { messageDraft = text }
+                if let previous = followUpPreviousPhase { phase = previous; followUpPreviousPhase = nil }
+            }
         case "reply":
             executionPhase = ""
             phase = .running
             appendChat(id: "reply:" + questionID, text: event["text"] as? String ?? reply, isUser: true)
             sendingMessage = false; reply = ""; questionID = ""; question = ""; messageStatus = L("回复已发送")
         case "progress":
+            if controls.sessionCompaction(event) {
+                // 轮次之间的手动压缩只更新压缩显示，不改写会话阶段或步骤。
+                controls.compactionRunning = true; controls.compacting = true
+                controls.stage = "compaction"; controls.stageText = ""
+                break
+            }
             step = event["step"] as? Int ?? step
             executionPhase = event["phase"] as? String ?? executionPhase
+            controls.stage = executionPhase; controls.stageText = ""
+            controls.compacting = controls.compactionRunning || executionPhase == "compaction"
             if executionPhase == "execution", !intent.isEmpty { recentAction = intent }
-            if executionPhase == "planning" { intent = "" }
-        case "intent": intent = event["text"] as? String ?? ""
+            if executionPhase == "planning" {
+                intent = ""; controls.intentPreview = ""; controls.intentComplete = false
+            }
+        case "intent":
+            intent = event["text"] as? String ?? ""
+            controls.intentPreview = intent; controls.intentComplete = true
         case "skill_loaded":
             guard let name = event["name"] as? String, !name.isEmpty else { return }
             appendChat(id: UUID().uuidString, text: L("已加载 Skill：") + name, isUser: false)
@@ -362,6 +446,8 @@ enum TaskPhase: String {
             appendChat(id: "question:" + questionID, text: question, isUser: false)
         case "turn_started":
             currentTurnInstruction = event["text"] as? String ?? ""
+            sendingMessage = false
+            if messageDraft == currentTurnInstruction { messageDraft = "" }
             followUpPreviousPhase = nil
             phase = .running; answer = ""; intent = ""; recentAction = ""; executionPhase = ""
             persistCurrent()
@@ -392,6 +478,7 @@ enum TaskPhase: String {
     func finish(_ state: TaskPhase, text: String, keepingConversation: Bool = false) {
         overlayInteractions.removeAll(); overlayOcclusions.removeAll()
         conversationOpen = keepingConversation
+        completeControlTurn(keepingSession: keepingConversation)
         followUpPreviousPhase = nil
         if !keepingConversation && conversationMessages.last?.text != text {
             appendChat(id: UUID().uuidString, text: text, isUser: false)
@@ -419,7 +506,7 @@ enum TaskPhase: String {
         catch { self.error = L("任务记录保存失败：") + error.localizedDescription }
     }
     func canOpenConversation(_ record: TaskRecord) -> Bool {
-        resetCommandID.isEmpty && !sendingMessage && (record.id == currentConversationID || !phase.active)
+        resetCommandID.isEmpty && !sendingMessage && (record.id == currentConversationID || canSwitchSession)
     }
     @discardableResult func openConversation(_ record: TaskRecord) -> Bool {
         guard canOpenConversation(record) else { error = L("请先停止当前任务，再切换对话。"); return false }
@@ -461,7 +548,7 @@ enum TaskPhase: String {
         delegate?.refreshCompact()
     }
     func reset() {
-        guard !phase.active, resetCommandID.isEmpty else { return }
+        guard canSwitchSession, resetCommandID.isEmpty else { return }
         guard conversationOpen else { clearConversation(restoreNewDraft: true); return }
         let id = UUID().uuidString
         do {
@@ -470,6 +557,7 @@ enum TaskPhase: String {
         } catch { self.error = error.localizedDescription }
     }
     private func clearConversation(restoreNewDraft: Bool = false) {
+        resetSessionControls()
         conversationID = ""; resumeRunPath = ""; pendingHistoryRecord = nil
         conversationOpen = false; taskID = ""; conversationTurns = []; conversationMessages = []; currentTurnInstruction = ""
         messageDraft = restoreNewDraft ? newConversationDraft : ""
@@ -496,17 +584,22 @@ enum TaskPhase: String {
     var compactHidesForComputerAction: Bool {
         !overlayOcclusions.isEmpty
     }
+    var foregroundWarning: String {
+        controls.foregroundAllowed ? L("前台授权中：请勿操作电脑，以免打断 Agent 当前行为。") : ""
+    }
+    var progressBubbleHeight: CGFloat { foregroundWarning.isEmpty ? 44 : 72 }
     var compactPanelHeight: CGFloat {
         let content: CGFloat
         if voiceMode { content = showsCompactResult ? 334 : showsVoiceTaskProgress ? 274 : 208 }
         else { content = showsCompactResult || phase == .waiting ? 248 : phase == .paused ? 204 : phase == .idle ? 156 : 164 }
-        return content + (error.isEmpty ? 0 : 32)
+        let intentHeight: CGFloat = !voiceMode && phase.active && !currentIntent.isEmpty ? 28 : 0
+        return content + intentHeight + (foregroundWarning.isEmpty ? 0 : 32) + (error.isEmpty ? 0 : 32) + (controls.approvals.isEmpty ? 0 : 24) + (controls.result.isEmpty ? 0 : 18)
     }
     var inputText: String {
         get { phase == .waiting ? reply : messageDraft }
         set { if phase == .waiting { reply = newValue } else { messageDraft = newValue } }
     }
-    var inputPlaceholder: String { phase == .waiting ? L("回复这个问题…") : phase.active ? L("补充要求或调整任务…") : conversationOpen || restoresHistory ? L("继续对话…") : L("输入一个新任务…") }
+    var inputPlaceholder: String { phase == .waiting ? L("回复这个问题…") : phase.active ? L("补充消息…") : conversationOpen || restoresHistory ? L("继续对话…") : L("在此输入…") }
     var canSendInput: Bool { ready && !sendingMessage && !recording && !speechPending && phase != .stopping && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     func sendInput() {
         guard canSendInput else { return }
@@ -517,13 +610,14 @@ enum TaskPhase: String {
         if phase.active || conversationOpen {
             let id = UUID().uuidString
             let previousPhase = phase
+            let previousControls = controls
             do {
-                if !phase.active { followUpPreviousPhase = phase; phase = .starting }
+                if !phase.active { prepareControlTurn(); followUpPreviousPhase = phase; phase = .starting }
                 delegate?.refreshCompact()
                 try bridge.send(["command": "message", "task_id": taskID, "message_id": id, "text": text])
                 sentMessages[id] = text; sentMessageOrder.append(id); awaitingMessageID = id; sendingMessage = true
                 messageDraft = text; messageStatus = L("正在发送…")
-            } catch { phase = previousPhase; followUpPreviousPhase = nil; self.error = error.localizedDescription; delegate?.refreshCompact() }
+            } catch { phase = previousPhase; controls = previousControls; followUpPreviousPhase = nil; self.error = error.localizedDescription; delegate?.refreshCompact() }
         } else {
             instruction = text; start()
             if phase == .starting { messageDraft = "" }
@@ -597,6 +691,7 @@ enum TaskPhase: String {
         let id = UUID().uuidString
         let previousPhase = phase
         let wasSending = sendingMessage
+        let previousControls = controls
         return await withCheckedContinuation { continuation in
             voiceReceipts[id] = continuation
             voiceReceiptTimeouts[id] = Task { [weak self] in
@@ -613,7 +708,7 @@ enum TaskPhase: String {
                     try bridge.send(["command": "reply", "task_id": taskID, "question_id": questionID, "text": call.text, "command_id": id])
                 } else if phase.active || conversationOpen {
                     let messageID = UUID().uuidString
-                    if !phase.active { followUpPreviousPhase = phase; phase = .starting }
+                    if !phase.active { prepareControlTurn(); followUpPreviousPhase = phase; phase = .starting }
                     delegate?.refreshCompact()
                     try bridge.send(["command": "message", "task_id": taskID, "message_id": messageID, "text": call.text, "command_id": id])
                     sentMessages[messageID] = call.text; sentMessageOrder.append(messageID)
@@ -624,7 +719,7 @@ enum TaskPhase: String {
                 }
                 delegate?.refreshCompact()
             } catch {
-                phase = previousPhase; sendingMessage = wasSending; followUpPreviousPhase = nil
+                phase = previousPhase; controls = previousControls; sendingMessage = wasSending; followUpPreviousPhase = nil
                 delegate?.refreshCompact()
                 resolveVoiceReceipt(id, result: ["accepted": false, "reason": error.localizedDescription])
             }

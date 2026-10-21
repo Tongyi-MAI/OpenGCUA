@@ -1,4 +1,5 @@
 """Standalone relocation and native protocol smoke test; no GUI or model calls."""
+import argparse
 import json
 import os
 import plistlib
@@ -10,13 +11,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
-    source = ROOT / "build/OpenGCUA.app"
-    with tempfile.TemporaryDirectory(prefix="OpenGCUA relocation ", dir=ROOT / "build") as stage:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--build-dir", type=Path, default=ROOT / "build")
+    build_dir = parser.parse_args().build_dir.resolve()
+    source = build_dir / "OpenGCUA.app"
+    with tempfile.TemporaryDirectory(prefix="OpenGCUA relocation ", dir=build_dir) as stage:
         bundle = Path(stage) / "Moved App/OpenGCUA.app"
         subprocess.run(["ditto", str(source), str(bundle)], check=True)
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(bundle)], check=True)
         resources = bundle / "Contents/Resources"
         info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+        assert info["LSUIElement"] is False, "Dock 入口不能被 bundle 配置隐藏"
         assert info["CFBundleDevelopmentRegion"] == "en"
         assert set(info["CFBundleLocalizations"]) >= {"en", "zh-Hans"}
         for language in ("en", "zh-Hans"):
