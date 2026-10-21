@@ -71,6 +71,7 @@ jobs:
             packages/harness/runtime/tests/test_context_metrics.py \
             packages/harness/runtime/tests/test_context_risk.py \
             packages/harness/runtime/tests/test_context_status.py \
+            packages/harness/runtime/tests/test_tui_pty.py \
             packages/harness/runtime/tests/test_sdk_ax_metadata.py \
             packages/harness/runtime/tests/test_dingtalk_skill_contract.py -q -p no:cacheprovider
       - name: Test localization and system language defaults
