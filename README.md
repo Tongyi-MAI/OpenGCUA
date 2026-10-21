@@ -173,46 +173,6 @@ keep the compatible plain-text interface.
 bash packages/harness/runtime/start_demo.sh
 ```
 
-The visual terminal keeps an input box available while the agent works. Press Enter to queue a
-message for after the current turn, or Alt/Option+Enter for a newline. `/queue` shows pending
-messages; after Ctrl-C aborts a turn, `/queue send` resumes the paused queue or `/queue clear`
-discards it. A new correction can be entered immediately after the abort in the same task.
-Type `/` to browse terminal commands, use ↑/↓ to select one, and Tab to complete it. Enter
-runs a complete command or inserts one that still needs an argument. `/status` shows the current
-session, model, step, queue, and foreground-permission state.
-Reasoning and generated code are hidden by default; `/reasoning on`, `/code on`, and `/help`
-control the display. A second Ctrl-C during interruption force-stops the current worker.
-`/exit` or Ctrl-D ends the program, including during an active turn; Ctrl-C only interrupts the
-turn and keeps the conversation open.
-Already-sent application or shell operations are not rolled back.
-
-`/resume` opens a selector for up to ten recent compatible runs (↑/↓, Enter, Esc); `/resume <run directory>`
-uses the full path directly, including spaces. The TUI shows the saved session, last task, status, and
-restored turn/TODO counts, then waits for a **new message**. It never reruns the saved task by selecting it.
-The old runtime closes before the selected run starts; Python variables, SDK/UI handles, and foreground
-permission do not survive. Old queued messages remain paused until `/queue send` or `/queue clear`.
-`/compaction` attempts one LLM history summary now, even below the automatic threshold or when automatic
-compaction is disabled. It needs at least two eligible completed turns and commits only a valid summary
-that shortens the next model input. Ctrl-C cancels the attempt without replacing prior history. Commands
-entered during an active turn wait in the same queue as messages; they do not answer agent questions or
-approve foreground access. These slash controls require the visual TUI; `--ui plain` remains line-oriented.
-
-The macOS agent defaults to background-first operation. Its dedicated browser has a visible
-window but starts only when a web task needs it; webpage actions use DOM/Playwright first.
-Native apps use accessibility controls before window-scoped background input. Background SDK
-visual clicks do not request foreground consent. A foreground SDK action or window activation
-pauses for an Allow/Reject choice; Reject is the default. Allow covers repeated foreground
-operations until that task ends, even across windows. A rejected task cannot silently retry the
-choice; the agent must explicitly re-request it. Use `--disable-background-mode` to opt out, or
-enable demo mode when recording deliberately visible foreground actions. This gate only covers
-SDK actions made through this harness: arbitrary Python, Bash, AppleScript, and application or
-website behavior are not OS-level isolated. On macOS, the isolated Chromium browser is launched
-without activation and new tabs are created without requesting focus. In background mode,
-recognized GET search forms that target a new tab submit in the existing tab; other recognized
-new-tab links/forms stop
-before activation and ask for foreground permission. Script-created pop-ups and system dialogs
-can still interrupt you; demo mode intentionally uses the foreground.
-
 If you see `PERMISSION_DENIED`, `DEVICE_OFFLINE`, a native-extension import error, or a recording
 problem, use the [error-indexed troubleshooting guide](QUICKSTART.md#troubleshooting). For SDK-only
 installation and wheel builds, see the [SDK guide](packages/sdk/README.md#install). The standalone
