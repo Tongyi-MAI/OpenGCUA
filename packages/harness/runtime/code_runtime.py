@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import functools
 import inspect
 import base64
 import io
@@ -53,6 +54,8 @@ _CONTROL_SOCKET: socket.socket | None = None
 _CONTROL_LOCK = threading.Lock()
 _HOST_ACK_LOCK = asyncio.Lock()
 _JOURNAL_NATIVE_SCOPE: ContextVar[tuple | None] = ContextVar("journal_native_scope", default=None)
+# 公开 mutation 入口的可变探针；traced/journal_call 入口置 reached，之后的异常不再声称“未派发”。
+_PUBLIC_ACTION_PROBE: ContextVar[dict | None] = ContextVar("public_action_probe", default=None)
 _JOURNAL_SESSIONS: list[Any] = []
 _JOURNAL_BROKEN = False
 # 记忆握手 ACK 未知时 fence 控制流；读线程计数用于发现被取消后仍在读的旧握手。
@@ -420,7 +423,11 @@ def gui_action_scope(device: Any, message: dict[str, Any]) -> tuple[str, str] | 
 
 
 async def request_foreground_permission(window: Any, reason: str) -> bool:
-    """Explicitly re-request a task-level grant after a previous rejection."""
+    """Explicitly re-request the host foreground grant after a previous rejection.
+
+    The grant scope is host-defined (native App host: session; terminal host: task);
+    it is not per window.
+    """
     _check_active_request()
     app_id = getattr(window, "_app_id", None)
     window_id = getattr(window, "_window_id", None)
@@ -2573,6 +2580,9 @@ def _install_journal_direct_calls(session):
                  "add_linux", "add_browser"}
 
     async def journal_call(core, request):
+        probe = _PUBLIC_ACTION_PROBE.get()
+        if probe is not None:
+            probe["reached"] = True
         permit = _ACTIVE_REQUEST.get()
         if (not _CONFIG.get("journal_actions", False) or permit is None or not permit.get("active")
                 or request.get("op") not in mutations):
@@ -2607,6 +2617,102 @@ def _install_journal_direct_calls(session):
             for name, value in tuple(vars(module).items()):
                 if value is original_call:
                     setattr(module, name, journal_call)
+
+
+# 已核对源码：下列公开 mutation 的每条派发路径都经 handle._session._request（即 traced），
+# 方法内部只有同步 native 状态校验。Apps.launch/Transfers.copy/Session.unregister 直接走 call，
+# Browser/Tab 未逐条核对，均不纳入“未进 traced 即未派发”的证明。
+_PUBLIC_MUTATIONS = (
+    ("mai_ui.unified.ui", "AX", ("click", "set_text", "select_text", "perform", "scroll")),
+    ("mai_ui.unified.ui", "Vision", ("click", "swipe", "long_press", "scroll", "move", "drag",
+                                    "button_down", "button_up", "wheel")),
+    ("mai_ui.unified.ui", "Input", ("text", "press_key", "key_down", "key_up", "release_all")),
+    ("mai_ui.unified.resources", "App", ("activate", "launch")),
+    ("mai_ui.unified.resources", "Macos", ("set_frame", "invoke_menu")),
+    ("mai_ui.unified.resources", "Android", ("press",)),
+    ("mai_ui.unified.services", "Files", ("write", "mkdir", "remove", "move")),
+    ("mai_ui.unified.services", "Shell", ("run",)),
+    ("mai_ui.unified.services", "Processes", ("run",)),
+    ("mai_ui.unified.services", "Clipboard", ("write",)),
+)
+
+
+def _record_public_precheck(session, topic, exc, *, signature=False):
+    """派发前异常只记一条事实；消息只用于白名单匹配，不进 arguments/error，失败也绝不影响原异常。"""
+    try:
+        code = getattr(exc, "code", None)
+        code = code if isinstance(code, str) and code else type(exc).__name__
+        error = {"code": code, "message": str(exc)[:4096]}
+        if signature:
+            error["signature_mismatch"] = True
+        _record_tool("mai_ui." + topic, {}, error=code, error_code=code,
+                     rule_feedback=action_feedback(topic, sdk_session_id=getattr(session, "id", None),
+                                                   not_dispatched=True, phase="python_precheck",
+                                                   help_topic=topic, error=error))
+    except Exception:  # noqa: BLE001 - 反馈发布失败不影响业务异常，也不重试
+        pass
+
+
+async def _observe_public_mutation(session, topic, coroutine):
+    probe = {"reached": False}
+    token = _PUBLIC_ACTION_PROBE.set(probe)
+    try:
+        return await coroutine
+    except Exception as exc:
+        if not probe["reached"]:
+            _record_public_precheck(session, topic, exc)
+        raise
+    finally:
+        _PUBLIC_ACTION_PROBE.reset(token)
+
+
+def _public_mutation_wrapper(function, topic):
+    @functools.wraps(function)
+    def wrapper(self, *args, **kwargs):
+        owner = getattr(self, "_handle", None)
+        if owner is None:
+            owner = getattr(self, "_device", None)
+        if owner is None:
+            owner = self
+        session = getattr(owner, "_session", None)
+        # 未 instrument 的 session 与 SDK 内部嵌套调用（App.launch→activate 等）原样透传。
+        if (_PUBLIC_ACTION_PROBE.get() is not None
+                or not getattr(getattr(session, "_request", None), "_feedback_probe", False)):
+            return function(self, *args, **kwargs)
+        try:
+            coroutine = function(self, *args, **kwargs)
+        except TypeError as exc:
+            # async def 的调用只绑定参数；协程尚未创建，必然未派发。仍同步抛出，与原方法一致。
+            _record_public_precheck(session, topic, exc, signature=True)
+            raise
+        return _observe_public_mutation(session, topic, coroutine)
+
+    wrapper._feedback_public_mutation = True
+    mark = getattr(inspect, "markcoroutinefunction", None)
+    return mark(wrapper) if mark else wrapper
+
+
+def _install_public_precheck_feedback() -> None:
+    """类级一次性包装；只对已 instrument 的 session 生效，不改参数、返回值或异常对象。"""
+    import importlib
+    for module_name, class_name, methods in _PUBLIC_MUTATIONS:
+        try:
+            cls = getattr(importlib.import_module(module_name), class_name)
+        except (ImportError, AttributeError):
+            continue
+        for method in methods:
+            original = cls.__dict__.get(method)
+            if (original is None or getattr(original, "_feedback_public_mutation", False)
+                    or not inspect.iscoroutinefunction(original)):
+                continue
+            setattr(cls, method, _public_mutation_wrapper(original, f"{class_name}.{method}"))
+
+
+def _receipt_dict(value):
+    if hasattr(value, "__dataclass_fields__"):
+        from dataclasses import asdict
+        value = asdict(value)
+    return value if isinstance(value, dict) else None
 
 
 def _instrument_sdk_session(session: Any) -> None:
@@ -2702,6 +2808,12 @@ def _instrument_sdk_session(session: Any) -> None:
                 from mai_ui import MuError as _MuError
                 raise _MuError("SESSION_RESET", notice)
             audit_error = str(code or type(exc).__name__) if journaled else str(exc)
+            feedback_mutation = operation != "observe" and not journaled and _sdk_mutation(message)
+            call_id = (_journal_call_id(message) or (None, None))[1]
+            fact_receipt = _receipt_dict(getattr(exc, "receipt", None))
+            if fact_receipt is None and feedback_mutation and call_id:
+                # 非 journal 路径也读同一 native status 作为反馈依据；legacy receipt 字段保持原样。
+                fact_receipt = await _journal_receipt(session, call_id)
             if code == "DEVICE_OFFLINE" and not journaled:
                 try:
                     offline_after = endpoint.offline if endpoint is not None else None
@@ -2722,10 +2834,10 @@ def _instrument_sdk_session(session: Any) -> None:
                 outcome_unknown=code == "ACTION_OUTCOME_UNKNOWN" or getattr(exc, "journal_outcome_unknown", False),
                 rule_feedback=(observation_feedback(name, {"components": [{"status": "unavailable", "error": code}]})
                                if operation == "observe" else action_feedback(
-                                   name, action_id=(_journal_call_id(message) or (None, None))[1],
-                                   sdk_session_id=getattr(session, "id", None), receipt=getattr(exc, "receipt", None),
+                                   name, action_id=call_id,
+                                   sdk_session_id=getattr(session, "id", None), receipt=fact_receipt,
                                    error={"code": code, "message": str(exc), "details": getattr(exc, "details", None)},
-                               ) if not journaled and _sdk_mutation(message) else None),
+                               ) if feedback_mutation else None),
             )
             if code == "DEVICE_OFFLINE":
                 # endpoint 被 fence 后同 Session 永不恢复；标记下一轮由宿主重建会话。
@@ -2736,12 +2848,14 @@ def _instrument_sdk_session(session: Any) -> None:
             _SDK_GUI_OK = True
             _SDK_LAST_GUI_SUCCESS_AT = time.monotonic()
         summary = _sdk_audit_result(operation, result, elapsed)
-        _record_tool(name, audit_message, summary, include_tree=False,
-                     rule_feedback=(summary.get("rule_feedback") if operation == "observe" else
-                                    action_feedback(name, sdk_session_id=getattr(session, "id", None),
-                                        action_id=(_journal_call_id(message) or (None, None))[1],
-                                        raw_result=result)
-                                    if not journaled and _sdk_mutation(message) else None))
+        feedback = summary.get("rule_feedback") if operation == "observe" else None
+        if operation != "observe" and not journaled and _sdk_mutation(message):
+            call_id = (_journal_call_id(message) or (None, None))[1]
+            # 正常返回只是“调用已结束”；有 status 时按其 execution/effect 分类，绝不升级为业务成功。
+            feedback = action_feedback(name, sdk_session_id=getattr(session, "id", None), action_id=call_id,
+                                       receipt=await _journal_receipt(session, call_id) if call_id else None,
+                                       raw_result=result, returned=True)
+        _record_tool(name, audit_message, summary, include_tree=False, rule_feedback=feedback)
         return result
 
     async def guarded(device, message):
@@ -2790,6 +2904,10 @@ def _instrument_sdk_session(session: Any) -> None:
             _emit({"type": "overlay_guard", "phase": "end", "guard_id": guard_id})
 
     async def traced(device, message):
+        # 一旦进入这里就不再能证明“未派发”；之后的失败由本链路自己审计。
+        probe = _PUBLIC_ACTION_PROBE.get()
+        if probe is not None:
+            probe["reached"] = True
         # Files/Shell/Processes 的 command_id 与 action_id 同为 native status 键；读/探测直接透传。
         wire = _journal_wire(message)
         if wire is None:
@@ -2802,7 +2920,7 @@ def _instrument_sdk_session(session: Any) -> None:
                                  rule_feedback=action_feedback("action." + str(message.get("action")),
                                      action_id=(_journal_call_id(message) or (None, None))[1],
                                      sdk_session_id=getattr(session, "id", None), not_dispatched=True,
-                                     error={"code": code, "message": str(exc)}))
+                                     phase="host_gate", error={"code": code, "message": str(exc)}))
                 raise
         _check_active_request()
         event = _journal_event(session, device, wire)
@@ -2821,8 +2939,13 @@ def _instrument_sdk_session(session: Any) -> None:
         finally:
             _JOURNAL_NATIVE_SCOPE.reset(token)
 
+    traced._feedback_probe = True
     session._request = traced
     session._action_journal_instrumented = True
+    try:
+        _install_public_precheck_feedback()
+    except Exception:  # noqa: BLE001 - 派发前事实是可选增强，安装失败保持旧行为
+        pass
     # mu.help 升级为按需手册（从生成契约 api.pyi + playwright contract 渲染），
     # 取代 Rust core 里 topic 无效的静态一句话。
     try:

@@ -58,6 +58,7 @@ jobs:
             packages/harness/runtime/tests/test_action_journal.py \
             packages/harness/runtime/tests/test_action_journal_executor.py \
             packages/harness/runtime/tests/test_action_feedback.py \
+            packages/harness/runtime/tests/test_action_feedback_precheck.py \
             packages/harness/runtime/tests/test_journal_agent_integration.py -q -p no:cacheprovider
       - name: Test long-term memory review, recall and native wire
         run: |

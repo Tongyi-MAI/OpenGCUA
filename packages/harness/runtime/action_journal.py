@@ -151,6 +151,8 @@ class ActionJournal:
         if not isinstance(raw_result, dict):
             raw_result = {}
         facts = {**{key: raw_result[key] for key in ("execution", "effect") if key in raw_result}, **receipt}
+        # 只有 worker 在宿主门禁（授权/overlay/精确窗口）拒绝时才写 not_dispatched=True。
+        not_dispatched = isinstance(record.get("error"), dict) and record["error"].get("not_dispatched") is True
         return {
             **{key: record.get(key) for key in _CONTEXT},
             "kind": "action_status", "stage": record["journal_stage"],
@@ -166,9 +168,8 @@ class ActionJournal:
             **({"rule_feedback": action_feedback(
                 record["operation"], action_id=record["action_id"], sdk_session_id=record["sdk_session_id"],
                 stage=record["journal_stage"], receipt=receipt, raw_result=raw_result,
-                error=record.get("error"),
-                not_dispatched=isinstance(record.get("error"), dict)
-                               and record["error"].get("not_dispatched") is True,
+                error=record.get("error"), not_dispatched=not_dispatched,
+                phase="host_gate" if not_dispatched else None,
             )} if record["journal_stage"] in {
                 "receipt_received", "outcome_unknown", "rejected", "cancelled_before_dispatch",
             } else {}),
