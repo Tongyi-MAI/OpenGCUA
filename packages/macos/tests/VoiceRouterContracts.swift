@@ -394,6 +394,13 @@ enum AppError: LocalizedError {
         model.receive(["event": "ready", "protocol": 1])
         precondition(model.ready && model.bridge.commands.last?["command"] as? String == "skills_list")
         precondition(model.bridge.commands.last?["task_id"] == nil)
+        let commandsBeforeAgentReady = model.bridge.commands.count
+        model.error = ""
+        model.receive(["schema_version": 1, "event_id": "agent-ready", "sequence": 1, "session_id": "s", "task_id": NSNull(),
+                       "turn_id": NSNull(), "step_id": NSNull(), "timestamp": "2026-01-01T00:00:00Z", "kind": "ready",
+                       "origin": "harness", "policy_revision": 0, "text": "mai-ui SDK macOS Agent ready.", "step": NSNull()])
+        precondition(model.ready && model.error.isEmpty && model.bridge.commands.count == commandsBeforeAgentReady,
+                     "任务内 Agent ready 提示不能被当作宿主协议握手")
         let idleCatalogID = model.bridge.commands.last!["command_id"] as! String
         model.resetSessionControls()
         precondition(model.controls.pending[idleCatalogID] != nil, "同一连接的空闲目录请求不能被会话重置吞掉")

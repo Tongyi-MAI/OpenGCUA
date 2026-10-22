@@ -413,6 +413,8 @@ enum TaskPhase: String {
             if kind == "command_ack" { return }
         }
         if kind == "ready" {
+            // 只有无信封的宿主握手才是协议协商；任务内 v1 "ready" 只是 Agent 启动提示。
+            if incoming["schema_version"] != nil { return }
             guard event["protocol"] as? Int == 1 else { error = L("运行组件版本不兼容。"); return }
             ready = true
             refreshSkills()
