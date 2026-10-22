@@ -390,6 +390,42 @@ def test_recall_block_budget_counts_headers_labels_and_revocations(tmp_path, rev
         assert (f"{entry['id']} r{previous_revision}" in revoked) == (previous_revision is not None)
 
 
+@pytest.mark.parametrize("revoked_count", [0, 32])
+@pytest.mark.parametrize("long_count", [0, 5, 8])
+def test_recall_block_refills_from_ranked_tail_after_render_budget_skip(tmp_path, revoked_count, long_count):
+    service = MemoryService(tmp_path / "memory")
+    long_ids, short_ids = [], []
+    for index in range(long_count):
+        created = service.propose({"title": f"钉钉周报流程 {index}",
+                                   "content": f"{index}" + "说" * 739, "app": "钉钉"})
+        assert service.mutate("approve", created["memory_id"], 1)[0]["ok"]
+        long_ids.append(created["memory_id"])
+    for index in range(8):
+        created = service.propose({"title": "钉钉周报", "content": f"先核对附件 {index}", "app": "钉钉"})
+        assert service.mutate("approve", created["memory_id"], 1)[0]["ok"]
+        short_ids.append(created["memory_id"])
+    candidate = service.propose({"title": "钉钉周报流程", "content": "候选正文不应召回", "app": "钉钉"})
+    other = service.propose({"title": "钉钉周报流程", "content": "其它应用正文不应召回", "app": "飞书"})
+    assert service.mutate("approve", other["memory_id"], 1)[0]["ok"]
+    if long_count:
+        # 粗估预算下前五项均为长条目；最终渲染后其中至少一项容纳不下。
+        initial = MemoryStore(service.root).recall("钉钉 周报 流程")
+        assert len(initial) == 5 and all(entry["id"] in long_ids for entry in initial)
+    shown, revoked = {}, [f"m_{index:012x} r2" for index in range(revoked_count)]
+
+    block = service.recall_block("钉钉 周报 流程", shown, revoked)
+
+    assert len(block) <= memory_store.RECALL_CHARS
+    assert block.count("- [m_") == memory_store.RECALL_LIMIT == len(shown)
+    assert any(memory_id in shown for memory_id in short_ids)
+    assert all(f"- [{memory_id} · r{revision}" in block for memory_id, revision in shown.items())
+    assert all(reference in block for reference in revoked)
+    assert candidate["memory_id"] not in block and other["memory_id"] not in block
+    assert "候选正文不应召回" not in block and "其它应用正文不应召回" not in block
+    if long_count:
+        assert 0 < len(set(long_ids) & shown.keys()) < 5
+
+
 @pytest.mark.parametrize("extra_char", [0, -1])
 def test_recall_block_exact_budget_keeps_whole_entry_or_only_invalidation(tmp_path, monkeypatch, extra_char):
     import memory_runtime

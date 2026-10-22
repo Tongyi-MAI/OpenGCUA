@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from memory_store import (
-    CATALOG_LIMIT, KINDS, MAX_REQUEST_BYTES, POLICY, RECALL_CHARS, MemoryStore, MemoryStoreError,
+    CATALOG_LIMIT, KINDS, MAX_APPROVED, MAX_REQUEST_BYTES, POLICY, RECALL_CHARS, RECALL_LIMIT,
+    MemoryStore, MemoryStoreError,
 )
 
 MUTATIONS = ("approve", "reject", "forget", "update")
@@ -154,11 +155,14 @@ class MemoryService:
 
         shown/revoked 由调用方按 session 保存：曾注入但已删除或修订的条目只以 id + revision
         标记旧版失效；新版召回不清掉旧版标记，不再复述旧正文。4000 字符预算包括标题、版本标签、换行与失效提示，
-        不是 JSON 传输字节数或 token 数；仅完整渲染的条目计入本次使用。
+        不是 JSON 传输字节数或 token 数；从最多 256 条已批准记忆的排名池中逐条尝试，
+        仅完整渲染的条目计入本次使用，最多五条，不因预算跳过而丢失后续较短匹配。
         """
         try:
             # 同一个 SQLite 只读事务：不能在 recall 后的第二次查询间把已遗忘正文重新加入。
-            entries, current = self._call(lambda store: store.recall(query, shown=shown))
+            entries, current = self._call(lambda store: store.recall(
+                query, limit=MAX_APPROVED, max_chars=None, shown=shown,
+            ))
         except MemoryStoreError:
             entries, current = [], {}
             if self.available:
@@ -187,6 +191,8 @@ class MemoryService:
 
         body: list[str] = []
         for entry in entries:
+            if len(body) >= RECALL_LIMIT:
+                break
             label = " · ".join(part for part in (entry["id"], f"r{entry['revision']}", entry["kind"], entry["app"]) if part)
             line = f"- [{label}] {entry['title']}：{entry['content']}"
             # 先为失效提示保留空间；超预算整条跳过，继续尝试较短条目，不截断已确认正文。

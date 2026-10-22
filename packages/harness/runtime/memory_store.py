@@ -361,9 +361,13 @@ class MemoryStore:
                 f"SELECT id, revision FROM memories WHERE status = 'approved' AND id IN ({marks})", ids)}
         return self._read(operation, {})
 
-    def recall(self, query: str, *, limit: int = RECALL_LIMIT, max_chars: int = RECALL_CHARS,
+    def recall(self, query: str, *, limit: int = RECALL_LIMIT, max_chars: int | None = RECALL_CHARS,
                shown: dict[str, int] | None = None):
-        """只检索已批准记忆；未匹配返回空列表。"""
+        """只检索已批准记忆；未匹配返回空列表。
+
+        宿主可用 max_chars=None 读取有界排名池，在最终渲染处统一计费；
+        默认调用仍保留五条与粗估字符预算，候选及应用范围筛选不变。
+        """
         wanted = tokens(query)
         normalized_query = _scope_key(query)
         def operation(connection):
@@ -385,7 +389,9 @@ class MemoryStore:
             chosen, used = [], 0
             for _, _, row in scored:
                 size = len(row["title"]) + len(row["content"]) + len(row["app"] or "") + 48
-                if len(chosen) >= limit or used + size > max_chars:
+                if len(chosen) >= limit:
+                    break
+                if max_chars is not None and used + size > max_chars:
                     continue
                 chosen.append(self.entry(row))
                 used += size

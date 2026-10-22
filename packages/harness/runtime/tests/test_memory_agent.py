@@ -239,6 +239,62 @@ def test_request_memory_budget_and_usage_count_include_only_rendered_entries(tmp
     assert len(statuses) == 2 and all(status["memory_count"] == 2 for status in statuses)
 
 
+def test_request_refills_memory_after_final_budget_skip_in_cli_and_native(tmp_path, monkeypatch):
+    from memory_store import RECALL_CHARS, RECALL_LIMIT
+
+    def prepare(root):
+        service = MemoryService(root)
+        for index in range(5):
+            created = service.propose({"title": f"钉钉周报流程 {index}",
+                                       "content": f"{index}" + "说" * 739, "app": "钉钉"})
+            assert service.mutate("approve", created["memory_id"], 1)[0]["ok"]
+        short = service.propose({"title": "钉钉周报", "content": "补召回正文：先核对附件", "app": "钉钉"})
+        assert service.mutate("approve", short["memory_id"], 1)[0]["ok"]
+        return short["memory_id"]
+
+    def check(requests, memory_id):
+        assert len(requests) == 2
+        for request in requests:
+            blocks = memory_messages(request)
+            assert len(blocks) == 1
+            block = blocks[0]["content"]
+            assert len(block) <= RECALL_CHARS and block.count("- [m_") == RECALL_LIMIT
+            assert f"- [{memory_id} · r2" in block and "补召回正文：先核对附件" in block
+
+    memory_id = prepare(tmp_path / "memory")
+    requests, frontend, _ = run_cli(tmp_path, monkeypatch, ["继续按流程处理钉钉周报"],
+                                    task="帮我按流程在钉钉发周报")
+    check(requests, memory_id)
+    statuses = [event.payload for event in frontend.events if event.kind == "context_status"]
+    assert [status["memory_count"] for status in statuses] == [RECALL_LIMIT, RECALL_LIMIT]
+
+    # 真 NativeHost/run_agent 与事件投影；模型、SDK、桌面均为离线 fixture。
+    memory_id = prepare(tmp_path / "native" / "memory")
+    native_requests = []
+    install_fakes(monkeypatch, native_requests)
+
+    async def scenario():
+        events = []
+        host = NativeHost(events.append, tmp_path / "native" / "runs")
+        try:
+            await host.command({"command": "start", "task_id": "refill", "text": "帮我按流程在钉钉发周报",
+                                "config": {"llm_base_url": "https://offline.invalid/v1", "model_name": "fixture",
+                                           "allow_empty_api_key": True, "startup_observation": "none", "countdown": 0}})
+            await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == 0)
+            await host.command({"command": "message", "task_id": "refill", "message_id": "next",
+                                "text": "继续按流程处理钉钉周报"})
+            await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == 1)
+        finally:
+            await host.close()
+        statuses = [event for event in events if event.get("kind") == "context_status"]
+        assert [status["memory_count"] for status in statuses] == [RECALL_LIMIT, RECALL_LIMIT]
+        for status in statuses:
+            validate_event(dict(status))
+
+    asyncio.run(scenario())
+    check(native_requests, memory_id)
+
+
 def test_request_app_scope_does_not_recall_shared_vendor_experience(tmp_path, monkeypatch):
     service = MemoryService(tmp_path / "memory")
     created = service.propose({"title": "保存文件", "content": "Chrome 专属经验：保存后核对文件格式",
