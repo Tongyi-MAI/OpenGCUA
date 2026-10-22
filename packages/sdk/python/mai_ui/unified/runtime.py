@@ -480,6 +480,7 @@ class Session:
     def auto_reconnect(self):
         """When True, a DEVICE_OFFLINE request transparently rebuilds the endpoint.
 
+        明确标记 scope_fenced 的临时阻塞不触发自动重建；原异常交由调用方处理。
         Only whole-device attachments survive the rebuild; scoped handles stay
         detached and must be rebound. Hosts opt in explicitly because a reconnect
         re-acquires the driver and drops in-flight scope state.
@@ -598,8 +599,13 @@ class Session:
                     ),
                 )
             except MuError as error:
+                # 作用域临时阻塞不等于端点断线；强制重连会移除仍在运行的端点与句柄。
+                scope_fenced = (
+                    isinstance(error.details, dict) and error.details.get("cause") == "scope_fenced"
+                )
                 if (
                     error.code != "DEVICE_OFFLINE"
+                    or scope_fenced
                     or not self._auto_reconnect
                     or revived
                     or not await self._revive(device)

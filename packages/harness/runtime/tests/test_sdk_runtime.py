@@ -110,6 +110,102 @@ def test_sdk_error_details_do_not_change_legacy_strings_or_cancellation():
         asyncio.run(call(Core(), {"op": "request"}))
 
 
+def _sdk_offline_request_fixture(details, *, code="DEVICE_OFFLINE", recover=True, failures=1):
+    import json
+    from mai_ui import MuError
+    from mai_ui.unified.runtime import Session
+
+    requests, reconnects = [], []
+    native_error = ValueError(json.dumps({
+        "code": code, "message": "worker stopped after being temporarily blocked", "details": details,
+    }))
+
+    class Core:
+        def state(self, _wire):
+            return "{}"
+
+        async def call(self, wire):
+            requests.append(json.loads(wire))
+            if len(requests) <= failures:
+                raise native_error
+            return json.dumps({"ready": True})
+
+    async def reconnect(resource, *, force):
+        reconnects.append((resource, force))
+        if not recover:
+            raise MuError("DEVICE_OFFLINE", "fixture recovery failed")
+        device._endpoint = types.SimpleNamespace(info=endpoint.info, offline=False)
+
+    runtime = types.SimpleNamespace(_core=Core(), _closed=False, reconnect=reconnect)
+    session = Session(runtime)
+    session.auto_reconnect = True
+    endpoint = types.SimpleNamespace(info=types.SimpleNamespace(id="browser:fixture"), offline=False)
+    device = types.SimpleNamespace(id="attachment:fixture", resource_id="browser:fixture",
+                                   _endpoint=endpoint, _detached=False, _check=lambda: None)
+    return session, device, requests, reconnects, native_error
+
+
+@pytest.mark.parametrize("scope,message", [
+    ("browser:fixture", {"op": "browser", "operation": "getContext"}),
+    ("browser:fixture/tab:1", {"op": "browser", "operation": "evaluate", "tab_id": "tab:1"}),
+    ("browser:fixture/tab:1", {"op": "browser", "operation": "locator.click",
+                               "tab_id": "tab:1", "action_id": "action:original"}),
+    ("mac:fixture/window:1", {"op": "observe", "window_id": "window:1"}),
+])
+def test_sdk_scope_fence_never_reconnects_or_replays_request(scope, message):
+    from mai_ui import MuError
+
+    details = {"cause": "scope_fenced", "scope": scope, "next_step": "wait_for_operation"}
+    session, device, requests, reconnects, native_error = _sdk_offline_request_fixture(details)
+    device.resource_id = scope
+    original_endpoint = device._endpoint
+
+    with pytest.raises(MuError) as caught:
+        asyncio.run(session._request(device, message))
+    assert caught.value.code == "DEVICE_OFFLINE" and caught.value.details == details
+    assert caught.value.__cause__ is native_error
+    assert len(requests) == 1 and reconnects == []
+    assert requests[0]["wire"] == message
+    assert device._endpoint is original_endpoint and not device._detached
+    # fixture 的原操作已结束后，由调用方重新观察；门禁不自行等待、重放或替换句柄。
+    assert asyncio.run(session._request(device, {"op": "observe"})) == {"ready": True}
+    assert len(requests) == 2 and reconnects == [] and device._endpoint is original_endpoint
+
+
+@pytest.mark.parametrize("details", [
+    None, {}, [], {"cause": "endpoint_offline"}, {"cause": "future_cause"},
+    {"cause": "scope_fenced extra"}, {"cause": []}, {"cause": {}},
+    {"provider_extension": {"cause": "scope_fenced"}},
+])
+def test_sdk_scope_fence_guard_keeps_legacy_and_offline_recovery(details):
+    session, device, requests, reconnects, _ = _sdk_offline_request_fixture(details)
+    original_endpoint = device._endpoint
+    assert asyncio.run(session._request(device, {"op": "observe"})) == {"ready": True}
+    assert len(requests) == 2 and reconnects == [("browser:fixture", True)]
+    assert device._endpoint is not original_endpoint
+
+
+@pytest.mark.parametrize("auto_reconnect,recover,failures,code,expected_calls,expected_reconnects", [
+    (False, True, 1, "DEVICE_OFFLINE", 1, 0),
+    (True, False, 1, "DEVICE_OFFLINE", 1, 1),
+    (True, True, 2, "DEVICE_OFFLINE", 2, 1),
+    (True, True, 1, "INPUT_REFUSED", 1, 0),
+])
+def test_sdk_scope_fence_guard_keeps_recovery_opt_in_and_single_attempt(
+    auto_reconnect, recover, failures, code, expected_calls, expected_reconnects,
+):
+    from mai_ui import MuError
+
+    session, device, requests, reconnects, native_error = _sdk_offline_request_fixture(
+        {"cause": "endpoint_offline"}, code=code, recover=recover, failures=failures,
+    )
+    session.auto_reconnect = auto_reconnect
+    with pytest.raises(MuError) as caught:
+        asyncio.run(session._request(device, {"op": "observe"}))
+    assert caught.value.code == code and caught.value.__cause__ is native_error
+    assert len(requests) == expected_calls and len(reconnects) == expected_reconnects
+
+
 def test_point_api_does_not_accept_wall_clock_expiry_keyword():
     import inspect
     from mai_ui.unified.observations import Image
