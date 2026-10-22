@@ -384,9 +384,10 @@ def test_recall_block_budget_counts_headers_labels_and_revocations(tmp_path, rev
     assert short["memory_id"] in shown and "先核对附件" in block
     assert shown == {rendered[0]["id"]: 2, short["memory_id"]: 2}
     omitted = next(entry for entry in entries if entry not in rendered)
-    assert (omitted["id"] in revoked) == (previous_revision is not None)
-    assert all(memory_id in block for memory_id in revoked)
-    assert all(entry["id"] not in revoked for entry in rendered)
+    assert (f"{omitted['id']} r{previous_revision}" in revoked) == (previous_revision is not None)
+    assert all(reference in block for reference in revoked)
+    for entry in rendered:
+        assert (f"{entry['id']} r{previous_revision}" in revoked) == (previous_revision is not None)
 
 
 @pytest.mark.parametrize("extra_char", [0, -1])
@@ -396,18 +397,19 @@ def test_recall_block_exact_budget_keeps_whole_entry_or_only_invalidation(tmp_pa
     service = MemoryService(tmp_path / "memory")
     created = service.propose({"title": "钉钉周报流程", "content": "先核对附件", "app": "钉钉"})
     service.mutate("approve", created["memory_id"], 1)
-    full = service.recall_block("钉钉 周报", {}, [])
+    full = service.recall_block("钉钉 周报", {created["memory_id"]: 1}, [])
     monkeypatch.setattr(memory_runtime, "RECALL_CHARS", len(full) + extra_char)
     shown, revoked = {created["memory_id"]: 1}, []
 
     block = service.recall_block("钉钉 周报", shown, revoked)
 
     assert len(block) <= memory_runtime.RECALL_CHARS
+    assert revoked == [f"{created['memory_id']} r1"]
     if extra_char == 0:
-        assert block == full and shown == {created["memory_id"]: 2} and revoked == []
+        assert block == full and shown == {created["memory_id"]: 2}
     else:
         assert block.startswith("## 已失效的长期记忆") and "先核对附件" not in block
-        assert created["memory_id"] in block and shown == {} and revoked == [created["memory_id"]]
+        assert created["memory_id"] in block and shown == {}
 
 
 def test_recall_block_is_data_only_and_marks_forgotten_ids_without_content(tmp_path):
@@ -422,7 +424,46 @@ def test_recall_block_is_data_only_and_marks_forgotten_ids_without_content(tmp_p
     service.mutate("forget", created["memory_id"], result["revision"])
     block = service.recall_block("帮我在钉钉发周报", shown, revoked)
     assert "先确认收件人列表" not in block and "已失效" in block and created["memory_id"] in block
-    assert revoked == [created["memory_id"]] and shown == {}
+    assert revoked == [f"{created['memory_id']} r2"] and shown == {}
+
+
+@pytest.mark.parametrize("recall_before_reapproval", [False, True])
+def test_recall_keeps_old_revision_invalid_after_reapproval(tmp_path, recall_before_reapproval):
+    service = MemoryService(tmp_path / "memory")
+    created = service.propose({"title": "钉钉周报流程", "content": "旧版：周报先确认收件人", "app": "钉钉"})
+    memory_id = created["memory_id"]
+    assert service.mutate("approve", memory_id, 1)[0]["ok"]
+    shown, revoked = {}, []
+    assert "旧版：周报先确认收件人" in service.recall_block("钉钉 周报", shown, revoked)
+    assert shown == {memory_id: 2}
+
+    changed, _ = service.mutate("update", memory_id, 2, {"content": "新版：周报先核对附件"})
+    assert changed["ok"] and changed["status"] == "candidate"
+    if recall_before_reapproval:
+        pending = service.recall_block("钉钉 周报", shown, revoked)
+        assert "旧版：" not in pending and "新版：" not in pending
+        assert f"{memory_id} r2" in pending
+    assert service.mutate("approve", memory_id, 3)[0]["ok"]
+
+    # 新版召回不能抹去旧版失效记录；重复请求只保留一份版本引用，不复述旧正文。
+    for _ in range(2):
+        block = service.recall_block("钉钉 周报", shown, revoked)
+        assert f"- [{memory_id} · r4" in block and "新版：周报先核对附件" in block
+        assert "已失效" in block and f"{memory_id} r2" in block and "旧版：" not in block
+        assert len(block) <= memory_store.RECALL_CHARS
+        assert shown == {memory_id: 4} and revoked == [f"{memory_id} r2"]
+
+    assert service.mutate("update", memory_id, 4, {"content": "第三版：周报先检查格式"})[0]["ok"]
+    assert service.mutate("approve", memory_id, 5)[0]["ok"]
+    block = service.recall_block("钉钉 周报", shown, revoked)
+    assert "第三版：周报先检查格式" in block and "新版：" not in block
+    assert f"{memory_id} r2" in block and f"{memory_id} r4" in block
+    assert shown == {memory_id: 6} and revoked == [f"{memory_id} r2", f"{memory_id} r4"]
+
+    assert service.mutate("forget", memory_id, 6)[0]["ok"]
+    block = service.recall_block("钉钉 周报", shown, revoked)
+    assert "第三版：" not in block and f"{memory_id} r6" in block
+    assert shown == {} and revoked == [f"{memory_id} r2", f"{memory_id} r4", f"{memory_id} r6"]
 
 
 def test_mutate_returns_same_generation_catalog_and_bounded_errors(tmp_path):

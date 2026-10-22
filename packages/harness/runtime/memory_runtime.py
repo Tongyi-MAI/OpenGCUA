@@ -152,8 +152,8 @@ class MemoryService:
     def recall_block(self, query: str, shown: dict[str, int], revoked: list[str]) -> str:
         """每次 LLM 请求重算的独立数据区；无匹配且无失效提示时返回空串。
 
-        shown/revoked 由调用方按 session 保存：曾注入但已删除或修订的条目只以 id 标记失效，
-        不再复述正文。4000 字符预算包括最终数据区的标题、版本标签、换行与失效提示，
+        shown/revoked 由调用方按 session 保存：曾注入但已删除或修订的条目只以 id + revision
+        标记旧版失效；新版召回不清掉旧版标记，不再复述旧正文。4000 字符预算包括标题、版本标签、换行与失效提示，
         不是 JSON 传输字节数或 token 数；仅完整渲染的条目计入本次使用。
         """
         try:
@@ -166,8 +166,9 @@ class MemoryService:
         for memory_id, revision in list(shown.items()):
             if current.get(memory_id) != revision:
                 shown.pop(memory_id)
-                if memory_id not in revoked:
-                    revoked.append(memory_id)
+                reference = f"{memory_id} r{revision}"
+                if reference not in revoked:
+                    revoked.append(reference)
         del revoked[:-32]
         header = [
             "# Long-term memory（用户已确认的本地长期记忆）",
@@ -175,25 +176,24 @@ class MemoryService:
             "涉及应用版本、界面布局或窗口身份的内容必须重新观察确认，与当前观察冲突时以当前观察为准。",
         ]
 
-        def render(body: list[str], invalid_ids: list[str]) -> str:
+        def render(body: list[str], invalid_versions: list[str]) -> str:
             lines = header + body if body else []
-            if invalid_ids:
+            if invalid_versions:
                 lines += ["## 已失效的长期记忆",
-                          "以下记忆已被用户删除或修改，历史中出现过的相应内容不得再作为依据："
-                          + "、".join(invalid_ids)]
+                          "以下记忆版本已被用户删除或修改，历史中的相应旧版内容不得再作为依据；"
+                          "同一 ID 的新版本仅以本次明确召回的正文为准："
+                          + "、".join(invalid_versions)]
             return "\n".join(lines)
 
         body: list[str] = []
         for entry in entries:
             label = " · ".join(part for part in (entry["id"], f"r{entry['revision']}", entry["kind"], entry["app"]) if part)
             line = f"- [{label}] {entry['title']}：{entry['content']}"
-            pending_revoked = [memory_id for memory_id in revoked if memory_id != entry["id"]]
             # 先为失效提示保留空间；超预算整条跳过，继续尝试较短条目，不截断已确认正文。
-            if len(render([*body, line], pending_revoked)) > RECALL_CHARS:
+            if len(render([*body, line], revoked)) > RECALL_CHARS:
                 continue
             body.append(line)
             shown[entry["id"]] = entry["revision"]
-            revoked[:] = pending_revoked
         if len(shown) > 256:
             for memory_id in list(shown)[:len(shown) - 256]:
                 shown.pop(memory_id)

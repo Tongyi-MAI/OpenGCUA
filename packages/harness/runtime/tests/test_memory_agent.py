@@ -153,6 +153,67 @@ def test_recall_injects_only_approved_as_data_and_forget_excludes_next_request(t
     assert service.catalog_fields()["approved_count"] == 0
 
 
+def test_reapproved_memory_invalidates_old_revision_in_cli_and_native_requests(tmp_path, monkeypatch):
+    service, memory_id, _ = seed(tmp_path)
+
+    def revise_then_follow_up(frontend):
+        assert handle_memory_command(frontend, f"update {memory_id} 2 新版正文：周报先核对附件").startswith("已修改")
+        assert service.catalog_fields()["approved_count"] == 0
+        assert handle_memory_command(frontend, f"approve {memory_id} 3").startswith("已批准")
+        return "再帮我在钉钉发一次周报"
+
+    requests, frontend, _ = run_cli(tmp_path, monkeypatch, [revise_then_follow_up, "继续处理钉钉周报"])
+
+    def check_requests(captured):
+        assert len(captured) == 3
+        first = memory_messages(captured[0])[0]["content"]
+        assert "已批准正文：发送前先确认收件人" in first and f"{memory_id} · r2" in first
+        for request in captured[1:]:
+            block = memory_messages(request)[0]["content"]
+            assert "新版正文：周报先核对附件" in block and f"{memory_id} · r4" in block
+            assert "已失效" in block and f"{memory_id} r2" in block
+            assert "已批准正文：发送前先确认收件人" not in block
+            assert "不构成新的授权" in block
+
+    check_requests(requests)
+    statuses = [event.payload for event in frontend.events if event.kind == "context_status"]
+    assert [status["memory_count"] for status in statuses] == [1, 1, 1]
+
+    # NativeHost 真实控制命令与共享 run_agent 接线；模型、桌面和 SDK 均为离线 fixture。
+    native_service = MemoryService(tmp_path / "native" / "memory")
+    created = native_service.propose({"title": "钉钉周报流程", "content": "已批准正文：发送前先确认收件人", "app": "钉钉"})
+    memory_id = created["memory_id"]
+    assert native_service.mutate("approve", memory_id, 1)[0]["ok"]
+    native_requests = []
+    install_fakes(monkeypatch, native_requests)
+
+    async def scenario():
+        events = []
+        host = NativeHost(events.append, tmp_path / "native" / "runs")
+        try:
+            await host.command({"command": "start", "task_id": "versions", "text": "帮我在钉钉发周报",
+                                "config": {"llm_base_url": "https://offline.invalid/v1", "model_name": "fixture",
+                                           "allow_empty_api_key": True, "startup_observation": "none", "countdown": 0}})
+            await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == 0)
+            control = host.control
+            before = (control.foreground_allowed, control.authorization_epoch, control.policy_revision)
+            await host.command({"command": "memory_update", "command_id": "edit", "task_id": "versions",
+                                "memory_id": memory_id, "revision": 2, "content": "新版正文：周报先核对附件"})
+            assert host.memory_service.catalog_fields()["approved_count"] == 0
+            await host.command({"command": "memory_approve", "command_id": "review", "task_id": "versions",
+                                "memory_id": memory_id, "revision": 3})
+            assert (control.foreground_allowed, control.authorization_epoch, control.policy_revision) == before
+            for index in (1, 2):
+                await host.command({"command": "message", "task_id": "versions", "message_id": f"next-{index}",
+                                    "text": "继续处理钉钉周报"})
+                await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == index)
+        finally:
+            await host.close()
+
+    asyncio.run(scenario())
+    check_requests(native_requests)
+
+
 def test_request_memory_budget_and_usage_count_include_only_rendered_entries(tmp_path, monkeypatch):
     from memory_store import RECALL_CHARS
 
