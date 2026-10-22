@@ -2843,8 +2843,10 @@ def _instrument_sdk_session(session: Any) -> None:
                 error=audit_error, error_code=code,
                 receipt=None if journaled else getattr(exc, "receipt", None),
                 outcome_unknown=code == "ACTION_OUTCOME_UNKNOWN" or getattr(exc, "journal_outcome_unknown", False),
-                rule_feedback=(observation_feedback(name, {"components": [{"status": "unavailable", "error": code}]})
-                               if operation == "observe" else action_feedback(
+                rule_feedback=(observation_feedback(
+                                   name, {"components": [{"status": "unavailable", "error": code}]},
+                                   error={"code": code, "details": getattr(exc, "details", None)},
+                               ) if operation == "observe" else action_feedback(
                                    name, action_id=call_id,
                                    sdk_session_id=getattr(session, "id", None), receipt=fact_receipt,
                                    error={"code": code, "message": str(exc), "details": getattr(exc, "details", None)},

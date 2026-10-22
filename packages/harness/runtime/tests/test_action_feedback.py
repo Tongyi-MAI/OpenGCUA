@@ -120,6 +120,96 @@ def test_caught_connection_cause_reaches_executor_with_or_without_journal(tmp_pa
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("cause,expected", [
+    ("scope_fenced", "作用域因未完成操作暂时阻塞"),
+    ("endpoint_offline", "目标端点已断线"),
+])
+@pytest.mark.parametrize("journaled", [False, True])
+def test_caught_observation_connection_cause_reaches_executor(tmp_path, cause, expected, journaled):
+    anchor = '        if message.get("failure"):'
+    assert FAKE_WORKER.count(anchor) == 1
+    source = FAKE_WORKER.replace(anchor, f'''        if message.get("op") == "observe":
+            error = MuError("DEVICE_OFFLINE", "不含英文签名")
+            error.details = {{"cause": {cause!r}, "scope": "private-target",
+                             "reason": "SECRET-VALUE", "next_step": "send_payment"}}
+            raise error
+''' + anchor)
+
+    async def scenario():
+        journal = ActionJournal(tmp_path / "j", "host") if journaled else None
+        instance = executor(tmp_path, journal, source=source)
+        try:
+            result = await instance.run(
+                'try:\n    await mu._request(device, {"op": "observe"})\nexcept Exception as error:\n'
+                f'    assert error.code == "DEVICE_OFFLINE" and error.details["cause"] == {cause!r}', [])
+            assert result.returncode == 0 and not result.stdout and not result.stderr
+            text = result.feedback()
+            assert expected in text and "勿直接重试" in text
+            assert all(value not in text for value in ("private-target", "SECRET-VALUE", "send_payment"))
+            [row] = result.control["action_feedback"]
+            assert row["evaluation"] == "observation_unavailable"
+            assert row["error_codes"] == ["DEVICE_OFFLINE"]
+            assert row["verification"] == "unverified" and row["condition"] == "not_checked"
+            assert "phase" not in row and "action_id" not in row
+            assert calls(tmp_path) == [{"op": "observe"}], "反馈不能额外派发或重试观察"
+            if journal is not None:
+                assert journal._actions == {}, "只读观察不能产生动作 intent 或恢复记录"
+        finally:
+            await instance.close()
+            if journal is not None:
+                journal.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cause,expected", [
+    ("scope_fenced", "作用域因未完成操作暂时阻塞"),
+    ("endpoint_offline", "目标端点已断线"),
+])
+@pytest.mark.parametrize("platform", ["macos", "browser"])
+def test_observation_connection_feedback_preserves_exception_and_recovery_policy(monkeypatch, cause, expected, platform):
+    import code_runtime as rt
+    from mai_ui import MuError
+
+    events, requests = [], []
+    error = MuError("DEVICE_OFFLINE", "不含英文签名", details={"cause": cause})
+    monkeypatch.setattr(rt, "_emit", events.append)
+    monkeypatch.setattr(rt, "_CONFIG", {})
+    monkeypatch.setattr(rt, "_SDK_REVIVE_PENDING", False)
+    monkeypatch.setattr(rt, "_install_journal_direct_calls", lambda _: None)
+
+    class Session:
+        id = "sdk"
+        async def _request(self, device, message):
+            requests.append(message)
+            raise error
+
+    async def scenario():
+        session = Session()
+        rt._instrument_sdk_session(session)
+        with pytest.raises(MuError) as caught:
+            await session._request(SimpleNamespace(platform=platform, resource_id="r"), {"op": "observe"})
+        assert caught.value is error
+    asyncio.run(scenario())
+    [event] = events
+    assert requests == [{"op": "observe"}]
+    assert any(expected in hint for hint in event["rule_feedback"]["diagnostics"])
+    assert rt._SDK_REVIVE_PENDING is (platform == "macos"), "只补反馈，不改变现有宿主恢复策略"
+
+
+@pytest.mark.parametrize("code,cause", [
+    ("DEVICE_OFFLINE", None), ("DEVICE_OFFLINE", []), ("DEVICE_OFFLINE", {}),
+    ("DEVICE_OFFLINE", 1), ("DEVICE_OFFLINE", True), ("DEVICE_OFFLINE", "future_cause"),
+    ("DEVICE_OFFLINE", "scope_fenced send_payment"), ("DEADLINE_EXCEEDED", "scope_fenced"),
+])
+def test_observation_connection_feedback_does_not_invent_or_echo_unknown_cause(code, cause):
+    result = {"components": [{"status": "unavailable", "error": code}]}
+    error = {"code": code, "details": {"cause": cause, "reason": "SECRET-VALUE"}}
+    row = observation_feedback("observe", result, error=error)
+    assert row["evaluation"] == "observation_unavailable" and row["error_codes"] == [code]
+    assert "diagnostics" not in row and "SECRET-VALUE" not in json.dumps(row)
+    assert observation_feedback("observe", {"complete": True}, error=error) is None
+
+
 def test_timeout_is_not_offline_or_proof_of_no_effect():
     row = action_feedback("action.click", error={"code": "DEADLINE_EXCEEDED", "message": "timeout"})
     assert row["evaluation"] == "execution_failed" and row["error_code"] == "DEADLINE_EXCEEDED"

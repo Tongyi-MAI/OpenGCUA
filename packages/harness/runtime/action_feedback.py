@@ -204,8 +204,8 @@ def action_feedback(operation, *, action_id=None, sdk_session_id=None, stage=Non
     return row
 
 
-def observation_feedback(operation, result):
-    """只依据原始观察的完整性字段；不会因空树就自动转视觉或报告设备离线。"""
+def observation_feedback(operation, result, *, error=None):
+    """只依据观察完整性和 SDK 明确原因；不会因空树就自动转视觉或报告设备离线。"""
     result = _dict(result)
     components = result.get("components")
     components = components if isinstance(components, list) else []
@@ -222,6 +222,10 @@ def observation_feedback(operation, result):
         row["error_codes"] = codes[:8]
     diagnostics = _diagnostics(*({"message": item.get("message") or item.get("reason")}
                                 for item in incomplete[:64]))
+    # 观察异常复用动作的固定原因白名单，不回显 details，也不改变恢复/重试策略。
+    connection_hint = _connection_hint(error)
+    if connection_hint:
+        diagnostics.append(connection_hint)
     if diagnostics:
         row["diagnostics"] = diagnostics
     return row
