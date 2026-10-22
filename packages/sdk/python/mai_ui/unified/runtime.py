@@ -303,7 +303,11 @@ class Runtime:
                 await adapter.start()
                 response = await adapter.request({"op": "describe", "timeout_ms": 5000})
                 if "error" in response:
-                    raise MuError("DEVICE_OFFLINE", str(response["error"]))
+                    error = response["error"]
+                    # 结构化拒绝不等于断线；复用统一解码并保留原始诊断。
+                    if isinstance(error, dict) and isinstance(error.get("code"), str) and error["code"]:
+                        raise decode_error(ValueError(encode(error)))
+                    raise MuError("DEVICE_OFFLINE", str(error))
                 endpoint.description = response["result"]
                 if (
                     endpoint.description.get("platform") != adapter.platform
@@ -333,6 +337,9 @@ class Runtime:
                     request_id = request.pop("_request_id")
                     try:
                         response = await adapter.request(request)
+                    except MuError as error:
+                        # 与 adapter 返回错误 Reply 等价，不把明确拒绝升级成结果未知或端点离线。
+                        response = dict(error=dict(code=error.code, message=str(error), details=error.details))
                     except Exception as error:
                         response = dict(error=dict(code="DEVICE_OFFLINE", message=str(error)))
                     state(

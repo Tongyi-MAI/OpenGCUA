@@ -110,6 +110,135 @@ def test_sdk_error_details_do_not_change_legacy_strings_or_cancellation():
         asyncio.run(call(Core(), {"op": "request"}))
 
 
+class _SdkBridgeErrorAdapter:
+    """只用真实 RuntimeCore 的离线桥接，不连接 driver 或真实应用。"""
+    platform, provider = "macos", "fixture.structured_error"
+
+    def __init__(self, error, *, raised=False, describe_error=False):
+        self.error, self.raised, self.describe_error = error, raised, describe_error
+        self.requests, self.closed = [], 0
+
+    async def start(self):
+        pass
+
+    async def close(self):
+        self.closed += 1
+
+    async def request(self, message):
+        self.requests.append(dict(message))
+        if message["op"] == "describe" and not self.describe_error:
+            return {"result": {"protocol_major": 1, "platform": self.platform,
+                               "capabilities": {name: {"state": "ready"}
+                                                for name in ("ui.input_text", "ui.observe.tree")}}}
+        if message["op"] == "keepalive":
+            return {"result": {"alive": True}}
+        if self.raised:
+            raise self.error
+        return {"error": self.error}
+
+
+@pytest.mark.parametrize("raised", [False, True], ids=["reply", "exception"])
+@pytest.mark.parametrize("code", ["INPUT_REFUSED", "PERMISSION_DENIED", "STALE_TARGET", "UNSUPPORTED_CAPABILITY"])
+def test_sdk_bridge_typed_rejection_keeps_code_details_and_live_endpoint(code, raised):
+    from mai_ui import MuError, Runtime
+
+    details = {"native_message": "明确拒绝输入", "evidence": [{"native_code": code}],
+               "provider_extension": {"version": 1}}
+    error = (MuError(code, "明确拒绝", details=details) if raised
+             else {"code": code, "message": "明确拒绝", "details": details})
+    adapter = _SdkBridgeErrorAdapter(error, raised=raised)
+
+    async def scenario():
+        async with Runtime() as runtime:
+            resource = await runtime.add_adapter(adapter, name="fixture", resource_id="mac:fixture")
+            async with runtime.session() as session:
+                device = await session.register(resource, name="fixture")
+                adapter.requests.clear()
+                with pytest.raises(MuError) as caught:
+                    await device._backend._action("input_text", action_id="action:fixture",
+                                                  app_id="app:42:1", text="fixture")
+                assert caught.value.code == code
+                assert "明确拒绝" in str(caught.value)
+                receipt = caught.value.receipt
+                assert receipt.execution == "rejected" and receipt.effect == "not_applied"
+                assert receipt.error["code"] == code and receipt.error["details"] == details
+                assert not device._endpoint.offline and not device._detached
+                assert len(adapter.requests) == 1, "明确拒绝不能自动重放动作"
+                assert await device._backend._request({"op": "keepalive"}) == {"alive": True}
+                assert [q["op"] for q in adapter.requests] == ["action", "keepalive"]
+        assert adapter.closed == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("raised", [False, True], ids=["reply", "exception"])
+@pytest.mark.parametrize("code", ["OBSERVATION_FAILED", "PROVIDER_ERROR"])
+def test_sdk_bridge_observation_error_keeps_original_diagnostics(code, raised):
+    from mai_ui import MuError, Runtime
+
+    details = {"native_message": "离线 fixture 捕获失败", "evidence": ["fixture"]}
+    error = (MuError(code, "捕获失败", details=details) if raised
+             else {"code": code, "message": "捕获失败", "details": details})
+    adapter = _SdkBridgeErrorAdapter(error, raised=raised)
+
+    async def scenario():
+        async with Runtime() as runtime:
+            resource = await runtime.add_adapter(adapter, name="fixture", resource_id="mac:fixture")
+            async with runtime.session() as session:
+                device = await session.register(resource, name="fixture")
+                with pytest.raises(MuError) as caught:
+                    await device._backend._request({"op": "observe", "tree": True, "app_id": "app:42:1"})
+                assert caught.value.code == code and caught.value.details == details
+                assert caught.value.receipt is None and not device._endpoint.offline
+                assert await device._backend._request({"op": "keepalive"}) == {"alive": True}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("code", ["PERMISSION_DENIED", "PROTOCOL_MISMATCH", "DEVICE_OFFLINE"])
+def test_sdk_bridge_describe_error_preserves_diagnostics_and_cleans_up(code):
+    from mai_ui import MuError, Runtime
+
+    details = {"cause": "endpoint_offline", "provider_extension": {"version": 1}}
+    adapter = _SdkBridgeErrorAdapter({"code": code, "message": "初始化失败", "details": details},
+                                     describe_error=True)
+
+    async def scenario():
+        async with Runtime() as runtime:
+            with pytest.raises(MuError) as caught:
+                await runtime.add_adapter(adapter, name="fixture", resource_id="mac:fixture")
+            assert caught.value.code == code and caught.value.details == details
+            assert str(caught.value) == code + ": 初始化失败"
+            assert adapter.closed == 1 and not runtime._endpoints
+            assert [q["op"] for q in adapter.requests] == ["describe"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("describe_error", [False, True])
+def test_sdk_bridge_untyped_errors_keep_legacy_offline_classification(describe_error):
+    from mai_ui import MuError, Runtime
+
+    adapter = _SdkBridgeErrorAdapter("legacy fixture error" if describe_error else RuntimeError("transport lost"),
+                                     raised=not describe_error, describe_error=describe_error)
+
+    async def scenario():
+        async with Runtime() as runtime:
+            if describe_error:
+                with pytest.raises(MuError, match="DEVICE_OFFLINE: legacy fixture error"):
+                    await runtime.add_adapter(adapter, name="fixture", resource_id="mac:fixture")
+                assert adapter.closed == 1 and not runtime._endpoints
+            else:
+                resource = await runtime.add_adapter(adapter, name="fixture", resource_id="mac:fixture")
+                async with runtime.session() as session:
+                    device = await session.register(resource, name="fixture")
+                    with pytest.raises(MuError, match="DEVICE_OFFLINE: transport lost"):
+                        await device._backend._request({"op": "observe", "tree": True, "app_id": "app:42:1"})
+                    assert len(adapter.requests) == 2
+
+    asyncio.run(scenario())
+
+
 def _sdk_offline_request_fixture(details, *, code="DEVICE_OFFLINE", recover=True, failures=1):
     import json
     from mai_ui import MuError
