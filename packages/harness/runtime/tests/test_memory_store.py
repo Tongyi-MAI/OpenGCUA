@@ -243,6 +243,47 @@ def test_duplicates_only_dedupe_candidates_and_never_overwrite_approved(tmp_path
     assert code_of(clash) == "MEMORY_DUPLICATE"
 
 
+@pytest.mark.parametrize("other_app", ["飞书", None])
+def test_duplicate_content_does_not_reuse_approval_from_another_app(tmp_path, other_app):
+    store = MemoryStore(tmp_path / "memory")
+    first = propose(store)
+    store.approve(first["memory_id"], 1)
+    # 重启服务也必须保留作用域；沿用已有 schema/hash，不迁移用户数据。
+    fresh = MemoryStore(tmp_path / "memory")
+    second = propose(fresh, app=other_app)
+    assert second["status"] == "candidate" and second["memory_id"] != first["memory_id"]
+    assert fresh.get(first["memory_id"])["status"] == "approved"
+    assert fresh.get(second["memory_id"])["status"] == "candidate"
+    assert fresh.recall("飞书 周报") == []
+    duplicate = propose(fresh, app=other_app)
+    assert duplicate["status"] == "duplicate" and duplicate["memory_id"] == second["memory_id"]
+    with sqlite3.connect(fresh.path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == memory_store.SCHEMA_VERSION
+
+
+def test_duplicate_scope_normalizes_case_and_whitespace(tmp_path):
+    store = MemoryStore(tmp_path / "memory")
+    first = propose(store, app="Google Chrome")
+    again = propose(store, app="  google   CHROME  ")
+    assert again["status"] == "duplicate" and again["memory_id"] == first["memory_id"]
+    assert again["generation"] == first["generation"]
+
+
+def test_update_duplicate_detection_uses_destination_scope(tmp_path):
+    store = MemoryStore(tmp_path / "memory")
+    first = propose(store, app="钉钉")
+    store.approve(first["memory_id"], 1)
+    second = propose(store, content="发送周报前先确认附件", app="飞书")
+    # 相同正文在不同应用可独立存在，修改后的条目仍要审核。
+    changed = store.update(second["memory_id"], 1, content=store.get(first["memory_id"])["content"])
+    assert changed["status"] == "candidate" and changed["revision"] == 2
+    assert store.recall("飞书 周报") == []
+    assert code_of(lambda: store.update(second["memory_id"], 2, app="钉钉")) == "MEMORY_DUPLICATE"
+    assert store.get(second["memory_id"])["app"] == "飞书"
+    assert store.get(second["memory_id"])["revision"] == 2
+    assert store.get(first["memory_id"])["status"] == "approved"
+
+
 def test_schema_version_unsupported_disables_service(tmp_path):
     root = tmp_path / "memory"
     service = MemoryService(root)

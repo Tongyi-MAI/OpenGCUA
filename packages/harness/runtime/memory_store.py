@@ -127,6 +127,11 @@ def _content_hash(kind: str, content: str) -> str:
     return hashlib.sha256((kind + "\n" + " ".join(content.casefold().split())).encode("utf-8")).hexdigest()
 
 
+def _scope_key(app: str | None) -> str:
+    # 保留旧数据库的正文 hash；去重另比应用范围，不能借用其它应用的批准状态。
+    return " ".join((app or "").casefold().split())
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -384,8 +389,10 @@ class MemoryStore:
 
         def operation(connection):
             for row in connection.execute(
-                "SELECT id, revision, status FROM memories WHERE content_hash = ?", (digest,)
+                "SELECT id, revision, status, app FROM memories WHERE content_hash = ?", (digest,)
             ):
+                if _scope_key(row["app"]) != _scope_key(fields["app"]):
+                    continue
                 status = "duplicate" if row["status"] == "candidate" else "duplicate_approved"
                 return {"status": status, "memory_id": row["id"], "revision": row["revision"],
                         "unchanged": True}
@@ -443,10 +450,10 @@ class MemoryStore:
                 row["app"] if app is _UNSET else app,
             )
             digest = _content_hash(fields["kind"], fields["content"])
-            clash = connection.execute(
-                "SELECT 1 FROM memories WHERE content_hash = ? AND id != ?", (digest, memory_id)
-            ).fetchone()
-            if clash is not None:
+            matches = connection.execute(
+                "SELECT app FROM memories WHERE content_hash = ? AND id != ?", (digest, memory_id)
+            )
+            if any(_scope_key(match["app"]) == _scope_key(fields["app"]) for match in matches):
                 raise MemoryStoreError("MEMORY_DUPLICATE")
             if row["status"] == "approved" and self._counts(connection)["candidate"] >= MAX_CANDIDATES:
                 raise MemoryStoreError("MEMORY_CANDIDATE_LIMIT")
