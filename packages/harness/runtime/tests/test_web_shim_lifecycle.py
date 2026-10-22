@@ -302,6 +302,40 @@ def test_busy_tab_does_not_rebuild_the_browser(monkeypatch, runtime_globals, cap
     assert "尚未结束" in capsys.readouterr().out
 
 
+def test_structured_scope_fence_keeps_browser_without_english_matching(monkeypatch, runtime_globals):
+    from mai_ui.unified.runtime import decode_error
+
+    error = decode_error(ValueError(json.dumps({
+        "code": "DEVICE_OFFLINE", "message": "网页操作尚未结束",
+        "details": {"cause": "scope_fenced", "scope": "browser:fixture/tab:2",
+                    "reason": "等待之前的操作完成", "next_step": "wait_for_operation"},
+    })))
+    busy = SdkWeb(error)
+    monkeypatch.setattr(code_runtime, "_SDK_WEB", busy)
+    monkeypatch.setattr(code_runtime, "_WEB_BUSY_SINCE", None)
+    monkeypatch.setattr(code_runtime, "_WEB_RETRY_AT", 0.0)
+    assert asyncio.run(code_runtime._reusable_web(busy)) is True
+    asyncio.run(code_runtime._ensure_web())
+    assert code_runtime._SDK_WEB is busy and busy.closed == [] and runtime_globals == []
+
+
+def test_structured_endpoint_offline_overrides_busy_words(monkeypatch, runtime_globals):
+    from mai_ui.unified.runtime import decode_error
+
+    error = decode_error(ValueError(json.dumps({
+        "code": "DEVICE_OFFLINE", "message": "worker stopped after being temporarily blocked",
+        "details": {"cause": "endpoint_offline", "scope": "browser:fixture",
+                    "reason": "worker stopped", "next_step": "host_reconnect"},
+    })))
+    dead = SdkWeb(error)
+    monkeypatch.setattr(code_runtime, "_SDK_WEB", dead)
+    monkeypatch.setattr(code_runtime, "_WEB_BUSY_SINCE", None)
+    install_sdk_removal(monkeypatch, dead)
+    assert asyncio.run(code_runtime._reusable_web(dead)) is False
+    asyncio.run(code_runtime._ensure_web())
+    assert dead.closed == [5000] and runtime_globals == [False]
+
+
 def test_browser_busy_beyond_any_budget_is_rebuilt(monkeypatch, runtime_globals):
     from mai_ui import MuError
 

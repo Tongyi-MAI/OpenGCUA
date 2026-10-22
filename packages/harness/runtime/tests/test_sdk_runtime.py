@@ -31,6 +31,85 @@ def test_checked_subprocess_failure_sets_cell_status_and_shows_child_stderr(caps
     assert "exit status 7" in captured.err
 
 
+@pytest.mark.parametrize("details", [
+    None, {}, {"cause": "scope_fenced", "scope": "web/tab:1",
+               "reason": "网页操作尚未完成", "next_step": "wait_for_operation"},
+    {"native_message": "原生输入被拒绝", "evidence": [{"native_code": "INPUT_REFUSED"}]},
+    ["provider-specific"],
+])
+def test_sdk_decode_error_preserves_provider_details(details):
+    import json
+    from mai_ui import MuError
+    from mai_ui.unified.runtime import decode_error
+
+    error = decode_error(ValueError(json.dumps({
+        "code": "DEVICE_OFFLINE", "message": "具体失败", "details": details,
+    })))
+    assert isinstance(error, MuError)
+    assert error.code == "DEVICE_OFFLINE"
+    assert str(error) == "DEVICE_OFFLINE: 具体失败"
+    assert error.details == details and error.receipt is None
+
+
+def test_sdk_decode_error_keeps_receipt_and_nested_native_details():
+    import json
+    from mai_ui.unified.runtime import decode_error
+
+    receipt = dict(action_id="a:1", sequence=1, session_id="s:1", attachment_id="d:1",
+                   resource_id="mac", provider="fixture", execution="rejected",
+                   effect="not_applied", error={"code": "INPUT_REFUSED", "details": {
+                       "native_message": "后台输入被拒绝", "mechanism": "background_keyboard"}})
+    details = {"receipt": receipt, "provider_extension": {"version": 1}}
+    error = decode_error(ValueError(json.dumps({
+        "code": "INPUT_REFUSED", "message": "native operation refused", "details": details,
+    })))
+    assert error.details == details
+    assert error.receipt.action_id == "a:1"
+    assert error.receipt.error == receipt["error"]
+
+
+def test_sdk_error_details_survive_sync_and_async_boundaries():
+    import json
+    from mai_ui import MuError
+    from mai_ui.unified.runtime import call, native
+
+    details = {"cause": "endpoint_offline", "scope": "web", "next_step": "host_reconnect"}
+    wire = json.dumps({"code": "DEVICE_OFFLINE", "message": "worker stopped", "details": details})
+
+    def failed_state():
+        raise ValueError(wire)
+
+    class Core:
+        async def call(self, _wire):
+            raise ValueError(wire)
+
+    for invoke in (lambda: native(failed_state), lambda: asyncio.run(call(Core(), {"op": "request"}))):
+        with pytest.raises(MuError) as caught:
+            invoke()
+        assert caught.value.details == details
+        assert isinstance(caught.value.__cause__, ValueError)
+
+
+def test_sdk_error_details_do_not_change_legacy_strings_or_cancellation():
+    import json
+    from mai_ui import MuError, ShellError
+    from mai_ui.unified.runtime import call, decode_error
+
+    for raw in ("DEVICE_OFFLINE", json.dumps({"code": "DEVICE_OFFLINE"})):
+        error = decode_error(ValueError(raw))
+        assert str(error) == "DEVICE_OFFLINE" and error.details is None
+    assert str(MuError("INPUT_REFUSED", "INPUT_REFUSED: already prefixed")) == "INPUT_REFUSED: already prefixed"
+    assert ShellError("SHELL_TIMEOUT", command_id="cmd:1").details is None
+
+    class Core:
+        async def call(self, _wire):
+            raise ValueError(json.dumps({"code": "CANCELLED_BEFORE_DISPATCH",
+                                         "details": {"scope": "web"}}))
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(call(Core(), {"op": "request"}))
+
+
 def test_point_api_does_not_accept_wall_clock_expiry_keyword():
     import inspect
     from mai_ui.unified.observations import Image

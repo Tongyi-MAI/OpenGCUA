@@ -3438,7 +3438,11 @@ async def _reusable_web(web: Any) -> bool:
         busy = "list_tabs 未在 5 秒内返回"
     except Exception as exc:  # noqa: BLE001 - classified below
         code = getattr(exc, "code", None)
-        if code == "DEADLINE_EXCEEDED" or (code == "DEVICE_OFFLINE" and "temporarily blocked" in str(exc)):
+        details = getattr(exc, "details", None)
+        cause = details.get("cause") if isinstance(details, dict) else None
+        # 新 SDK 以结构化原因区分断线和作用域阻塞；旧 SDK 才回退到原有文案。
+        fenced = cause == "scope_fenced" if cause is not None else "temporarily blocked" in str(exc)
+        if code == "DEADLINE_EXCEEDED" or (code == "DEVICE_OFFLINE" and fenced):
             busy = str(exc)
         else:
             _WEB_FAILURE = str(exc)

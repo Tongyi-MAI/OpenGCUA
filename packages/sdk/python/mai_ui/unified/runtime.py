@@ -34,9 +34,10 @@ def decode_error(error):
         data = json.loads(str(error))
     except (ValueError, TypeError):
         return MuError(str(error))
-    details = data.get("details") or {}
-    receipt = ActionReceipt(**details["receipt"]) if "receipt" in details else None
-    return MuError(data["code"], data.get("message", ""), receipt=receipt)
+    details = data.get("details")
+    receipt = (ActionReceipt(**details["receipt"])
+               if isinstance(details, dict) and "receipt" in details else None)
+    return MuError(data["code"], data.get("message", ""), receipt=receipt, details=details)
 
 
 def encode(request):

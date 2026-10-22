@@ -4,7 +4,7 @@ from .types import ShellResult
 
 
 class MuError(Exception):
-    def __init__(self, code, message="", *, receipt=None, stop_receipt=None, shell_result=None):
+    def __init__(self, code, message="", *, receipt=None, stop_receipt=None, shell_result=None, details=None):
         super().__init__(
             message
             if message == code or message.startswith(code + ":")
@@ -13,6 +13,8 @@ class MuError(Exception):
             else code
         )
         self.code = code
+        # 保留 provider 的结构化诊断；不拼入异常文本，也不据此自动恢复或授权。
+        self.details = details
         self.receipt = receipt
         self.stop_receipt = stop_receipt
         self.shell_result = shell_result

@@ -150,7 +150,9 @@ impl Endpoint {
             let reason = self
                 .offline_reason()
                 .unwrap_or_else(|| "cause was not recorded".into());
-            return Error::new("DEVICE_OFFLINE", format!("{id} is offline: {reason}"));
+            return Error::new("DEVICE_OFFLINE", format!("{id} is offline: {reason}"))
+                .with_details(json!({"cause":"endpoint_offline", "scope":id,
+                    "reason":reason, "next_step":"host_reconnect"}));
         }
         let scope = self
             .fenced
@@ -159,17 +161,15 @@ impl Endpoint {
             .iter()
             .find(|f| resource == f.as_str() || resource.starts_with(&format!("{f}/")))
             .cloned();
-        let reason = scope.and_then(|f| {
-            self.reasons
-                .lock()
-                .unwrap()
-                .get(&f)
-                .map(|r| format!("{f} is temporarily blocked: {r}"))
-        });
-        Error::new(
-            "DEVICE_OFFLINE",
-            reason.unwrap_or_else(|| format!("{resource} is blocked by an unfinished operation")),
-        )
+        let scope = scope.unwrap_or_else(|| resource.to_string());
+        let reason = self.reasons.lock().unwrap().get(&scope).cloned();
+        let message = reason.as_ref()
+            .map(|r| format!("{scope} is temporarily blocked: {r}"))
+            .unwrap_or_else(|| format!("{resource} is blocked by an unfinished operation"));
+        Error::new("DEVICE_OFFLINE", message)
+            .with_details(json!({"cause":"scope_fenced", "scope":scope,
+                "reason":reason.unwrap_or_else(|| "unfinished operation".into()),
+                "next_step":"wait_for_operation"}))
     }
 }
 /// Short operation label for diagnostics, e.g. "browser.playwright.locator.click".
@@ -979,6 +979,26 @@ mod tests {
         assert_eq!(events["events"].as_array().unwrap().len(), 1);
         assert_eq!(events["events"][0]["resource_id"], "web/t1");
     }
+    #[test]
+    fn offline_diagnostics_distinguish_endpoint_and_scope_without_changing_state() {
+        let (r, _) = fixture();
+        let e = r.endpoint("web").unwrap();
+        e.fence("web/t1", "previous operation is running");
+        let blocked = e.offline_error("web/t1/child");
+        assert_eq!(blocked.code, "DEVICE_OFFLINE");
+        assert_eq!(blocked.details, Some(json!({"cause":"scope_fenced", "scope":"web/t1",
+            "reason":"previous operation is running", "next_step":"wait_for_operation"})));
+        assert!(!e.offline.load(Ordering::SeqCst));
+        assert!(e.fenced.lock().unwrap().contains("web/t1"));
+        e.mark_offline("worker stopped after being temporarily blocked");
+        e.mark_offline("later reason must not overwrite the first");
+        let offline = e.offline_error("web/t1");
+        assert_eq!(offline.details, Some(json!({"cause":"endpoint_offline", "scope":"web",
+            "reason":"worker stopped after being temporarily blocked", "next_step":"host_reconnect"})));
+        assert!(e.offline.load(Ordering::SeqCst));
+        e.unfence("web/t1");
+        assert_eq!(e.offline_error("web").details.unwrap()["cause"], "endpoint_offline");
+    }
     #[tokio::test]
     async fn fenced_tab_reports_the_blocking_operation() {
         let (r, b) = fixture();
@@ -986,7 +1006,8 @@ mod tests {
         let slow = tokio::spawn(async move {
             r1.request("a","web/t1",json!({"op":"browser","operation":"evaluate","tab_id":"t1","source":"()=>1","action_id":"slow","timeout_ms":50})).await
         });
-        let wire = b.next().await.unwrap();
+        let wire = tokio::time::timeout(Duration::from_secs(1), b.next())
+            .await.expect("fixture request must reach the provider").unwrap();
         assert_eq!(slow.await.unwrap().unwrap_err().code, "ACTION_OUTCOME_UNKNOWN");
         let blocked = r
             .request("a","web/t1",json!({"op":"browser","operation":"evaluate","tab_id":"t1","source":"()=>1","action_id":"next","timeout_ms":50}))
@@ -996,6 +1017,11 @@ mod tests {
         assert!(blocked.message.contains("temporarily blocked"), "{}", blocked.message);
         assert!(blocked.message.contains("browser.evaluate (id slow)"), "{}", blocked.message);
         assert!(blocked.message.contains("50 ms budget"), "{}", blocked.message);
+        let details = blocked.details.unwrap();
+        assert_eq!(details["cause"], "scope_fenced");
+        assert_eq!(details["scope"], "web/t1");
+        assert_eq!(details["next_step"], "wait_for_operation");
+        assert!(details["reason"].as_str().unwrap().contains("browser.evaluate (id slow)"));
         b.reply(json!({"_request_id":wire["_request_id"],"result":{"execution":"completed"}})).unwrap();
         for _ in 0..100 {
             if r.endpoint("web").unwrap().fenced.lock().unwrap().is_empty() {
