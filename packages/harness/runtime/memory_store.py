@@ -216,9 +216,16 @@ class MemoryStore:
             raise
         except (OSError, sqlite3.Error) as exc:
             raise MemoryStoreError("MEMORY_UNAVAILABLE") from exc
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA secure_delete=ON")
-        connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA secure_delete=ON")
+            connection.execute("PRAGMA foreign_keys=ON")
+        except sqlite3.Error as exc:
+            # 初始化也属于存储边界；不能泄漏半初始化连接或让原始 SQLite 异常中断业务。
+            try:
+                connection.close()
+            finally:
+                raise MemoryStoreError("MEMORY_UNAVAILABLE") from exc
         return connection
 
     def _schema(self, connection: sqlite3.Connection, *, write: bool) -> bool:

@@ -341,22 +341,48 @@ def test_request_app_scope_does_not_recall_shared_vendor_experience(tmp_path, mo
     assert len(native_blocks) == 1 and "Chrome 专属经验" in native_blocks[0]["content"]
 
 
+@pytest.mark.parametrize("failure_mode", ["exclusive_lock", "connection_setup"])
 @pytest.mark.parametrize("frontend_mode", ["cli", "native"])
-def test_memory_read_outage_and_recovery_reach_requests_without_false_revocation(tmp_path, monkeypatch, frontend_mode):
+def test_memory_read_outage_and_recovery_reach_requests_without_false_revocation(tmp_path, monkeypatch, frontend_mode, failure_mode):
     import sqlite3
     import memory_store
 
     _, memory_id, candidate_id = seed(tmp_path)
     monkeypatch.setattr(memory_store, "_BUSY_TIMEOUT", 0.01)
     connection = sqlite3.connect(tmp_path / "memory" / memory_store.DB_NAME)
+    setup_failed = False
+    original_connect = sqlite3.connect
+
+    class SetupFailure(sqlite3.Connection):
+        def execute(self, statement, *args, **kwargs):
+            if setup_failed and statement == "PRAGMA foreign_keys=ON":
+                raise sqlite3.OperationalError("private-setup-diagnostic")
+            return super().execute(statement, *args, **kwargs)
+
+    if failure_mode == "connection_setup":
+        monkeypatch.setattr(memory_store.sqlite3, "connect",
+                            lambda *args, **kwargs: original_connect(*args, factory=SetupFailure, **kwargs))
+
+    def begin_failure():
+        nonlocal setup_failed
+        if failure_mode == "exclusive_lock":
+            connection.execute("BEGIN EXCLUSIVE")
+        else:
+            setup_failed = True
+
+    def end_failure():
+        nonlocal setup_failed
+        connection.rollback()
+        setup_failed = False
+
     try:
         if frontend_mode == "cli":
             def lock_then_continue(_frontend):
-                connection.execute("BEGIN EXCLUSIVE")
+                begin_failure()
                 return "继续处理钉钉周报"
 
             def unlock_then_continue(_frontend):
-                connection.rollback()
+                end_failure()
                 return "继续处理钉钉周报"
 
             requests, frontend, _ = run_cli(tmp_path, monkeypatch, [lock_then_continue, unlock_then_continue])
@@ -375,10 +401,10 @@ def test_memory_read_outage_and_recovery_reach_requests_without_false_revocation
                     await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == 0)
                     control = host.control
                     before = (control.foreground_allowed, control.authorization_epoch, control.policy_revision)
-                    connection.execute("BEGIN EXCLUSIVE")
+                    begin_failure()
                     for index in (1, 2):
                         if index == 2:
-                            connection.rollback()
+                            end_failure()
                         await host.command({"command": "message", "task_id": "outage", "message_id": f"next-{index}",
                                             "text": "继续处理钉钉周报"})
                         await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == index)
@@ -394,7 +420,7 @@ def test_memory_read_outage_and_recovery_reach_requests_without_false_revocation
         connection.rollback()
         connection.close()
 
-    # 真 SQLite 排他锁 + 共享 run_agent/NativeHost；模型、SDK、桌面仍是离线 fixture。
+    # 真 SQLite 排他锁或初始化故障注入 + 共享 run_agent/NativeHost；模型、SDK、桌面仍是离线 fixture。
     assert len(requests) == 3
     assert [status["memory_count"] for status in statuses] == [1, 0, 1]
     for index in (0, 2):
@@ -406,6 +432,7 @@ def test_memory_read_outage_and_recovery_reach_requests_without_false_revocation
     assert "已批准正文" not in blocked and "已被用户删除或修改" not in blocked
     assert len(blocked) <= memory_store.RECALL_CHARS
     assert all(candidate_id not in json.dumps(request, ensure_ascii=False) for request in requests)
+    assert "private-setup-diagnostic" not in json.dumps(requests, ensure_ascii=False)
 
 
 def test_no_match_and_disabled_memory_change_nothing(tmp_path, monkeypatch):

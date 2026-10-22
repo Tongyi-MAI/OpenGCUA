@@ -320,6 +320,80 @@ def test_update_duplicate_detection_uses_destination_scope(tmp_path):
     assert store.get(first["memory_id"])["status"] == "approved"
 
 
+@pytest.mark.parametrize("failed_pragma", ["PRAGMA secure_delete=ON", "PRAGMA foreign_keys=ON"])
+def test_connection_setup_failure_is_bounded_closes_handle_and_allows_recovery(tmp_path, monkeypatch, failed_pragma):
+    service = MemoryService(tmp_path / "memory")
+    created = service.propose({"title": "钉钉周报流程", "content": "先核对附件", "app": "钉钉"})
+    memory_id = created["memory_id"]
+    assert service.mutate("approve", memory_id, 1)[0]["ok"]
+    shown, revoked = {}, []
+    assert "先核对附件" in service.recall_block("钉钉 周报", shown, revoked)
+    original_connect = sqlite3.connect
+    opened, closed = [], []
+
+    class SetupFailure(sqlite3.Connection):
+        def execute(self, statement, *args, **kwargs):
+            if statement == failed_pragma:
+                raise sqlite3.OperationalError("private-database-diagnostic")
+            return super().execute(statement, *args, **kwargs)
+
+        def close(self):
+            closed.append(self)
+            return super().close()
+
+    def connect(*args, **kwargs):
+        connection = original_connect(*args, factory=SetupFailure, **kwargs)
+        opened.append(connection)
+        return connection
+
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_store.sqlite3, "connect", connect)
+        # 连接已成功但 PRAGMA 初始化失败：读、候选、用户审核均须走相同有界错误边界。
+        block = service.recall_block("钉钉 周报", shown, revoked)
+        catalog = service.catalog_fields()
+        proposal = service.propose({"title": "周报草稿", "content": "先核对标题"})
+        mutation, _ = service.mutate("forget", memory_id, 2)
+        assert code_of(lambda: MemoryStore(service.root).get(memory_id)) == "MEMORY_UNAVAILABLE"
+        assert "MEMORY_UNAVAILABLE" in block and "无法核验" in block
+        assert "先核对附件" not in block and "已被用户删除或修改" not in block
+        assert shown == {memory_id: 2} and revoked == []
+        assert not catalog["available"] and catalog["error_code"] == "MEMORY_UNAVAILABLE"
+        assert proposal["status"] == "not_available" and proposal["error_code"] == "MEMORY_UNAVAILABLE"
+        assert not mutation["ok"] and mutation["error_code"] == "MEMORY_UNAVAILABLE"
+        assert "private-database-diagnostic" not in json.dumps([block, catalog, proposal, mutation])
+        assert opened and closed == opened
+        for connection in opened:
+            with pytest.raises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+
+    # 不自动修复或批准；初始化恢复可用后重读原版本，失败的遗忘没有落盘。
+    assert service.available and service.error_code is None
+    assert "先核对附件" in service.recall_block("钉钉 周报", shown, revoked)
+    assert shown == {memory_id: 2} and revoked == []
+    assert MemoryStore(service.root).get(memory_id)["revision"] == 2
+    assert service.catalog_fields()["candidate_count"] == 0
+
+
+def test_corrupt_database_is_unavailable_without_rewriting_or_disclosing_bytes(tmp_path):
+    root = tmp_path / "memory"
+    root.mkdir(mode=0o700)
+    path = root / memory_store.DB_NAME
+    corrupted = b"not-a-sqlite-database private-fixture-body" * 8
+    path.write_bytes(corrupted)
+    path.chmod(0o600)
+    service = MemoryService(root)
+    shown, revoked = {"m_previous": 2}, []
+    block = service.recall_block("钉钉 周报", shown, revoked)
+    catalog = service.catalog_fields()
+    proposal = service.propose({"title": "周报流程", "content": "先核对附件"})
+    assert "MEMORY_UNAVAILABLE" in block and "无法核验" in block
+    assert shown == {"m_previous": 2} and revoked == []
+    assert not catalog["available"] and catalog["error_code"] == "MEMORY_UNAVAILABLE"
+    assert proposal["error_code"] == "MEMORY_UNAVAILABLE" and not proposal["ok"]
+    assert "private-fixture-body" not in json.dumps([block, catalog, proposal])
+    assert path.read_bytes() == corrupted and service.available
+
+
 def test_schema_version_unsupported_disables_service(tmp_path):
     root = tmp_path / "memory"
     service = MemoryService(root)
