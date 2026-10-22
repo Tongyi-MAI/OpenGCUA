@@ -161,7 +161,11 @@ class MemoryStore:
     def __init__(self, directory: Path):
         self.directory = Path(directory).expanduser().absolute()
         self.path = self.directory / DB_NAME
-        self._check_directory(create=False)
+        try:
+            self._check_directory(create=False)
+        except OSError as exc:
+            # 首次懒初始化也属于存储边界；系统调用故障不能越过服务降级而中断任务。
+            raise MemoryStoreError("MEMORY_UNAVAILABLE") from exc
 
     # -- 文件安全 -------------------------------------------------------------
     def _check_directory(self, *, create: bool) -> bool:

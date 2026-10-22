@@ -435,6 +435,78 @@ def test_memory_read_outage_and_recovery_reach_requests_without_false_revocation
     assert "private-setup-diagnostic" not in json.dumps(requests, ensure_ascii=False)
 
 
+@pytest.mark.parametrize("frontend_mode", ["cli", "native"])
+def test_initial_memory_directory_outage_does_not_abort_task_and_recovers(tmp_path, monkeypatch, frontend_mode):
+    import os
+    import memory_store
+
+    _, memory_id, candidate_id = seed(tmp_path)
+    root = tmp_path / "memory"
+    original_lstat = memory_store.os.lstat
+    unavailable = True
+
+    def lstat(path, *args, **kwargs):
+        if unavailable and os.fspath(path) == str(root):
+            raise PermissionError("private-directory-diagnostic")
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(memory_store.os, "lstat", lstat)
+    if frontend_mode == "cli":
+        def recover_then_continue(_frontend):
+            nonlocal unavailable
+            unavailable = False
+            return "继续处理钉钉周报"
+
+        requests, frontend, _ = run_cli(tmp_path, monkeypatch, [recover_then_continue])
+        statuses = [event.payload for event in frontend.events if event.kind == "context_status"]
+    else:
+        requests = []
+        install_fakes(monkeypatch, requests)
+
+        async def scenario():
+            nonlocal unavailable
+            events = []
+            host = NativeHost(events.append, tmp_path / "runs")
+            try:
+                await host.command({"command": "memory_list", "command_id": "unavailable"})
+                catalog = next(event for event in events if event.get("event") == "memory_catalog")
+                assert catalog["available"] is False and catalog["error_code"] == "MEMORY_UNAVAILABLE"
+                # 无 live 会话的连接级目录沿用 legacy 帧，不套任务 v1 信封。
+                assert catalog["task_id"] is None and "schema_version" not in catalog
+                assert catalog["source_command_id"] == "unavailable"
+                await host.command({"command": "start", "task_id": "initial-outage", "text": "帮我在钉钉发周报",
+                                    "config": {"llm_base_url": "https://offline.invalid/v1", "model_name": "fixture",
+                                               "allow_empty_api_key": True, "startup_observation": "none", "countdown": 0}})
+                await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == 0)
+                control = host.control
+                before = (control.foreground_allowed, control.authorization_epoch, control.policy_revision)
+                unavailable = False
+                await host.command({"command": "message", "task_id": "initial-outage", "message_id": "next",
+                                    "text": "继续处理钉钉周报"})
+                await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == 1)
+                assert (control.foreground_allowed, control.authorization_epoch, control.policy_revision) == before
+                assert host.memory_service.catalog_fields()["available"]
+                assert "private-directory-diagnostic" not in json.dumps(events, ensure_ascii=False)
+            finally:
+                await host.close()
+            return [event for event in events if event.get("kind") == "context_status"]
+
+        statuses = asyncio.run(scenario())
+        for status in statuses:
+            validate_event(dict(status))
+
+    # 真目录检查故障与 run_agent/NativeHost 接线；模型、SDK、桌面为离线 fixture。
+    assert len(requests) == 2 and [status["memory_count"] for status in statuses] == [0, 1]
+    blocked = memory_messages(requests[0])[0]["content"]
+    assert "MEMORY_UNAVAILABLE" in blocked and "无法核验" in blocked and "不得作为依据" in blocked
+    assert "已批准正文" not in blocked and "已被用户删除或修改" not in blocked
+    recovered = memory_messages(requests[1])[0]["content"]
+    assert "已批准正文：发送前先确认收件人" in recovered and f"{memory_id} · r2" in recovered
+    assert "无法核验" not in recovered and "## 已失效" not in recovered
+    assert candidate_id not in json.dumps(requests, ensure_ascii=False)
+    assert "private-directory-diagnostic" not in json.dumps(requests, ensure_ascii=False)
+
+
 def test_no_match_and_disabled_memory_change_nothing(tmp_path, monkeypatch):
     seed(tmp_path)
     model_inputs, _, _ = run_cli(tmp_path, monkeypatch, [], task="打开计算器算 1+1")

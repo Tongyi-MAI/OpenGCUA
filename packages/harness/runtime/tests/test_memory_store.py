@@ -634,6 +634,55 @@ def test_locked_recall_retains_tracking_and_detects_forget_after_recovery(tmp_pa
     assert shown == {} and revoked == [f"{memory_id} r2"]
 
 
+@pytest.mark.parametrize("failure_point", ["lstat", "chmod"])
+@pytest.mark.parametrize("error_type", [PermissionError, OSError])
+def test_initial_directory_failure_is_bounded_and_recoverable(tmp_path, monkeypatch, failure_point, error_type):
+    root = tmp_path / "memory"
+    seeded = MemoryService(root)
+    created = seeded.propose({"title": "钉钉周报流程", "content": "先核对附件", "app": "钉钉"})
+    memory_id = created["memory_id"]
+    assert seeded.mutate("approve", memory_id, 1)[0]["ok"]
+    if failure_point == "chmod":
+        # 只更改测试临时目录；模拟现有私有权限收紧路径的系统调用失败。
+        os.chmod(root, 0o755)
+    service = MemoryService(root)
+    shown, revoked = {memory_id: 2}, ["m_old r2"]
+    original = getattr(memory_store.os, failure_point)
+
+    def fail(path, *args, **kwargs):
+        if os.fspath(path) == str(root):
+            raise error_type("private-directory-diagnostic")
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_store.os, failure_point, fail)
+        with pytest.raises(MemoryStoreError) as caught:
+            MemoryStore(root)
+        assert caught.value.code == "MEMORY_UNAVAILABLE"
+        assert isinstance(caught.value.__cause__, error_type)
+        catalog = service.catalog_fields()
+        proposal = service.propose({"title": "钉钉新流程", "content": "另一条待审核经验"})
+        mutation, _ = service.mutate("approve", memory_id, 2)
+        block = service.recall_block("钉钉 周报", shown, revoked)
+        for result in (catalog, proposal, mutation):
+            assert result["error_code"] == "MEMORY_UNAVAILABLE"
+        assert not catalog["available"] and not proposal["ok"] and not mutation["ok"]
+        assert proposal["status"] == "not_available"
+        assert "无法核验" in block and "不得作为依据" in block
+        assert "已被用户删除或修改" not in block and "先核对附件" not in block
+        assert "MEMORY_UNAVAILABLE" in service.handle_command("list")
+        assert "private-directory-diagnostic" not in json.dumps([catalog, proposal, mutation, block])
+        assert service.available and service._store is None
+        assert shown == {memory_id: 2} and revoked == ["m_old r2"]
+
+    assert service.catalog_fields()["available"]
+    block = service.recall_block("钉钉 周报", shown, revoked)
+    assert "先核对附件" in block and "无法核验" not in block
+    assert shown == {memory_id: 2} and revoked == ["m_old r2"]
+    assert service.catalog_fields()["candidate_count"] == 0
+    assert MemoryStore(root).get(memory_id)["revision"] == 2
+
+
 def test_mutate_returns_same_generation_catalog_and_bounded_errors(tmp_path):
     service = MemoryService(tmp_path / "memory")
     created = service.propose({"title": "钉钉周报流程", "content": "先确认收件人"})
