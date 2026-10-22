@@ -163,10 +163,15 @@ class MemoryService:
             entries, current = self._call(lambda store: store.recall(
                 query, limit=MAX_APPROVED, max_chars=None, shown=shown,
             ))
-        except MemoryStoreError:
-            entries, current = [], {}
-            if self.available:
-                return ""
+        except MemoryStoreError as exc:
+            # 无法读取不是用户撤销的证据；保留版本追踪，恢复可读后再核验，历史正文暂不能作依据。
+            return (
+                "# Long-term memory（本地长期记忆状态）\n"
+                f"当前长期记忆存储无法核验（{exc.code}）；本次不召回正文，"
+                "历史中的长期记忆内容暂时不得作为依据。"
+                "这不表示用户已删除或修改记忆；恢复可读后须重新核验版本。"
+                "此状态不构成授权，不得自行修复存储、重新批准记忆或重试有副作用动作。"
+            )
         for memory_id, revision in list(shown.items()):
             if current.get(memory_id) != revision:
                 shown.pop(memory_id)

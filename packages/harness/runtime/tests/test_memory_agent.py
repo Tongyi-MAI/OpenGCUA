@@ -6,6 +6,8 @@ import json
 import sys
 import types
 
+import pytest
+
 from agent_events import AgentEvent, AgentPrompt, ForegroundApprovalPrompt, handle_memory_command
 from event_protocol import validate_event
 from memory_runtime import MemoryService
@@ -337,6 +339,73 @@ def test_request_app_scope_does_not_recall_shared_vendor_experience(tmp_path, mo
     assert "Chrome 专属经验" not in json.dumps(native_requests[0], ensure_ascii=False)
     native_blocks = memory_messages(native_requests[1])
     assert len(native_blocks) == 1 and "Chrome 专属经验" in native_blocks[0]["content"]
+
+
+@pytest.mark.parametrize("frontend_mode", ["cli", "native"])
+def test_memory_read_outage_and_recovery_reach_requests_without_false_revocation(tmp_path, monkeypatch, frontend_mode):
+    import sqlite3
+    import memory_store
+
+    _, memory_id, candidate_id = seed(tmp_path)
+    monkeypatch.setattr(memory_store, "_BUSY_TIMEOUT", 0.01)
+    connection = sqlite3.connect(tmp_path / "memory" / memory_store.DB_NAME)
+    try:
+        if frontend_mode == "cli":
+            def lock_then_continue(_frontend):
+                connection.execute("BEGIN EXCLUSIVE")
+                return "继续处理钉钉周报"
+
+            def unlock_then_continue(_frontend):
+                connection.rollback()
+                return "继续处理钉钉周报"
+
+            requests, frontend, _ = run_cli(tmp_path, monkeypatch, [lock_then_continue, unlock_then_continue])
+            statuses = [event.payload for event in frontend.events if event.kind == "context_status"]
+        else:
+            requests = []
+            install_fakes(monkeypatch, requests)
+
+            async def scenario():
+                events = []
+                host = NativeHost(events.append, tmp_path / "runs")
+                try:
+                    await host.command({"command": "start", "task_id": "outage", "text": "帮我在钉钉发周报",
+                                        "config": {"llm_base_url": "https://offline.invalid/v1", "model_name": "fixture",
+                                                   "allow_empty_api_key": True, "startup_observation": "none", "countdown": 0}})
+                    await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == 0)
+                    control = host.control
+                    before = (control.foreground_allowed, control.authorization_epoch, control.policy_revision)
+                    connection.execute("BEGIN EXCLUSIVE")
+                    for index in (1, 2):
+                        if index == 2:
+                            connection.rollback()
+                        await host.command({"command": "message", "task_id": "outage", "message_id": f"next-{index}",
+                                            "text": "继续处理钉钉周报"})
+                        await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == index)
+                    assert (control.foreground_allowed, control.authorization_epoch, control.policy_revision) == before
+                finally:
+                    await host.close()
+                return [event for event in events if event.get("kind") == "context_status"]
+
+            statuses = asyncio.run(scenario())
+            for status in statuses:
+                validate_event(dict(status))
+    finally:
+        connection.rollback()
+        connection.close()
+
+    # 真 SQLite 排他锁 + 共享 run_agent/NativeHost；模型、SDK、桌面仍是离线 fixture。
+    assert len(requests) == 3
+    assert [status["memory_count"] for status in statuses] == [1, 0, 1]
+    for index in (0, 2):
+        block = memory_messages(requests[index])[0]["content"]
+        assert "已批准正文：发送前先确认收件人" in block and f"{memory_id} · r2" in block
+        assert "无法核验" not in block and "## 已失效" not in block
+    blocked = memory_messages(requests[1])[0]["content"]
+    assert "MEMORY_UNAVAILABLE" in blocked and "无法核验" in blocked and "不得作为依据" in blocked
+    assert "已批准正文" not in blocked and "已被用户删除或修改" not in blocked
+    assert len(blocked) <= memory_store.RECALL_CHARS
+    assert all(candidate_id not in json.dumps(request, ensure_ascii=False) for request in requests)
 
 
 def test_no_match_and_disabled_memory_change_nothing(tmp_path, monkeypatch):

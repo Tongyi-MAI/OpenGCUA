@@ -502,6 +502,64 @@ def test_recall_keeps_old_revision_invalid_after_reapproval(tmp_path, recall_bef
     assert shown == {} and revoked == [f"{memory_id} r2", f"{memory_id} r4", f"{memory_id} r6"]
 
 
+@pytest.mark.parametrize("error_code", [
+    "MEMORY_UNAVAILABLE", "MEMORY_UNSAFE_PATH", "MEMORY_SCHEMA_UNSUPPORTED",
+])
+def test_recall_failure_does_not_claim_user_revocation_or_discard_versions(tmp_path, monkeypatch, error_code):
+    service = MemoryService(tmp_path / "memory")
+    created = service.propose({"title": "钉钉周报流程", "content": "先核对附件", "app": "钉钉"})
+    memory_id = created["memory_id"]
+    assert service.mutate("approve", memory_id, 1)[0]["ok"]
+    shown, revoked = {}, ["m_old r2"]
+    assert "先核对附件" in service.recall_block("钉钉 周报", shown, revoked)
+
+    def fail(*_args, **_kwargs):
+        raise MemoryStoreError(error_code)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(MemoryStore, "recall", fail)
+        for _ in range(2):
+            block = service.recall_block("钉钉 周报", shown, revoked)
+            assert block.startswith("# Long-term memory") and error_code in block
+            assert "无法核验" in block and "不得作为依据" in block
+            assert "先核对附件" not in block and memory_id not in block
+            assert "已被用户删除或修改" not in block and "## 已失效" not in block
+            assert len(block) <= memory_store.RECALL_CHARS
+            assert shown == {memory_id: 2} and revoked == ["m_old r2"]
+    if error_code == "MEMORY_UNAVAILABLE":
+        assert service.available
+        block = service.recall_block("钉钉 周报", shown, revoked)
+        assert "先核对附件" in block and "无法核验" not in block
+        assert shown == {memory_id: 2} and revoked == ["m_old r2"]
+    else:
+        assert not service.available
+        assert error_code in service.recall_block("钉钉 周报", shown, revoked)
+        assert MemoryStore(service.root).get(memory_id)["revision"] == 2
+
+
+def test_locked_recall_retains_tracking_and_detects_forget_after_recovery(tmp_path, monkeypatch):
+    service = MemoryService(tmp_path / "memory")
+    created = service.propose({"title": "钉钉周报流程", "content": "先核对附件", "app": "钉钉"})
+    memory_id = created["memory_id"]
+    assert service.mutate("approve", memory_id, 1)[0]["ok"]
+    shown, revoked = {}, []
+    assert "先核对附件" in service.recall_block("钉钉 周报", shown, revoked)
+    monkeypatch.setattr(memory_store, "_BUSY_TIMEOUT", 0.01)
+    connection = sqlite3.connect(service.root / memory_store.DB_NAME)
+    try:
+        connection.execute("BEGIN EXCLUSIVE")
+        block = service.recall_block("钉钉 周报", shown, revoked)
+        assert "MEMORY_UNAVAILABLE" in block and "不得作为依据" in block
+        assert shown == {memory_id: 2} and revoked == [] and service.available
+    finally:
+        connection.rollback()
+        connection.close()
+    assert service.mutate("forget", memory_id, 2)[0]["ok"]
+    block = service.recall_block("钉钉 周报", shown, revoked)
+    assert "已失效" in block and f"{memory_id} r2" in block and "先核对附件" not in block
+    assert shown == {} and revoked == [f"{memory_id} r2"]
+
+
 def test_mutate_returns_same_generation_catalog_and_bounded_errors(tmp_path):
     service = MemoryService(tmp_path / "memory")
     created = service.propose({"title": "钉钉周报流程", "content": "先确认收件人"})
