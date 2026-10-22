@@ -5,6 +5,26 @@ import { ProviderError, requireValue } from "./errors.js";
 import { browserInput, buttonHeld } from "./input.js";
 
 type Q = Record<string, any>;
+/** Playwright's own timeout ends before the host deadline, so a slow step returns a
+ * typed error instead of tripping the host's outcome-unknown fence on the tab. */
+export function innerTimeout(budgetMs: number): number {
+  return Math.max(1, budgetMs - Math.min(2000, Math.floor(budgetMs / 5)));
+}
+const TAKEOVER_HINT =
+  "Do not foreground the browser: read the link/form URL and open it in the current tab " +
+  "(pg.goto) or with web.browser.new_tab(url). If that is impossible, tell the user they can " +
+  "open the dedicated browser window themselves to do this step.";
+/** Run a pre-action probe inside the action's own budget; a missing element means nothing was done. */
+async function probe<T>(target: any, fn: (element: Element) => T, timeout: number): Promise<T> {
+  try {
+    return await target.evaluate(fn, undefined, { timeout });
+  } catch (error: any) {
+    if (error?.name === "TimeoutError")
+      throw new ProviderError("TARGET_NOT_FOUND",
+        `Locator matched no element within ${timeout} ms; no input was sent`);
+    throw error;
+  }
+}
 export function encodeValue(v: any): any {
   if (v === undefined) return { t: "undefined" };
   if (Buffer.isBuffer(v)) return { t: "bytes", v: v.toString("base64") };
@@ -95,6 +115,9 @@ function resolve(page: Page, query: any[], depth = 0): any {
   return target;
 }
 export async function executePlaywright(page: Page, q: Q): Promise<any> {
+  const started = performance.now();
+  const budget = innerTimeout(q.timeout_ms);
+  const remaining = () => Math.max(1, budget - (performance.now() - started));
   const spec = contract.methods[q.kind]?.[q.method];
   requireValue(
     spec && Object.hasOwn(contract.methods[q.kind], q.method),
@@ -139,9 +162,15 @@ export async function executePlaywright(page: Page, q: Q): Promise<any> {
       );
     args[index] = {
       ...options,
-      timeout: Math.min(options.timeout || q.timeout_ms, q.timeout_ms),
+      timeout: Math.min(options.timeout || budget, budget),
       signal: q.signal,
     };
+  }
+  // Navigation returns once the DOM is parsed, like browser.new_tab; Playwright's
+  // "load" default waits for every subresource and long-polling shops never finish.
+  if (q.kind === "page" && ["goto", "goBack", "goForward", "reload"].includes(q.method)) {
+    const index = spec.option_index;
+    args[index] = { waitUntil: "domcontentloaded", ...(args[index] ?? {}) };
   }
   if (q.method === "waitForTimeout") {
     requireValue(
@@ -164,7 +193,8 @@ export async function executePlaywright(page: Page, q: Q): Promise<any> {
     return encodeValue(undefined);
   }
   if (q.background_launch && q.kind === "locator" && q.method === "click") {
-    const needsForeground = await target.evaluate((element: Element) => {
+    const options = args[spec.option_index] ?? {};
+    const needsForeground = await probe(target, (element: Element) => {
       const link = element.closest("a");
       if (link?.target.toLowerCase() === "_blank") return true;
       const submitter = element.closest("button, input[type=submit], input[type=image]");
@@ -178,10 +208,12 @@ export async function executePlaywright(page: Page, q: Q): Promise<any> {
       if (!search) return true;
       form.target = "_self";
       return false;
-    });
+    }, Math.min(options.timeout ?? budget, remaining()));
     if (needsForeground)
       throw new ProviderError("ACTION_REJECTED",
-        "FOREGROUND_TAKEOVER_REQUIRED: This action opens a new tab and may activate Chrome. Ask the user before foreground takeover, then use a visible browser.");
+        `FOREGROUND_TAKEOVER_REQUIRED: This click opens a new tab and may bring Chrome to the front. ${TAKEOVER_HINT}`);
+    if (options.timeout !== undefined)
+      args[spec.option_index] = { ...options, timeout: Math.min(options.timeout, remaining()) };
   }
   if (q.kind === "page" && ["evaluate", "waitForFunction"].includes(q.method)) {
     requireValue(
@@ -204,7 +236,7 @@ export async function executePlaywright(page: Page, q: Q): Promise<any> {
   }
   if (q.kind === "locator" && q.method === "press") {
     if (q.background_launch && ["Enter", "NumpadEnter"].includes(args[0])) {
-      const needsForeground = await target.evaluate((element: Element) => {
+      const needsForeground = await probe(target, (element: Element) => {
         if (!(element instanceof HTMLInputElement)) return false;
         const form = element.form;
         if (!form || form.target.toLowerCase() !== "_blank") return false;
@@ -216,12 +248,12 @@ export async function executePlaywright(page: Page, q: Q): Promise<any> {
         // Native submission of a search form may otherwise create a foreground tab.
         form.target = "_self";
         return false;
-      });
+      }, remaining());
       if (needsForeground)
         throw new ProviderError("ACTION_REJECTED",
-          "FOREGROUND_TAKEOVER_REQUIRED: This form opens a new tab and may activate Chrome. Ask the user before foreground takeover, then use a visible browser.");
+          `FOREGROUND_TAKEOVER_REQUIRED: This form opens a new tab and may bring Chrome to the front. ${TAKEOVER_HINT}`);
     }
-    await target.focus({ timeout: q.timeout_ms });
+    await target.focus({ timeout: remaining() });
     return encodeValue(
       await browserInput(page, "keyboard", "press", args, q.signal),
     );

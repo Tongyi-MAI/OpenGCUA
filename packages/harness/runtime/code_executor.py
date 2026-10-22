@@ -22,6 +22,8 @@ from action_feedback import action_feedback, remember_feedback, render_feedback
 CTRL_PREFIX = "__MAC_AGENT_CTRL__ "
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 MAX_CONTROL_BYTES = 8 * 1024 * 1024
+# 正常关闭时给 worker 自行收尾（保存登录态、关闭专用浏览器）的时间，超时仍硬杀。
+_GRACEFUL_STOP_SECONDS = 8
 OUTPUT_LIMITS = {"stdout": 256 * 1024, "stderr": 64 * 1024}
 BLOCK_PROGRESS_FIELDS = (
     "total_blocks", "started_blocks", "completed_blocks", "stopped_block", "stop_reason",
@@ -1181,7 +1183,7 @@ class CodeExecutor:
         parent.setblocking(False)
         try:
             spawning = asyncio.create_task(asyncio.create_subprocess_exec(
-                sys.executable, "-u", str(self.runtime_path), "--worker", str(child.fileno()),
+                sys.executable, "-B", "-u", str(self.runtime_path), "--worker", str(child.fileno()),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
@@ -1214,9 +1216,18 @@ class CodeExecutor:
                 pass
         self._child_groups.clear()
 
-    async def _stop_worker(self) -> None:
+    async def _stop_worker(self, *, graceful: bool = False) -> None:
         process, writer, watch = self._process, self._writer, self._watch_task
         self._process = self._reader = self._writer = self._watch_task = None
+        if graceful and process is not None and process.returncode is None and writer is not None:
+            # 正常收尾：关闭控制通道，worker 读到 EOF 后保存登录态并关闭专用浏览器再退出；
+            # 硬杀会跳过这一步，用 LaunchServices 启动的 Chrome 不在进程组里，会留在系统中。
+            # 监视任务取消时会硬杀进程组；必须等 worker 收尾退出后再取消它。
+            writer.close()
+            try:
+                await asyncio.wait_for(asyncio.shield(process.wait()), _GRACEFUL_STOP_SECONDS)
+            except asyncio.TimeoutError:
+                pass
         if process is not None:
             _kill_group(process)
         self._stop_child_groups()
@@ -1247,13 +1258,13 @@ class CodeExecutor:
         self._skill_reset_pending = True
 
     async def close(self) -> None:
-        """幂等关闭；取消进行中的轮次并硬清理整个 worker 进程组。"""
+        """幂等关闭；取消进行中的轮次，让 worker 有限时自行收尾，再硬清理整个进程组。"""
         self._closed = True
         active = self._active_run
         if active is not None and active is not asyncio.current_task():
             active.cancel()
         async with self._lock:
-            await asyncio.shield(self._stop_worker())
+            await asyncio.shield(self._stop_worker(graceful=True))
 
     async def __aenter__(self) -> CodeExecutor:
         if self._closed:

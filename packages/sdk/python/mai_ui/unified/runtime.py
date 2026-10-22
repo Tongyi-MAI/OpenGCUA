@@ -150,6 +150,13 @@ class _Endpoint:
     def offline(self, value):
         self._offline = value
 
+    @property
+    def offline_reason(self):
+        try:
+            return state(self._core, op="endpoint", id=self.info.id).get("offline_reason")
+        except MuError as error:
+            return str(error)
+
 
 class _NativeAdapter:
     def __init__(self, core, resource_id, provider):

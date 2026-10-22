@@ -109,12 +109,13 @@ impl Host {
                     }
                 }
             });
-            let mut closed=p.closed_signal(); let weak=Arc::downgrade(self);
+            let mut closed=p.closed_signal(); let weak=Arc::downgrade(self); let worker=Arc::downgrade(&p);
             tokio::spawn(async move {
                 while !*closed.borrow_and_update() {if closed.changed().await.is_err(){break}}
                 if let Some(host)=weak.upgrade() {if let Ok(e)=host.runtime.endpoint(&id) {
-                    e.offline.store(true,Ordering::SeqCst);
-                    host.runtime.provider_event(&id,json!({"type":"resource_offline","resource_id":id,"data":{"reason":"worker_exited"}}));
+                    let detail=worker.upgrade().and_then(|p|p.exit_reason()).unwrap_or_else(||"linux worker exited".into());
+                    e.mark_offline(format!("the linux worker process stopped: {detail}"));
+                    host.runtime.provider_event(&id,json!({"type":"resource_offline","resource_id":id,"data":{"reason":"worker_exited","detail":detail}}));
                 }}
             });
             Ok(info)

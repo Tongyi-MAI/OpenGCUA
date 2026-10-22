@@ -86,8 +86,12 @@ impl Provider for Bridge {
     fn request(&self, q: Request) -> ProviderFuture<'_, Reply> {
         Box::pin(async move {
             let (tx, rx) = oneshot::channel();
-            self.tx.send((q, tx)).map_err(|_| err("DEVICE_OFFLINE"))?;
-            rx.await.map_err(|_| err("DEVICE_OFFLINE"))?
+            self.tx
+                .send((q, tx))
+                .map_err(|_| Error::new("DEVICE_OFFLINE", "host adapter bridge is closed"))?;
+            rx.await.map_err(|_| {
+                Error::new("DEVICE_OFFLINE", "host adapter bridge dropped the request without a reply")
+            })?
         })
     }
     fn close(&self) -> ProviderFuture<'_, ()> {
@@ -95,7 +99,10 @@ impl Provider for Bridge {
             self.closed.store(true, Ordering::SeqCst);
             self.close_event.notify_waiters();
             for (_, tx) in self.pending.lock().unwrap().drain() {
-                let _ = tx.send(Err(err("DEVICE_OFFLINE")));
+                let _ = tx.send(Err(Error::new(
+                    "DEVICE_OFFLINE",
+                    "host adapter bridge closed before replying",
+                )));
             }
             Ok(())
         })
@@ -109,6 +116,71 @@ pub struct Endpoint {
     pub offline: AtomicBool,
     pub context_gate: Arc<RwLock<()>>,
     pub fenced: Mutex<HashSet<String>>,
+    /// Why the endpoint went offline (key "") or a scope was fenced (key = resource).
+    pub reasons: Mutex<HashMap<String, String>>,
+}
+impl Endpoint {
+    /// Latch the endpoint offline; the first recorded cause wins.
+    pub fn mark_offline(&self, reason: impl Into<String>) {
+        self.reasons
+            .lock()
+            .unwrap()
+            .entry(String::new())
+            .or_insert_with(|| reason.into());
+        self.offline.store(true, Ordering::SeqCst);
+    }
+    pub fn fence(&self, resource: &str, reason: impl Into<String>) {
+        self.reasons
+            .lock()
+            .unwrap()
+            .insert(resource.to_string(), reason.into());
+        self.fenced.lock().unwrap().insert(resource.to_string());
+    }
+    pub fn unfence(&self, resource: &str) {
+        self.fenced.lock().unwrap().remove(resource);
+        self.reasons.lock().unwrap().remove(resource);
+    }
+    pub fn offline_reason(&self) -> Option<String> {
+        self.reasons.lock().unwrap().get("").cloned()
+    }
+    /// DEVICE_OFFLINE carrying the recorded cause instead of a bare code.
+    pub fn offline_error(&self, resource: &str) -> Error {
+        let id = self.info["id"].as_str().unwrap_or("endpoint");
+        if self.offline.load(Ordering::SeqCst) {
+            let reason = self
+                .offline_reason()
+                .unwrap_or_else(|| "cause was not recorded".into());
+            return Error::new("DEVICE_OFFLINE", format!("{id} is offline: {reason}"));
+        }
+        let scope = self
+            .fenced
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|f| resource == f.as_str() || resource.starts_with(&format!("{f}/")))
+            .cloned();
+        let reason = scope.and_then(|f| {
+            self.reasons
+                .lock()
+                .unwrap()
+                .get(&f)
+                .map(|r| format!("{f} is temporarily blocked: {r}"))
+        });
+        Error::new(
+            "DEVICE_OFFLINE",
+            reason.unwrap_or_else(|| format!("{resource} is blocked by an unfinished operation")),
+        )
+    }
+}
+/// Short operation label for diagnostics, e.g. "browser.playwright.locator.click".
+fn describe_wire(wire: &Value) -> String {
+    let mut parts = vec![wire["op"].as_str().unwrap_or("request").to_string()];
+    for key in ["operation", "action", "kind", "method"] {
+        if let Some(v) = wire[key].as_str() {
+            parts.push(v.to_string());
+        }
+    }
+    parts.join(".")
 }
 struct Operation {
     result: watch::Sender<Option<Result<Value, Error>>>,
@@ -154,7 +226,12 @@ impl Embedded {
             .unwrap()
             .get(id)
             .cloned()
-            .ok_or_else(|| err("DEVICE_OFFLINE"))
+            .ok_or_else(|| {
+                Error::new(
+                    "DEVICE_OFFLINE",
+                    format!("{id} is no longer registered (it was removed or its session closed)"),
+                )
+            })
     }
     pub fn add(
         &self,
@@ -188,6 +265,7 @@ impl Embedded {
                 offline: AtomicBool::new(false),
                 context_gate: Arc::new(RwLock::new(())),
                 fenced: Mutex::default(),
+                reasons: Mutex::default(),
             }),
         );
         Ok(info)
@@ -219,7 +297,7 @@ impl Embedded {
         self.check_session(&a.session)?;
         let e = self.endpoint(&a.conflict_domain)?;
         if e.offline.load(Ordering::SeqCst) || e.fenced.lock().unwrap().contains(&a.resource) {
-            return Err(err("DEVICE_OFFLINE"));
+            return Err(e.offline_error(&a.resource));
         }
         Ok(a)
     }
@@ -283,7 +361,7 @@ impl Embedded {
             .iter()
             .any(|f| resource == f || resource.starts_with(&(f.clone() + "/")))
         {
-            return Err(err("DEVICE_OFFLINE"));
+            return Err(endpoint.offline_error(resource));
         }
 
         crate::policy::validate(
@@ -370,7 +448,9 @@ impl Embedded {
             if let Some(result) = rx.borrow().clone() {
                 return result;
             }
-            rx.changed().await.map_err(|_| err("DEVICE_OFFLINE"))?;
+            rx.changed().await.map_err(|_| {
+                Error::new("DEVICE_OFFLINE", "operation was dropped before it produced a result")
+            })?;
         }
     }
     async fn dispatch(
@@ -422,6 +502,7 @@ impl Embedded {
         let dispatched = Arc::new(AtomicBool::new(false));
         let dispatched2 = dispatched.clone();
         let observation = !mutation && wire["op"] == "observe";
+        let what = describe_wire(&wire);
         // The owned task retains every guard until the provider reply drains, even
         // when the caller's deadline expires. No next write can overtake it.
         let this = self.clone();
@@ -474,7 +555,7 @@ impl Embedded {
             // Cancellable provider failures only fence this scope. A drained reply
             // establishes that no adapter operation remains in flight.
             if cancellable {
-                e2.fenced.lock().unwrap().remove(&resource2);
+                e2.unfence(&resource2);
             }
             if let Some(error) = reply.error {
                 return Err(error);
@@ -482,8 +563,8 @@ impl Embedded {
             Ok(reply.result.unwrap())
         });
         let (outcome, deadline_expired) = tokio::select! {
-            result=&mut task=>(result.map_err(|_|err("DEVICE_OFFLINE")).and_then(|v|v), false),
-            _=tokio::time::sleep(limit)=>(Err(err("DEADLINE_EXCEEDED")), true),
+            result=&mut task=>(result.map_err(|_|Error::new("DEVICE_OFFLINE","provider task was aborted before replying")).and_then(|v|v), false),
+            _=tokio::time::sleep(limit)=>(Err(Error::new("DEADLINE_EXCEEDED",format!("{what} did not finish within its {} ms budget",limit.as_millis()))), true),
             _=op.wake.notified()=>(Err(err(if dispatched.load(Ordering::SeqCst){"ACTION_OUTCOME_UNKNOWN"}else{"CANCELLED_BEFORE_DISPATCH"})), false),
         };
         let was_dispatched = dispatched.load(Ordering::SeqCst);
@@ -518,18 +599,24 @@ impl Embedded {
                         let endpoint = e.clone();
                         tokio::spawn(async move {
                             let lost = match task.await {
-                                Err(_) => true,
-                                Ok(Err(error)) => matches!(
-                                    error.code.as_str(),
-                                    "DEVICE_OFFLINE"
-                                        | "SESSION_CLOSED"
-                                        | "PROTOCOL_MISMATCH"
-                                        | "ACTION_OUTCOME_UNKNOWN"
-                                ),
-                                _ => false,
+                                Err(_) => Some("the capture task was aborted".to_string()),
+                                Ok(Err(error))
+                                    if matches!(
+                                        error.code.as_str(),
+                                        "DEVICE_OFFLINE"
+                                            | "SESSION_CLOSED"
+                                            | "PROTOCOL_MISMATCH"
+                                            | "ACTION_OUTCOME_UNKNOWN"
+                                    ) =>
+                                {
+                                    Some(error.to_string())
+                                }
+                                _ => None,
                             };
-                            if lost {
-                                endpoint.offline.store(true, Ordering::SeqCst);
+                            if let Some(cause) = lost {
+                                endpoint.mark_offline(format!(
+                                    "a capture that exceeded its deadline later failed ({cause})"
+                                ));
                             }
                         });
                     } else if !was_dispatched {
@@ -571,10 +658,16 @@ impl Embedded {
                     task.abort();
                 }
                 if unknown {
+                    let cause = format!(
+                        "{what} (id {key}) failed after it was dispatched ({error}); its outcome is unknown"
+                    );
                     if cancellable {
-                        e.fenced.lock().unwrap().insert(resource.clone());
+                        e.fence(
+                            &resource,
+                            format!("{cause}, and the provider is still running it. Requests to this scope are rejected until that operation finishes; other tabs are unaffected"),
+                        );
                     } else {
-                        e.offline.store(true, Ordering::SeqCst);
+                        e.mark_offline(cause);
                     }
                     if mutation {
                         error.code = "ACTION_OUTCOME_UNKNOWN".into();
@@ -601,11 +694,11 @@ impl Embedded {
                         tokio::spawn(async move {
                             let _ = task.await;
                             if cancellable {
-                                e3.fenced.lock().unwrap().remove(&resource3);
+                                e3.unfence(&resource3);
                             }
                         });
                     } else if cancellable {
-                        e.fenced.lock().unwrap().remove(&resource);
+                        e.unfence(&resource);
                     }
                 }
                 record["execution"] = json!(if unknown {
@@ -700,10 +793,16 @@ impl Embedded {
         .is_ok_and(|v| v.is_ok());
         if drained {
             self.core.lock().unwrap().authority.detach(id);
-        } else if tab_only {
-            e.fenced.lock().unwrap().insert(a.resource.clone());
         } else {
-            e.offline.store(true, Ordering::SeqCst);
+            let cause = format!(
+                "detaching {} could not drain its in-flight work within {ms} ms",
+                a.resource
+            );
+            if tab_only {
+                e.fence(&a.resource, cause);
+            } else {
+                e.mark_offline(cause);
+            }
         }
         self.event(&a.session,json!({"type":"attachment_removed","attachment":{"id":a.id,"name":a.name,"resource_id":a.resource,"access":a.access}}));
         Ok(json!({"attachment_id":id,"state":"detached","in_flight_drained":drained}))
@@ -765,7 +864,7 @@ impl Embedded {
     }
     pub async fn remove(&self, id: &str) -> Result<(), Error> {
         let e = self.endpoint(id)?;
-        e.offline.store(true, Ordering::SeqCst);
+        e.mark_offline("the endpoint was removed by the host");
         e.provider.close().await?;
         let mut core = self.core.lock().unwrap();
         let ids: Vec<_> = core
@@ -879,5 +978,33 @@ mod tests {
         let events = r.events("reader", 1).unwrap();
         assert_eq!(events["events"].as_array().unwrap().len(), 1);
         assert_eq!(events["events"][0]["resource_id"], "web/t1");
+    }
+    #[tokio::test]
+    async fn fenced_tab_reports_the_blocking_operation() {
+        let (r, b) = fixture();
+        let r1 = r.clone();
+        let slow = tokio::spawn(async move {
+            r1.request("a","web/t1",json!({"op":"browser","operation":"evaluate","tab_id":"t1","source":"()=>1","action_id":"slow","timeout_ms":50})).await
+        });
+        let wire = b.next().await.unwrap();
+        assert_eq!(slow.await.unwrap().unwrap_err().code, "ACTION_OUTCOME_UNKNOWN");
+        let blocked = r
+            .request("a","web/t1",json!({"op":"browser","operation":"evaluate","tab_id":"t1","source":"()=>1","action_id":"next","timeout_ms":50}))
+            .await
+            .unwrap_err();
+        assert_eq!(blocked.code, "DEVICE_OFFLINE");
+        assert!(blocked.message.contains("temporarily blocked"), "{}", blocked.message);
+        assert!(blocked.message.contains("browser.evaluate (id slow)"), "{}", blocked.message);
+        assert!(blocked.message.contains("50 ms budget"), "{}", blocked.message);
+        b.reply(json!({"_request_id":wire["_request_id"],"result":{"execution":"completed"}})).unwrap();
+        for _ in 0..100 {
+            if r.endpoint("web").unwrap().fenced.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let endpoint = r.endpoint("web").unwrap();
+        assert!(endpoint.fenced.lock().unwrap().is_empty());
+        assert!(endpoint.reasons.lock().unwrap().is_empty());
     }
 }

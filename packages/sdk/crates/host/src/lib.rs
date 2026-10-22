@@ -105,7 +105,7 @@ impl Host {
                 }
                 let e = &matches[0];
                 if e.offline.load(Ordering::SeqCst) {
-                    return Err(err("DEVICE_OFFLINE"));
+                    return Err(e.offline_error(s(&e.info, "id")?));
                 }
                 if e.info["platform"] == "linux" && ["app_id", "window_id", "tab_id"].iter().any(|k| !routing[k].is_null()) {
                     return Err(err("UNSUPPORTED_CAPABILITY"));
@@ -188,7 +188,7 @@ impl Host {
             "endpoint" => {
                 let e = self.runtime.endpoint(s(&q, "id")?)?;
                 return Ok(
-                    json!({"info":e.info,"description":*e.description.lock().unwrap(),"offline":e.offline.load(Ordering::SeqCst)}),
+                    json!({"info":e.info,"description":*e.description.lock().unwrap(),"offline":e.offline.load(Ordering::SeqCst),"offline_reason":e.offline_reason()}),
                 );
             }
             "catalog" => {
@@ -214,7 +214,7 @@ impl Host {
                     .lock()
                     .unwrap()
                     .get(s(&q, "id")?)
-                    .ok_or_else(|| err("DEVICE_OFFLINE"))?
+                    .ok_or_else(|| Error::new("DEVICE_OFFLINE", "host adapter bridge is no longer registered"))?
                     .reply(q["reply"].clone())?;
                 return Ok(Value::Null);
             }
@@ -401,7 +401,7 @@ impl Host {
                     .unwrap()
                     .get(s(&q, "id")?)
                     .cloned()
-                    .ok_or_else(|| err("DEVICE_OFFLINE"))?;
+                    .ok_or_else(|| Error::new("DEVICE_OFFLINE", "host adapter bridge is no longer registered"))?;
                 bridge.next().await
             }
             "unregister" => {
@@ -421,7 +421,12 @@ impl Host {
                     .events(s(&q, "session")?, q["after"].as_u64().unwrap_or(0) as usize)
             }
             "remove" => {
-                self.runtime.remove(s(&q, "id")?).await?;
+                let id = s(&q, "id")?;
+                self.runtime.remove(id).await?;
+                self.artifacts.lock().unwrap().remove(id);
+                for owned in self.owned.lock().unwrap().values_mut() {
+                    owned.retain(|resource| resource != id);
+                }
                 Ok(Value::Null)
             }
             "close_session" => {
@@ -615,6 +620,7 @@ impl Host {
         );
         let mut closed = p.closed_signal();
         let weak = Arc::downgrade(self);
+        let worker = Arc::downgrade(&p);
         let failed_endpoint = id.clone();
         tokio::spawn(async move {
             while !*closed.borrow_and_update() {
@@ -624,8 +630,12 @@ impl Host {
             }
             if let Some(host) = weak.upgrade() {
                 if let Ok(e) = host.runtime.endpoint(&failed_endpoint) {
-                    e.offline.store(true, Ordering::SeqCst);
-                    host.runtime.provider_event(&failed_endpoint,json!({"type":"resource_offline","resource_id":failed_endpoint,"data":{"reason":"worker_exited"}}));
+                    let detail = worker
+                        .upgrade()
+                        .and_then(|p| p.exit_reason())
+                        .unwrap_or_else(|| "browser worker exited".into());
+                    e.mark_offline(format!("the browser worker process stopped: {detail}"));
+                    host.runtime.provider_event(&failed_endpoint,json!({"type":"resource_offline","resource_id":failed_endpoint,"data":{"reason":"worker_exited","detail":detail}}));
                 }
             }
         });

@@ -20,6 +20,13 @@ def main():
         subprocess.run(["ditto", str(source), str(bundle)], check=True)
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(bundle)], check=True)
         resources = bundle / "Contents/Resources"
+        # 登录态的内部临时页也要走后台建页，不能只验证显式 new_tab。
+        patch = '...(this.isCreatingStorageStatePage() ? { background: true } : {})'
+        for script in (
+            resources / "browser-worker/node_modules/playwright-core/lib/coreBundle.js",
+            resources / "python/lib/python3.12/site-packages/playwright/driver/package/lib/coreBundle.js",
+        ):
+            assert script.read_text(encoding="utf-8").count(patch) == 1, f"后台登录态补丁缺失：{script}"
         info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
         assert info["LSUIElement"] is False, "Dock 入口不能被 bundle 配置隐藏"
         assert info["CFBundleDevelopmentRegion"] == "en"

@@ -13,6 +13,7 @@ import tarfile
 import tempfile
 import urllib.request
 from signing import resolve_identity, pin_identity, sign
+from browser_storage_patch import patch_storage_helpers
 
 ROOT = Path(__file__).resolve().parents[3]
 APP_ROOT = ROOT / "packages/macos"
@@ -115,6 +116,30 @@ def main():
         run(uv, "pip", "install", "--python", destination / "bin/python3", "--require-hashes", "-r", APP_ROOT / "requirements.lock")
         run(uv, "pip", "install", "--python", destination / "bin/python3", "--no-deps", wheel, ROOT / "packages/harness/runtime")
         run(uv, "pip", "check", "--python", destination / "bin/python3")
+        # SDK browser worker ships inside the app and runs on the Node bundled with
+        # Playwright for Python: no dependency on the user's Node or ~/.cache/mai-ui.
+        adapter = ROOT / "packages/sdk/adapters/browser-playwright"
+        worker_root = resources / "browser-worker"
+        if worker_root.exists():
+            shutil.rmtree(worker_root)
+        (worker_root / "dist").mkdir(parents=True)
+        for name in ("package.json", "package-lock.json"):
+            shutil.copy2(adapter / name, worker_root / name)
+        for script in (adapter / "dist").glob("*.js"):
+            shutil.copy2(script, worker_root / "dist" / script.name)
+        npm = shutil.which("npm")
+        if not npm:
+            raise SystemExit("Build requires npm to bundle the browser worker; end users do not need it.")
+        run(npm, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", cwd=worker_root)
+        expected = json.loads((adapter / "package.json").read_text())["dependencies"]["playwright"]
+        bundled = json.loads((worker_root / "node_modules/playwright/package.json").read_text())["version"]
+        if bundled != expected or not (worker_root / "dist/background.js").is_file():
+            raise SystemExit(f"Bundled browser worker is incomplete (playwright {bundled}, expected {expected})")
+        # 只修补构建副本，不改用户 npm/Python 环境。两条浏览器路径的登录态
+        # 内部临时页都必须按后台 target 创建，防止每步快照再次抢前台。
+        patch_storage_helpers(worker_root / "node_modules/playwright-core")
+        driver_package = destination / "lib/python3.12/site-packages/playwright/driver/package"
+        patch_storage_helpers(driver_package)
         lock = json.loads((ROOT / "packages/sdk/adapters/macos/cua-driver.lock.json").read_text())
         cache = BUILD / "cache"
         cache.mkdir(exist_ok=True)

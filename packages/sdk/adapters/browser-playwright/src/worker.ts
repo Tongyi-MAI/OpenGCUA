@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Identity } from "./identity.js";
 import { ProviderError, requireValue } from "./errors.js";
-import { executePlaywright, encodeValue } from "./playwright.js";
+import { executePlaywright, encodeValue, innerTimeout } from "./playwright.js";
 import { browserInput, releaseInput, buttonHeld, pause } from "./input.js";
 import {
   createBackgroundPage,
@@ -47,6 +47,11 @@ const operations = new Map<string, AbortController>();
 const downloadTasks = new Set<Promise<void>>();
 let ownsArtifactDirectory = false;
 let stopping = false;
+/** Diagnostics go to stderr, which the host keeps in its provider log and crash reports. */
+const log = (message: string) =>
+  process.stderr.write(`${new Date().toISOString()} ${message}\n`);
+const describeRequest = (q: Request) =>
+  [q.op, q.operation, q.action, q.kind, q.method].filter((v) => typeof v === "string").join(".");
 const send = (value: unknown) =>
   process.stdout.write(JSON.stringify(value) + "\n");
 const event = (type: string, data: unknown, tab?: Tab) =>
@@ -63,7 +68,12 @@ const complete = (extra: Request = {}) => ({
   ...extra,
 });
 function getContext(): BrowserContext {
-  if (!context) throw new ProviderError("DEVICE_OFFLINE");
+  if (!context)
+    throw new ProviderError("DEVICE_OFFLINE",
+      stopping ? "The browser worker is shutting down" : "The browser was not started or has been closed");
+  if (!browser?.isConnected())
+    throw new ProviderError("DEVICE_OFFLINE",
+      "Dedicated Chrome disconnected: the browser exited or its CDP connection closed; the Node worker is still running");
   return context;
 }
 async function newPage(timeoutMs = 30000): Promise<Page> {
@@ -759,11 +769,11 @@ async function browserOperation(q: Request) {
     };
   if (operation === "get_tab") return inventory(getTab(q.id));
   if (operation === "new_tab") {
-    const newTab = addTab(await newPage(q.timeout_ms));
+    const newTab = addTab(await newPage(innerTimeout(q.timeout_ms)));
     try {
       if (q.url && q.url !== "about:blank")
         await newTab.page.goto(q.url, {
-          timeout: q.timeout_ms,
+          timeout: innerTimeout(q.timeout_ms),
           waitUntil: q.wait_until ?? "domcontentloaded",
           signal: q.signal,
         });
@@ -816,7 +826,7 @@ async function browserOperation(q: Request) {
   const page = tab.page;
   if (["goto", "go_back", "go_forward", "reload"].includes(operation)) {
     const options = {
-      timeout: q.timeout_ms,
+      timeout: innerTimeout(q.timeout_ms),
       waitUntil: q.wait_until ?? "domcontentloaded",
       signal: q.signal,
     };
@@ -1006,6 +1016,10 @@ async function request(q: Request) {
           timeout: q.timeout_ms ?? 30000,
         });
       }
+      browser.on("disconnected", () => {
+        if (!stopping) log("browser disconnected unexpectedly (Chrome exited or its CDP pipe closed)");
+      });
+      log(`browser launched: ${q.engine}${q.channel ? `/${q.channel}` : ""} ${browser.version()} background=${backgroundTabs}`);
       if (backgroundTabs) {
         const isolated = await createIsolatedBackgroundContext(browser, contextOptions);
         context = isolated.context;
@@ -1015,6 +1029,7 @@ async function request(q: Request) {
         context = await browser.newContext(contextOptions);
       }
     } catch (error) {
+      log(`browser launch failed: ${(error as Error)?.stack ?? error}`);
       if (closeBackgroundBrowser) await closeBackgroundBrowser().catch(() => {});
       else await browser?.close().catch(() => {});
       throw error;
@@ -1041,7 +1056,9 @@ async function request(q: Request) {
   if (q.op === "action") return action(getTab(q.tab_id), q);
   if (q.op === "browser") return browserOperation(q);
   if (q.op === "cancel") {
-    operations.get(q.operation_id)?.abort();
+    const pending = operations.get(q.operation_id);
+    log(`cancel requested for ${q.operation_id} (${pending ? "still running" : "already finished"})`);
+    pending?.abort();
     return { cancel_requested: true };
   }
   if (q.op === "release_inputs") {
@@ -1077,21 +1094,35 @@ input.on("line", (line) => {
     return;
   }
   const abort = new AbortController();
+  const started = Date.now();
   operations.set(q._operation_id ?? String(q._request_id), abort);
   Object.defineProperty(q, "signal", { value: abort.signal });
+  const slow = () => {
+    const elapsed = Date.now() - started;
+    return typeof q.timeout_ms === "number" && elapsed > q.timeout_ms
+      ? `${describeRequest(q)} took ${elapsed} ms, beyond its ${q.timeout_ms} ms budget`
+      : undefined;
+  };
   void request(q)
     .then(
-      (result) => send({ _request_id: q._request_id, result }),
+      (result) => {
+        const late = slow();
+        if (late) log(`late reply: ${late}`);
+        send({ _request_id: q._request_id, result });
+      },
       (error) => {
         const known = error instanceof ProviderError;
+        const code = known
+          ? error.code
+          : error?.name === "TimeoutError"
+            ? "ACTION_OUTCOME_UNKNOWN"
+            : "PROVIDER_ERROR";
+        if (!known || slow())
+          log(`${describeRequest(q)} failed after ${Date.now() - started} ms with ${code}: ${error?.stack ?? error}`);
         send({
           _request_id: q._request_id,
           error: {
-            code: known
-              ? error.code
-              : error?.name === "TimeoutError"
-                ? "ACTION_OUTCOME_UNKNOWN"
-                : "PROVIDER_ERROR",
+            code,
             message: String(error?.message ?? error),
             details: known ? error.details : undefined,
           },
@@ -1100,6 +1131,21 @@ input.on("line", (line) => {
     )
     .finally(() => operations.delete(q._operation_id ?? String(q._request_id)));
 });
-input.on("close", () => void shutdown().finally(() => process.exit(0)));
-process.on("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
-process.on("SIGINT", () => void shutdown().finally(() => process.exit(0)));
+input.on("close", () => {
+  log("host closed stdin; shutting down");
+  void shutdown().finally(() => process.exit(0));
+});
+for (const signal of ["SIGTERM", "SIGINT"] as const)
+  process.on(signal, () => {
+    log(`received ${signal}; shutting down`);
+    void shutdown().finally(() => process.exit(0));
+  });
+process.on("uncaughtException", (error) => {
+  log(`uncaught exception: ${error?.stack ?? error}`);
+  process.exit(70);
+});
+process.on("unhandledRejection", (reason) => {
+  log(`unhandled rejection: ${(reason as Error)?.stack ?? reason}`);
+});
+process.on("exit", (code) => log(`worker exiting with code ${code}`));
+log(`browser worker started: node ${process.version} pid ${process.pid}`);

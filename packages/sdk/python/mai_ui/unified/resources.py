@@ -200,7 +200,8 @@ class Device:
                 raise
             return
         if offline and not defer:
-            raise MuError("DEVICE_OFFLINE")
+            reason = self._endpoint.offline_reason or "endpoint offline; cause was not recorded"
+            raise MuError("DEVICE_OFFLINE", reason)
 
     async def capabilities(self):
         self._check()

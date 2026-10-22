@@ -10,6 +10,11 @@ import pytest
 import web_shim
 
 
+@pytest.fixture(autouse=True)
+def _isolated_leases(monkeypatch, tmp_path):
+    monkeypatch.setenv("GENERALIST_DATA_DIR", str(tmp_path / "data"))
+
+
 def test_background_page_is_in_isolated_context_and_does_not_request_focus():
     async def run():
         from playwright.async_api import async_playwright
@@ -192,9 +197,10 @@ def test_background_launcher_opens_separate_chromium_without_activation(monkeypa
     assert actual is browser
     assert owned_profile == Path(profile)
     assert launched[0] == (
-        "/usr/bin/open", "-g", "-n", "-a", "Google Chrome", "--args",
+        "/usr/bin/open", "-g", "-j", "-n", "-a", "Google Chrome", "--args",
         "--remote-debugging-port=0", f"--user-data-dir={profile}",
-        "--no-first-run", "--no-default-browser-check", "--no-startup-window")
+        "--no-first-run", "--no-default-browser-check", "--no-startup-window",
+        *web_shim._HIDDEN_RENDERING_FLAGS)
     assert launched[1][0] == "http://127.0.0.1:9345"
 
 
@@ -208,16 +214,19 @@ def test_failed_background_launch_stops_only_its_own_chrome(monkeypatch, tmp_pat
         calls.append(args)
         if args[0] == "/usr/bin/open":
             return SimpleNamespace(wait=lambda: asyncio.sleep(0, result=0))
-        if args[0] == "/bin/ps":
-            return SimpleNamespace(communicate=lambda: asyncio.sleep(0, result=(
-                (f"123 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
-                 f"--user-data-dir={profile}\n"
-                 "456 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
-                 "--user-data-dir=/tmp/another-profile\n").encode(), b"")))
         raise AssertionError(args)
+
+    def fake_ps(args, **_kwargs):
+        assert args[0] == "/bin/ps"
+        return SimpleNamespace(stdout=(
+            f"123 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
+            f"--user-data-dir={profile}\n"
+            "456 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
+            "--user-data-dir=/tmp/another-profile\n"))
 
     killed = []
     monkeypatch.setattr(web_shim.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(web_shim.subprocess, "run", fake_ps)
     monkeypatch.setattr(web_shim.os, "kill", lambda pid, sig: killed.append((pid, sig)))
     pw = SimpleNamespace(chromium=SimpleNamespace(
         executable_path="/Applications/Chromium.app/Contents/MacOS/Chromium"))

@@ -71,9 +71,14 @@ _SDK_DEVICE = None
 _SDK_PHONE = None
 _SDK_PHONE_RESOURCE = None
 _SDK_WEB = None
-_SDK_NATIVE_WEB_FAILURE: str | None = None
+_WEB_RETRY_AT = 0.0
+# web 为 None 时的具体原因；每个代码块前如实告知 agent，而不是只给一个 None。
+_WEB_UNAVAILABLE: str | None = None
 # 专用浏览器的登录态快照（storage_state）：首次人工登录后持久化，后续会话自动载入。
-_WEB_STATE = Path(__file__).resolve().parents[1] / "configs" / "web_storage_state.json"
+# App 下写入数据根，不写进已签名的 .app；本地 checkout 仍用 configs/。
+_WEB_STATE = (Path(os.environ["GENERALIST_DATA_DIR"]).expanduser() / "browser" / "web_storage_state.json"
+              if os.environ.get("GENERALIST_DATA_DIR")
+              else Path(__file__).resolve().parents[1] / "configs" / "web_storage_state.json")
 _WEB_CREATE_TIMEOUT_MS = 30000  # The SDK host rejects browser_create budgets above 120000 ms.
 # 专用浏览器的持久 profile（codex 同款逻辑）：登录一次跨会话保留，绝不碰用户 Chrome。
 _WEB_PROFILE_DIR = Path.home() / ".cache" / "mai-ui-web-profile"
@@ -2839,8 +2844,9 @@ def _instrument_sdk_session(session: Any) -> None:
                                    error={"code": code, "message": str(exc), "details": getattr(exc, "details", None)},
                                ) if feedback_mutation else None),
             )
-            if code == "DEVICE_OFFLINE":
+            if code == "DEVICE_OFFLINE" and getattr(device, "platform", "macos") != "browser":
                 # endpoint 被 fence 后同 Session 永不恢复；标记下一轮由宿主重建会话。
+                # 浏览器的标签阻塞/退出由 _ensure_web 处理，重建 Mac 会话反而会关掉浏览器。
                 _SDK_REVIVE_PENDING = True
             raise
         elapsed = round(time.monotonic() - started, 3)
@@ -2956,81 +2962,147 @@ def _instrument_sdk_session(session: Any) -> None:
 
 
 def _prefer_local_browser_worker() -> None:
-    """Use the rebuilt worker in an editable checkout when its npm deps exist."""
+    """Use the rebuilt worker in an editable checkout, else the one bundled in the App.
+
+    Either beats the SDK's ~/.cache fallback, which may hold an outdated install. The
+    App's worker runs on the Node shipped with Playwright for Python.
+    """
     if "MAI_UI_PLAYWRIGHT_WORKER" in os.environ:
         return
-    root = Path(__file__).resolve().parents[3]
-    adapter = root / "packages/sdk/adapters/browser-playwright"
-    worker = adapter / "dist/worker.js"
-    dependency = adapter / "node_modules/playwright/package.json"
-    if worker.is_file() and dependency.is_file():
+    here = Path(__file__).resolve()
+    checkout = here.parents[3] / "packages/sdk/adapters/browser-playwright"
+    bundled = here.parents[1] / "browser-worker"
+    for root in (checkout, bundled):
+        worker = root / "dist/worker.js"
+        if not (worker.is_file() and (root / "node_modules/playwright/package.json").is_file()):
+            continue
         os.environ["MAI_UI_PLAYWRIGHT_WORKER"] = str(worker)
+        if root == bundled and "MAI_UI_NODE" not in os.environ:
+            node = _playwright_driver_node()
+            if node is not None:
+                os.environ["MAI_UI_NODE"] = str(node)
+        return
 
 
-async def _add_web_factory(runtime: Any, *, visible: bool = False) -> None:
-    """Register the browser factory, preferring the user's installed Google Chrome.
+def _playwright_driver_node() -> Path | None:
+    try:
+        import playwright
+    except ImportError:
+        return None
+    node = Path(playwright.__file__).resolve().parent / "driver" / "node"
+    return node if node.is_file() and os.access(node, os.X_OK) else None
+
+
+async def _add_web_factory(runtime: Any) -> str:
+    """Register the browser factory once per runtime and return its provider name.
 
     channel="chrome" launches the real Google Chrome app as a separate temp-profile
     instance (no separate "Chrome for Testing" binary; the human can Cmd+Q it like any
     Chrome). Verified working for normal sites; note some corporate-blocked hosts
     (e.g. example.com) fail with ERR_CERT_COMMON_NAME_INVALID in ANY browser here.
-    Falls back to Playwright's downloaded chromium if the channel is unavailable.
+    Registration failures retain their original cause; they are not retried with
+    another browser channel. The host keeps factories for the runtime's lifetime, so recovery reuses the
+    registered one instead of registering the same name again (ALREADY_REGISTERED).
     """
+    background = os.environ.get("MAC_AGENT_BACKGROUND") == "1"
+    name = "web" if background else "web-visible"
+    registered = getattr(runtime, "_mac_agent_web_factories", None)
+    if registered is None:
+        registered = set()
+        try:
+            runtime._mac_agent_web_factories = registered
+        except AttributeError:
+            pass
+    if name in registered:
+        return name
+
+    async def register(**options: Any) -> None:
+        try:
+            await runtime.add_browser_factory(name, engine="chromium", headless=False, **options)
+        except Exception as exc:  # noqa: BLE001 - an existing registration is the one to reuse
+            if getattr(exc, "code", None) != "ALREADY_REGISTERED":
+                raise
+
+    profile = os.environ.get("MAC_AGENT_WEB_PROFILE", "isolated")
+    if profile == "attach":
+        # 并发共用：接入用户正在跑的 Chrome（需以 --remote-debugging-port 启动）。
+        await register(channel="chrome",
+                       connect_url=os.environ.get("MAC_AGENT_WEB_CDP", "http://127.0.0.1:9222"))
+    elif profile == "borrow":
+        # 独占借用：以用户真实 profile 启动（用户需先退出自己的 Chrome）。
+        await register(channel="chrome", user_data_dir=os.environ.get(
+            "MAC_AGENT_WEB_PROFILE_DIR",
+            str(Path.home() / "Library/Application Support/Google/Chrome")))
+    else:
+        # isolated：有界面任务专属 profile；DOM 操作无需前台焦点。
+        await register(channel="chrome", background_launch=background)
+    registered.add(name)
+    return name
+
+
+def _web_log(message: str) -> None:
+    """Append a host-side browser lifecycle line next to the worker's own log."""
+    path = _browser_log_path()
+    if path is None:
+        return
     try:
-        profile = os.environ.get("MAC_AGENT_WEB_PROFILE", "isolated")
-        if profile == "attach":
-            # 并发共用：接入用户正在跑的 Chrome（需以 --remote-debugging-port 启动）。
-            await runtime.add_browser_factory(
-                "web", engine="chromium", headless=False, channel="chrome",
-                connect_url=os.environ.get("MAC_AGENT_WEB_CDP", "http://127.0.0.1:9222"))
-        elif profile == "borrow":
-            # 独占借用：以用户真实 profile 启动（用户需先退出自己的 Chrome）。
-            await runtime.add_browser_factory(
-                "web", engine="chromium", headless=False, channel="chrome",
-                user_data_dir=os.environ.get(
-                    "MAC_AGENT_WEB_PROFILE_DIR",
-                    str(Path.home() / "Library/Application Support/Google/Chrome")))
-        else:
-            # isolated：有界面任务专属 profile；DOM 操作无需前台焦点。
-            await runtime.add_browser_factory(
-                "web", engine="chromium", headless=False,
-                channel="chrome",
-                background_launch=(os.environ.get("MAC_AGENT_BACKGROUND") == "1"
-                                   and not visible))
-    except Exception:
-        await runtime.add_browser_factory(
-            "web", engine="chromium", headless=False,
-            background_launch=(os.environ.get("MAC_AGENT_BACKGROUND") == "1"
-                               and not visible))
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [host] {message}\n")
+    except OSError:
+        pass
 
 
-async def _create_web_resource(runtime: Any, session: Any, visible: bool = False) -> Any:
-    """Create the `web` browser resource, falling back to a local Playwright shim.
+def _browser_log_path() -> Path | None:
+    work_dir = _CONFIG.get("work_dir") if isinstance(_CONFIG, dict) else None
+    return Path(str(work_dir)) / "browser.log" if work_dir else None
 
-    The SDK route needs the Rust core's browser endpoint. Older deployed SDK wheels
-    default browser_create to 300000 ms, exceeding the host's 120000 ms limit, so
-    always pass a valid explicit timeout. The shim remains a fallback for genuine
-    browser endpoint failures.
+
+def _web_shim_allowed() -> bool:
+    """The local shim is another browser; the App never falls back to it unasked."""
+    flag = os.environ.get("MAC_AGENT_WEB_SHIM")
+    if flag in ("0", "1"):
+        return flag == "1"
+    return ".app/Contents/" not in str(Path(__file__).resolve())
+
+
+async def _create_web_resource(runtime: Any, session: Any) -> Any:
+    """Create the `web` browser resource; the SDK route is always tried first.
+
+    Older deployed SDK wheels default browser_create to 300000 ms, exceeding the
+    host's 120000 ms limit, so always pass a valid explicit timeout. The local shim is
+    only a development fallback: the App leaves web=None with the concrete reason.
     """
-    global _SDK_NATIVE_WEB_FAILURE
+    global _WEB_UNAVAILABLE
+    if os.environ.get("MAC_AGENT_WEB") == "off":
+        _WEB_UNAVAILABLE = "专用浏览器已被 MAC_AGENT_WEB=off 关闭"
+        return None  # 无界面/CI 环境显式关闭专用浏览器
+    log_path = _browser_log_path()
+    if log_path is not None:
+        os.environ["MAI_UI_PROVIDER_LOG"] = str(log_path)  # worker 的 stderr 与退出原因写入这里
     state = str(_WEB_STATE) if _WEB_STATE.is_file() else None
     require_native = os.environ.get("MAC_AGENT_REQUIRE_NATIVE_WEB") == "1"
-    if require_native or _SDK_NATIVE_WEB_FAILURE is None:
-        try:
-            _prefer_local_browser_worker()
-            await _add_web_factory(runtime, visible=visible)
-            web = await session.browsers.create(
-                name="web", provider="web", storage_state=state,
-                timeout_ms=_WEB_CREATE_TIMEOUT_MS,
-            )
-            _SDK_NATIVE_WEB_FAILURE = None
-            print("[sdk] web: SDK browser endpoint")
-            return web
-        except Exception as exc:  # noqa: BLE001 - browser route is optional unless required
-            if require_native:
-                raise RuntimeError(f"native SDK browser unavailable: {exc}") from exc
-            _SDK_NATIVE_WEB_FAILURE = str(exc)
-            print(f"[sdk] SDK browser endpoint unavailable ({exc}); trying local playwright shim")
+    try:
+        _prefer_local_browser_worker()
+        provider = await _add_web_factory(runtime) or "web"
+        web = await session.browsers.create(
+            name="web", provider=provider, storage_state=state,
+            timeout_ms=_WEB_CREATE_TIMEOUT_MS,
+        )
+        _WEB_UNAVAILABLE = None
+        _web_log(f"SDK browser created (provider={provider}, login snapshot={'yes' if state else 'no'})")
+        print("[sdk] web: SDK browser endpoint")
+        return web
+    except Exception as exc:  # noqa: BLE001 - reported to the agent with its cause
+        _web_log(f"SDK browser start failed: {exc!r}")
+        if require_native:
+            raise RuntimeError(f"native SDK browser unavailable: {exc}") from exc
+        if not _web_shim_allowed():
+            _WEB_UNAVAILABLE = f"专用浏览器启动失败：{exc}"
+            print(f"[sdk] web=None：{_WEB_UNAVAILABLE}。不会改用其他浏览器；"
+                  "系统会在之后的代码块执行前自动重试。")
+            return None
+        print(f"[sdk] SDK browser endpoint unavailable ({exc}); trying local playwright shim")
     try:
         try:
             import web_shim
@@ -3040,10 +3112,14 @@ async def _create_web_resource(runtime: Any, session: Any, visible: bool = False
                 "web_shim", Path(__file__).resolve().with_name("web_shim.py"))
             web_shim = importlib.util.module_from_spec(_sp)
             _sp.loader.exec_module(web_shim)
-        web = await web_shim.create_web(storage_state=state, visible=visible)
+        web = await web_shim.create_web(storage_state=state)
+        _WEB_UNAVAILABLE = None
+        _web_log("local playwright shim active")
         print("[sdk] web: local playwright shim active (interface-compatible)")
         return web
     except Exception as exc:  # noqa: BLE001
+        _WEB_UNAVAILABLE = f"专用浏览器启动失败：{exc}"
+        _web_log(f"shim start failed: {exc!r}")
         print(f"[sdk] web shim failed too, web=None: {exc}")
         return None
 
@@ -3077,9 +3153,8 @@ async def _open_sdk_session() -> tuple[Any, Any, Any, Any]:
         # Warm native inventory with a budget allowing first driver startup.
         await device.apps.list(timeout_ms=30000)
         _instrument_sdk_session(session)
-        # A headed browser may show a window. Do not launch it for non-web tasks.
-        _SDK_WEB = (None if os.environ.get("MAC_AGENT_BACKGROUND") == "1"
-                    else await _create_web_resource(runtime, session))
+        # 会话一开始就绑定专用浏览器（后台模式也一样，不抢焦点），整个会话的网页操作都在它上。
+        _SDK_WEB = await _create_web_resource(runtime, session)
         return runtime, resource, session, device
     except BaseException:
         # Release every acquired endpoint, including Android's writer lease,
@@ -3108,10 +3183,23 @@ async def _save_web_state() -> None:
         return
     try:
         state = await _SDK_WEB.browser.storage_state(timeout_ms=5000)
-        _WEB_STATE.parent.mkdir(parents=True, exist_ok=True)
-        _WEB_STATE.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        _write_web_state(state)
     except Exception:  # noqa: BLE001 - snapshot is best-effort
         pass
+
+
+def _write_web_state(state: Any, *, indent: int | None = None) -> None:
+    # cookies are credentials: owner-only file, replaced atomically
+    _WEB_STATE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = _WEB_STATE.with_name(_WEB_STATE.name + ".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=indent)
+    os.replace(temporary, _WEB_STATE)
+
+
+def _is_shim_web(web: Any) -> bool:
+    return getattr(web, "resource_id", None) == "browser:web-shim"
 
 
 def _start_keepalive(loop: asyncio.AbstractEventLoop | None = None, *, interval: float = 90) -> None:
@@ -3148,13 +3236,20 @@ async def _close_sdk_session(*, close_runtime: bool) -> None:
         _SDK_KEEPALIVE.cancel()
         _SDK_KEEPALIVE = None
     session, runtime = _MAI_SESSION, _SDK_RUNTIME
-    if session is not None:
+    web = _SDK_WEB
+    if session is not None or web is not None:
         try:
             await _save_web_state()  # 先快照（含会话级 cookie），再拆会话
         except Exception:
             pass
     _MAI_SESSION = _SDK_DEVICE = _SDK_RESOURCE = _SDK_WEB = None
     _SDK_PHONE = _SDK_PHONE_RESOURCE = None
+    if _is_shim_web(web):
+        # 本地 shim 的浏览器不归 SDK 会话管理，必须自己关，否则每次退出都留下一个窗口。
+        try:
+            await web.close(timeout_ms=5000)
+        except Exception:
+            pass
     if session is not None:
         try:
             await session.close(timeout_ms=5000)
@@ -3213,7 +3308,11 @@ async def _reset_sdk_session() -> tuple[Any, Any]:
     # The local shim owns its browser independently of the Mac SDK session.
     # Reusing it avoids an orphan browser and a second launch after GUI reconnect.
     if _SDK_WEB is not None and getattr(_SDK_WEB, "resource_id", None) != "browser:web-shim":
+        # SDK 浏览器归旧会话所有，关会话时已随之关闭；在新会话上复用同一工厂重建。
+        _web_log("mac session rebuilt; recreating the session-owned browser")
         _SDK_WEB = await _create_web_resource(_SDK_RUNTIME, session)
+        if _SDK_WEB is not None:
+            print("[sdk] web: GUI 会话重建后专用浏览器已重新创建；旧 tab/pg 句柄作废，登录态从快照恢复。")
     _MAI_SESSION, _SDK_DEVICE = session, device
     if _EXEC_NAMESPACE is not None:
         # cell 命名空间里的 mu/device/ui 若仍指向旧会话，后续每次调用都会
@@ -3267,15 +3366,29 @@ async def rebind_window(
     return await owner.windows.get(match[0].id, timeout_ms=timeout_ms)
 
 
-async def reset_web(visible: bool = False) -> Any:
-    """Recreate the dedicated automation browser (e.g. after a human quit it).
+async def reset_web() -> Any:
+    """Return the dedicated automation browser, (re)creating it only when needed.
 
-    The isolated browser is headed in all modes. ``visible=True`` additionally
-    requests the explicitly visible recovery path for human intervention.
+    A browser that is still running is reused as-is - same window, same tabs, same
+    login - so calling this never stacks up browsers. It is recreated only when it was
+    closed/disconnected; the old browser is always closed first. Showing the browser
+    to the user is not done here: the user opens its window themselves.
     """
-    global _SDK_WEB, _SDK_NATIVE_WEB_FAILURE
+    global _SDK_WEB
     if _SDK_RUNTIME is None or _MAI_SESSION is None:
         raise RuntimeError("reset_web requires an active SDK session")
+    old_web = _SDK_WEB
+    if old_web is not None and await _reusable_web(old_web):
+        print("[sdk] web: 复用仍在运行的专用浏览器（未新开浏览器）；需要新页面用 web.browser.new_tab")
+        if _EXEC_NAMESPACE is not None:
+            _EXEC_NAMESPACE["web"] = old_web
+        return old_web
+    return await _rebuild_web()
+
+
+async def _rebuild_web() -> Any:
+    """Close the bound browser (already judged dead) and create its replacement."""
+    global _SDK_WEB, _WEB_UNAVAILABLE
     old_web = _SDK_WEB
     if old_web is not None:
         try:
@@ -3283,22 +3396,94 @@ async def reset_web(visible: bool = False) -> Any:
         except Exception:
             pass
         try:
-            await old_web.close(timeout_ms=5000)
-        except Exception as exc:  # noqa: BLE001 - reset must still attempt recovery
-            print(f"[sdk] old web resource did not close cleanly: {exc}")
+            if _is_shim_web(old_web):
+                await old_web.close(timeout_ms=5000)
+            else:
+                # SDK 返回 Device 而非带 close() 的浏览器；必须由宿主移除端点，
+                # 同时注销旧附件与 Python 缓存，释放同一 session 的 "web" 名称。
+                await _SDK_RUNTIME.remove(old_web.resource_id, timeout_ms=5000)
+        except Exception as exc:  # noqa: BLE001 - 未确认旧资源释放，不启动第二个浏览器
+            if getattr(exc, "code", None) != "TARGET_NOT_FOUND":
+                _WEB_UNAVAILABLE = f"专用浏览器恢复受阻，旧资源无法释放：{exc}"
+                _web_log(_WEB_UNAVAILABLE)
+                print(f"[sdk] {_WEB_UNAVAILABLE}；未另建浏览器。")
+                return None
         _SDK_WEB = None
-    saved = os.environ.get("MAC_AGENT_BACKGROUND")
-    if visible:
-        os.environ.pop("MAC_AGENT_BACKGROUND", None)
-    try:
-        _SDK_NATIVE_WEB_FAILURE = None
-        _SDK_WEB = await _create_web_resource(_SDK_RUNTIME, _MAI_SESSION, visible=visible)
-    finally:
-        if visible and saved is not None:
-            os.environ["MAC_AGENT_BACKGROUND"] = saved
+    _SDK_WEB = await _create_web_resource(_SDK_RUNTIME, _MAI_SESSION)
     if _EXEC_NAMESPACE is not None:
         _EXEC_NAMESPACE["web"] = _SDK_WEB
     return _SDK_WEB
+
+
+_WEB_FAILURE: str | None = None  # 最近一次探测到的浏览器失效原因
+_WEB_BUSY_SINCE: float | None = None
+# 单个 SDK 操作预算上限为 120 秒；探测持续失败超过此宽限再恢复，不把它当作退出证据。
+_WEB_BUSY_LIMIT_S = 150.0
+
+
+async def _reusable_web(web: Any) -> bool:
+    """True while the bound browser still runs, including while one tab is busy.
+
+    A timed-out tab operation keeps that tab (and context-wide reads) blocked until
+    it drains; that is not a dead browser and must not trigger a rebuild.
+    """
+    global _WEB_FAILURE, _WEB_BUSY_SINCE
+    if _is_shim_web(web):
+        return web.is_alive()
+    try:
+        await asyncio.wait_for(web.browser.list_tabs(timeout_ms=3000), 5)
+        _WEB_BUSY_SINCE = None
+        return True
+    except asyncio.TimeoutError:
+        busy = "list_tabs 未在 5 秒内返回"
+    except Exception as exc:  # noqa: BLE001 - classified below
+        code = getattr(exc, "code", None)
+        if code == "DEADLINE_EXCEEDED" or (code == "DEVICE_OFFLINE" and "temporarily blocked" in str(exc)):
+            busy = str(exc)
+        else:
+            _WEB_FAILURE = str(exc)
+            _WEB_BUSY_SINCE = None
+            _web_log(f"bound browser is gone: {exc}")
+            return False
+    now = time.monotonic()
+    _WEB_BUSY_SINCE = _WEB_BUSY_SINCE or now
+    if now - _WEB_BUSY_SINCE > _WEB_BUSY_LIMIT_S:
+        _WEB_FAILURE = f"浏览器 {int(now - _WEB_BUSY_SINCE)} 秒内未响应任何请求（{busy}）"
+        _WEB_BUSY_SINCE = None
+        _web_log(f"bound browser unresponsive: {_WEB_FAILURE}")
+        return False
+    _web_log(f"bound browser busy, kept: {busy}")
+    print(f"[sdk] web: 专用浏览器仍在运行，但上一个网页操作尚未结束（{busy}）；"
+          "该标签会在那个操作结束后恢复，可稍后重试或在其他标签继续。")
+    return True
+
+
+async def _ensure_web() -> None:
+    """Keep the session's one dedicated browser bound before each code request.
+
+    The browser is created when the session opens. If it was closed or failed to
+    start, it is restored here (old one closed first) so the agent never has to call
+    reset_web(); a failed start is retried at most once a minute.
+    """
+    global _WEB_RETRY_AT, _WEB_FAILURE
+    if _SDK_RUNTIME is None or _MAI_SESSION is None:
+        return
+    try:
+        if _SDK_WEB is not None and await _reusable_web(_SDK_WEB):
+            return
+        if time.monotonic() < _WEB_RETRY_AT:
+            print(f"[sdk] web 暂不可用：{_WEB_UNAVAILABLE or '专用浏览器恢复等待重试'}")
+            return
+        if _SDK_WEB is not None:
+            print(f"[sdk] web: 专用浏览器已失效（{_WEB_FAILURE}），正在重建；"
+                  "旧 tab/pg 句柄全部作废，新浏览器从最近的登录态快照恢复。")
+        _WEB_FAILURE = None
+        if await _rebuild_web() is None:
+            _WEB_RETRY_AT = time.monotonic() + 60
+    except Exception as exc:  # noqa: BLE001 - web stays unavailable; the code still runs
+        _WEB_RETRY_AT = time.monotonic() + 60
+        _web_log(f"recovery failed: {exc!r}")
+        print(f"[sdk] web: 专用浏览器恢复失败，web 暂不可用：{exc}")
 
 
 async def save_web_session() -> str:
@@ -3310,8 +3495,7 @@ async def save_web_session() -> str:
     if _SDK_WEB is None:
         raise RuntimeError("save_web_session requires an active web browser")
     state = await _SDK_WEB.browser.storage_state()
-    _WEB_STATE.parent.mkdir(parents=True, exist_ok=True)
-    _WEB_STATE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_web_state(state, indent=2)
     return str(_WEB_STATE)
 
 
@@ -3460,6 +3644,8 @@ def _execute(source: str | list[str], namespace: dict[str, Any], *, loop=None) -
         if _MAI_SESSION is not None:
             _MAI_SESSION.begin_turn()
             turn_started = True
+            # 会话固定绑定一个专用浏览器；被关闭/断开时在执行前自动换上，agent 无需 reset_web。
+            loop.run_until_complete(_ensure_web())
         stopped_block = None
         phase = "runtime_error"
         for index, (block, compiled) in enumerate(zip(sources, compiled_blocks), 1):
@@ -3499,6 +3685,10 @@ def _execute(source: str | list[str], namespace: dict[str, Any], *, loop=None) -
         try:
             if turn_started:
                 _MAI_SESSION.end_turn()
+            if _SDK_WEB is not None:
+                # 登录通常发生在两步之间（ask_user）；每块结束快照一次，
+                # 浏览器意外退出或 worker 重置后仍能带上登录态。
+                loop.run_until_complete(_save_web_state())
             if not loop.run_until_complete(_drain_code_tasks()):
                 raise RuntimeError("后台任务未在截止时间内结束，必须重置 worker")
         except BaseException as exc:

@@ -45,10 +45,12 @@ jobs:
           uv run --no-project --python 3.12 python packages/macos/scripts/build.py "${args[@]}"
       - name: Test signing identity selection
         run: python3 packages/macos/tests/test_signing.py
+      - name: Test background login-state helper patch
+        run: python3 packages/macos/tests/test_browser_storage_patch.py
       - name: Test native task lifecycle and SDK integration
         run: |
           sdk_wheel="$(python3 -c 'from pathlib import Path; wheels = list(Path("packages/macos/build/wheels").glob("qwen_intelligence_sdk-*-cp312-*-macosx*.whl")); assert len(wheels) == 1, wheels; print(wheels[0].resolve())')"
-          uv run --no-project --python 3.12 --with ./packages/harness/runtime --with "$sdk_wheel" --with pytest pytest packages/harness/runtime/tests/test_native_host.py packages/harness/runtime/tests/test_native_session_controls.py packages/harness/runtime/tests/test_sdk_runtime.py packages/harness/runtime/tests/test_overlay_guard.py packages/harness/runtime/tests/test_image_store.py -q
+          uv run --no-project --python 3.12 --with ./packages/harness/runtime --with "$sdk_wheel" --with pytest pytest packages/harness/runtime/tests/test_native_host.py packages/harness/runtime/tests/test_native_session_controls.py packages/harness/runtime/tests/test_sdk_runtime.py packages/harness/runtime/tests/test_web_shim_lifecycle.py packages/harness/runtime/tests/test_overlay_guard.py packages/harness/runtime/tests/test_image_store.py -q
       - name: Test unified events, bounded reconnect and durable action journal
         run: |
           sdk_wheel="$(python3 -c 'from pathlib import Path; wheels = list(Path("packages/macos/build/wheels").glob("qwen_intelligence_sdk-*-cp312-*-macosx*.whl")); assert len(wheels) == 1, wheels; print(wheels[0].resolve())')"

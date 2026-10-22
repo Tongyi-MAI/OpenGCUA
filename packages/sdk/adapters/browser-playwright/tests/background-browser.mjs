@@ -105,6 +105,25 @@ test("background link click refuses a blank-target popup", async () => {
   }
 });
 
+test("background click on a missing element fails inside the caller's budget", async () => {
+  const browser = await chromium.launch({ headless: true, channel: "chrome" });
+  try {
+    const page = await browser.newPage();
+    await page.setContent("<button>Buy now</button>");
+    const started = Date.now();
+    await assert.rejects(executePlaywright(page, {
+      kind: "locator", method: "click", query: [
+        { method: "locator", args: [{ t: "value", v: "div.missing" }] },
+      ], args: [{ t: "object", v: [["timeout", { t: "value", v: 1500 }]] }],
+      timeout_ms: 4000, background_launch: true,
+    }), { code: "TARGET_NOT_FOUND", message: /no input was sent/ });
+    // The host deadline is 4000 ms; the probe must reply well before it.
+    assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
+  } finally {
+    await browser.close();
+  }
+});
+
 test("background search button submits a blank-target GET form in the same tab", async () => {
   const browser = await chromium.launch({ headless: true, channel: "chrome" });
   try {
@@ -179,6 +198,11 @@ test("worker uses background targets for both SDK and Playwright new-page calls"
     const second = await send({ op: "browser", operation: "playwright",
       kind: "context", method: "newPage", args: [], timeout_ms: 10000 });
     assert.equal(second.result?.tabs?.length, 2, JSON.stringify(second));
+    // Chrome 已关闭但 Node 仍存活，不能把空 tabs 当成浏览器正常。
+    await send({ op: "browser", operation: "destroy", timeout_ms: 10000 });
+    const offline = await send({ op: "browser", operation: "list_tabs", timeout_ms: 3000 });
+    assert.equal(offline.error?.code, "DEVICE_OFFLINE", JSON.stringify(offline));
+    assert.match(offline.error?.message ?? "", /Dedicated Chrome disconnected/);
     await send({ op: "stop" });
   } finally {
     child.stdin.end();

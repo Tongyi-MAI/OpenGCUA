@@ -293,7 +293,7 @@ def test_error_playbook_routes_browser_failures_without_macos_window_advice():
         "arguments": {"platform": "browser"},
         "error_code": "DEVICE_OFFLINE", "error": "broker unavailable",
     }])
-    assert "SDK endpoint" in browser_offline
+    assert "temporarily blocked" in browser_offline and "worker process stopped" in browser_offline
     assert "rebind_window" not in browser_offline
 
     browser_unsupported = mac_agent.error_playbook([{
@@ -376,9 +376,86 @@ def test_background_isolated_browser_is_headed_and_uses_sdk_factory(monkeypatch)
                                  "channel": "chrome", "background_launch": True})]
 
     calls.clear()
-    asyncio.run(code_runtime._add_web_factory(Runtime(), visible=True))
-    assert calls == [(("web",), {"engine": "chromium", "headless": False,
-                                 "channel": "chrome", "background_launch": False})]
+    monkeypatch.delenv("MAC_AGENT_BACKGROUND")
+    assert asyncio.run(code_runtime._add_web_factory(Runtime())) == "web-visible"
+    assert calls == [(("web-visible",), {"engine": "chromium", "headless": False,
+                                         "channel": "chrome", "background_launch": False})]
+
+
+def test_web_factory_is_registered_once_per_runtime(monkeypatch):
+    from mai_ui import MuError
+
+    monkeypatch.setenv("MAC_AGENT_BACKGROUND", "1")
+    monkeypatch.setenv("MAC_AGENT_WEB_PROFILE", "isolated")
+    calls = []
+
+    class Runtime:
+        async def add_browser_factory(self, name, **_kwargs):
+            calls.append(name)
+            if len(calls) > 1:
+                raise MuError("ALREADY_REGISTERED")
+
+    runtime = Runtime()
+    assert asyncio.run(code_runtime._add_web_factory(runtime)) == "web"
+    assert asyncio.run(code_runtime._add_web_factory(runtime)) == "web"
+    assert calls == ["web"]
+    # A registration left by an earlier runtime wrapper is reused, not an error.
+    assert asyncio.run(code_runtime._add_web_factory(Runtime())) == "web"
+
+
+def test_app_never_falls_back_to_another_browser(monkeypatch, tmp_path, capsys):
+    shim_starts = []
+
+    class Browsers:
+        async def create(self, **_kwargs):
+            raise RuntimeError("DEVICE_OFFLINE: worker.js exited (exit status: 1)")
+
+    async def add_factory(_runtime):
+        return "web"
+
+    async def create_shim(**_kwargs):
+        shim_starts.append(1)
+
+    monkeypatch.setenv("MAC_AGENT_WEB_SHIM", "0")
+    monkeypatch.delenv("MAC_AGENT_WEB", raising=False)
+    monkeypatch.delenv("MAC_AGENT_REQUIRE_NATIVE_WEB", raising=False)
+    monkeypatch.setattr(code_runtime, "_add_web_factory", add_factory)
+    monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
+    monkeypatch.setitem(sys.modules, "web_shim", types.SimpleNamespace(create_web=create_shim))
+    session = types.SimpleNamespace(browsers=Browsers())
+    assert asyncio.run(code_runtime._create_web_resource(object(), session)) is None
+    assert shim_starts == []
+    assert "exit status: 1" in code_runtime._WEB_UNAVAILABLE
+    assert "不会改用其他浏览器" in capsys.readouterr().out
+
+
+def test_app_disables_shim_by_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("MAC_AGENT_WEB_SHIM", raising=False)
+    monkeypatch.setattr(code_runtime, "__file__", str(
+        tmp_path / "OpenGCUA.app/Contents/Resources/runtime/code_runtime.py"))
+    assert code_runtime._web_shim_allowed() is False
+    monkeypatch.setenv("MAC_AGENT_WEB_SHIM", "1")
+    assert code_runtime._web_shim_allowed() is True
+
+
+def test_browser_worker_log_goes_to_the_run_directory(monkeypatch, tmp_path):
+    class Browsers:
+        async def create(self, **_kwargs):
+            return object()
+
+    async def add_factory(_runtime):
+        return "web"
+
+    monkeypatch.setattr(code_runtime, "_CONFIG", {"work_dir": str(tmp_path)})
+    monkeypatch.setattr(code_runtime, "_add_web_factory", add_factory)
+    monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
+    monkeypatch.delenv("MAC_AGENT_WEB", raising=False)
+    monkeypatch.delenv("MAI_UI_PROVIDER_LOG", raising=False)
+    asyncio.run(code_runtime._create_web_resource(object(), types.SimpleNamespace(browsers=Browsers())))
+    assert code_runtime.os.environ["MAI_UI_PROVIDER_LOG"] == str(tmp_path / "browser.log")
+    assert "[host] SDK browser created" in (tmp_path / "browser.log").read_text()
+    assert (tmp_path / "browser.log").stat().st_mode & 0o777 == 0o600
+    monkeypatch.delenv("MAI_UI_PROVIDER_LOG")
 
 
 def test_source_checkout_prefers_its_current_browser_worker(monkeypatch, tmp_path):
@@ -401,7 +478,30 @@ def test_source_checkout_prefers_its_current_browser_worker(monkeypatch, tmp_pat
     assert code_runtime.os.environ["MAI_UI_PLAYWRIGHT_WORKER"] == "/explicit/worker.js"
 
 
-def test_background_session_defers_browser_until_web_is_needed(monkeypatch):
+def test_app_bundle_uses_its_own_browser_worker_and_playwright_node(monkeypatch, tmp_path):
+    resources = tmp_path / "OpenGCUA.app/Contents/Resources"
+    runtime_file = resources / "runtime/code_runtime.py"
+    runtime_file.parent.mkdir(parents=True)
+    worker = resources / "browser-worker/dist/worker.js"
+    worker.parent.mkdir(parents=True)
+    worker.write_text("// bundled worker")
+    package = resources / "browser-worker/node_modules/playwright/package.json"
+    package.parent.mkdir(parents=True)
+    package.write_text("{}")
+    node = tmp_path / "driver-node"
+    node.write_text("")
+    node.chmod(0o755)
+    monkeypatch.setattr(code_runtime, "__file__", str(runtime_file))
+    monkeypatch.setattr(code_runtime, "_playwright_driver_node", lambda: node)
+    monkeypatch.delenv("MAI_UI_PLAYWRIGHT_WORKER", raising=False)
+    monkeypatch.delenv("MAI_UI_NODE", raising=False)
+
+    code_runtime._prefer_local_browser_worker()
+    assert code_runtime.os.environ["MAI_UI_PLAYWRIGHT_WORKER"] == str(worker)
+    assert code_runtime.os.environ["MAI_UI_NODE"] == str(node)
+
+
+def test_background_session_binds_its_browser_when_the_session_opens(monkeypatch):
     monkeypatch.setenv("MAC_AGENT_BACKGROUND", "1")
     install_fake_sdk(monkeypatch)
     cleanup_runtime_globals()
@@ -414,15 +514,7 @@ def test_background_session_defers_browser_until_web_is_needed(monkeypatch):
     monkeypatch.setattr(code_runtime, "_create_web_resource", create_web)
     try:
         runtime, resource, session, device = asyncio.run(code_runtime._open_sdk_session())
-        assert code_runtime._SDK_WEB is None
-        assert launches == []
-        code_runtime._SDK_RUNTIME = runtime
-        code_runtime._SDK_RESOURCE = resource
-        code_runtime._MAI_SESSION = session
-        code_runtime._SDK_DEVICE = device
-        asyncio.run(code_runtime._reset_sdk_session())
-        assert launches == []
-        asyncio.run(code_runtime.reset_web())
+        assert code_runtime._SDK_WEB is not None
         assert launches == [1]
     finally:
         asyncio.run(code_runtime._close_sdk_session(close_runtime=True))
@@ -477,6 +569,7 @@ def test_web_creation_uses_timeout_accepted_by_sdk_host(monkeypatch, tmp_path):
 
     monkeypatch.setattr(code_runtime, "_add_web_factory", add_factory)
     monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
+    monkeypatch.delenv("MAC_AGENT_WEB", raising=False)
     session = types.SimpleNamespace(browsers=Browsers())
     assert asyncio.run(code_runtime._create_web_resource(object(), session)) is expected_web
     assert calls == [{
@@ -494,6 +587,7 @@ def test_required_native_web_does_not_fall_back_to_incompatible_shim(monkeypatch
             raise ValueError("browser endpoint failed")
 
     monkeypatch.setenv("MAC_AGENT_REQUIRE_NATIVE_WEB", "1")
+    monkeypatch.delenv("MAC_AGENT_WEB", raising=False)
     monkeypatch.setattr(code_runtime, "_add_web_factory", add_factory)
     monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
     session = types.SimpleNamespace(browsers=Browsers())
@@ -501,7 +595,7 @@ def test_required_native_web_does_not_fall_back_to_incompatible_shim(monkeypatch
         asyncio.run(code_runtime._create_web_resource(object(), session))
 
 
-def test_web_fallback_skips_repeated_native_start_during_sdk_reset(monkeypatch, tmp_path):
+def test_web_fallback_retries_sdk_first_on_every_start(monkeypatch, tmp_path):
     attempts = []
     shim_starts = []
     shim = types.SimpleNamespace(resource_id="browser:web-shim")
@@ -518,17 +612,19 @@ def test_web_fallback_skips_repeated_native_start_during_sdk_reset(monkeypatch, 
         shim_starts.append(1)
         return shim
 
+    monkeypatch.setenv("MAC_AGENT_WEB_SHIM", "1")
     monkeypatch.setattr(code_runtime, "_add_web_factory", add_factory)
     monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
     monkeypatch.setitem(sys.modules, "web_shim", types.SimpleNamespace(create_web=create_shim))
     monkeypatch.setattr(code_runtime, "_start_keepalive", lambda: None)
-    code_runtime._SDK_NATIVE_WEB_FAILURE = None
+    monkeypatch.delenv("MAC_AGENT_WEB", raising=False)
     code_runtime._SDK_REVIVE_PENDING = False
     session = types.SimpleNamespace(browsers=Browsers())
     try:
         assert asyncio.run(code_runtime._create_web_resource(object(), session)) is shim
         assert asyncio.run(code_runtime._create_web_resource(object(), session)) is shim
-        assert len(attempts) == 1
+        # 一次失败不永久降级：每次启动都先试 SDK。
+        assert len(attempts) == 2
         assert code_runtime._SDK_REVIVE_PENDING is False
 
         cleanup_runtime_globals()
@@ -541,12 +637,11 @@ def test_web_fallback_skips_repeated_native_start_during_sdk_reset(monkeypatch, 
         code_runtime._EXEC_NAMESPACE = None
         asyncio.run(code_runtime._reset_sdk_session())
         assert code_runtime._SDK_WEB is shim
-        assert len(attempts) == 1
+        assert len(attempts) == 2
         assert len(shim_starts) == 2  # initial call and retry above; reset reuses the live shim
     finally:
         cleanup_runtime_globals()
         code_runtime._SDK_WEB = None
-        code_runtime._SDK_NATIVE_WEB_FAILURE = None
 
 
 def test_web_recreation_uses_timeout_accepted_by_sdk_host(monkeypatch, tmp_path):
@@ -571,6 +666,7 @@ def test_web_recreation_uses_timeout_accepted_by_sdk_host(monkeypatch, tmp_path)
     monkeypatch.setattr(code_runtime, "_add_web_factory", add_factory)
     monkeypatch.setattr(code_runtime, "_start_keepalive", lambda: None)
     monkeypatch.setattr(code_runtime, "_WEB_STATE", tmp_path / "absent.json")
+    monkeypatch.delenv("MAC_AGENT_WEB", raising=False)
     cleanup_runtime_globals()
     code_runtime._SDK_WEB = types.SimpleNamespace(resource_id="browser:web")
     code_runtime._EXEC_NAMESPACE = None
@@ -671,6 +767,13 @@ def test_device_offline_marks_pending_revive_without_swallowing_error(monkeypatc
         assert code_runtime._SDK_REVIVE_PENDING is True
         assert "endpoint_offline_before=" in events[-1]["error"]
         assert "last_gui_success_age_seconds=" in events[-1]["error"]
+
+        # 浏览器标签被阻塞不是 Mac 端点离线：重建 Mac 会话会把浏览器一起关掉。
+        code_runtime._SDK_REVIVE_PENDING = False
+        tab = types.SimpleNamespace(platform="browser", resource_id="browser:1/tab:1")
+        with pytest.raises(MuError):
+            asyncio.run(session._request(tab, {"op": "browser", "operation": "evaluate"}))
+        assert code_runtime._SDK_REVIVE_PENDING is False
     finally:
         code_runtime._ACTIVE_REQUEST.reset(token)
         del code_runtime._REQUEST_CONTEXT.request_id
@@ -1036,13 +1139,37 @@ def test_agent_defaults_to_sdk_backend_and_canonical_coordinates(tmp_path):
     # Web 副作用不可因后续异常而重放；控制句柄也不能直接 emit。
     assert "App/Window/Tab/Browser/Locator/Inventory" in prompt
     assert "代码块不是事务" in prompt and "不从头重放整段" in prompt
-    assert "一次 new_tab" in prompt and "不额外截图" in prompt
-    assert "绝不 await time.sleep" in prompt
-    assert "new_tab/reset_web 是不可回滚、非幂等" in prompt
+    assert "一次 new_tab" not in prompt  # 精简后不再用“一次 new_tab”提示，规则在用法示例中体现
+    assert "new_tab 是不可回滚" in prompt
+    assert "绝不 await time.sleep" not in prompt  # 精简后已移除、工作循环已覆盖
     assert "new_tab(url, action_id=new_tab_id)" in prompt
     assert "mu.action_status(new_tab_id)" in prompt
     assert "web.browser.list_tabs()" in prompt
-    assert "单纯截图超时" in prompt
+    # 标签超时只作废该标签；reset_web 复用仍在运行的浏览器，不作为超时恢复手段。
+    assert "STALE_TARGET 只作废该标签" in prompt and "不要 reset_web" in prompt
+    # 网页只在预绑定浏览器内操作；白名单通道、降级保持后台、禁止另起实例与抢前台。
+    assert "网页操作的唯一合法通道是预置的 web" in prompt
+    assert "不要另外打开新的浏览器" in prompt
+    assert "没有其他合法方式创建或连接浏览器实例" in prompt
+    assert "session.browsers.create" not in prompt
+    assert "Playwright launch/connect" not in prompt
+    assert "确需额外页面时只用 web.browser.new_tab" in prompt
+    assert "仅在确认整个浏览器被关闭或失效且系统自动恢复未成功时使用" in prompt
+    assert "普通网页操作必须保持后台" in prompt
+    assert "已有前台授权不是显示浏览器的指令" in prompt
+    assert "不能因出现登录页就自行显示或重启浏览器" in prompt
+    assert "用户完成登录后先在原 tab/pg 核验" in prompt
+    # 不再有可见重建：用户自己点开专用浏览器；网页视觉核验走 tab.ui.vision。
+    assert "visible=True" not in prompt
+    assert "请自行点开它完成操作后回复我" in prompt
+    assert "不要改用用户自己的 Chrome" in prompt
+    assert "tab.ui.vision.observe()" in prompt and "不要用桌面截图判断它是否存在" in prompt
+    assert "浏览器失效时宿主会在下一个代码块前自动重建并打印原因" in prompt
+    assert "自动降级" not in prompt
+    assert "按需启动" not in prompt
+    # PDF 表单合并到网页节末尾，不再独占一个 ## 节。
+    assert "## PDF" not in prompt
+    assert "pdf-form" in prompt
     # DEVICE_OFFLINE 后用 CGWindowID 确定性重绑。
     assert "rebind_window" in prompt
     # AX 树是扁平 nodes + parent_id，无 children/depth（防模型臆造层级属性）。
@@ -1138,19 +1265,18 @@ def test_desktop_capture_timeout_kills_and_reaps_child(monkeypatch):
     assert process.communicate_calls == 1
 
 
-def test_reset_web_closes_old_resource_and_refreshes_namespace(monkeypatch):
-    class OldWeb:
-        def __init__(self):
-            self.closed = False
+def test_reset_web_removes_sdk_endpoint_and_refreshes_namespace(monkeypatch):
+    # 真实 SDK 返回 Device，仅有 destroy()，没有 close()；必须从 runtime 移除。
+    old = types.SimpleNamespace(resource_id="browser:old")
+    removed = []
 
-        async def close(self, *, timeout_ms):
-            assert timeout_ms == 5000
-            self.closed = True
+    class Runtime:
+        async def remove(self, resource_id, *, timeout_ms):
+            removed.append((resource_id, timeout_ms))
 
-    old = OldWeb()
     new = object()
     namespace = {"web": old}
-    monkeypatch.setattr(code_runtime, "_SDK_RUNTIME", object())
+    monkeypatch.setattr(code_runtime, "_SDK_RUNTIME", Runtime())
     monkeypatch.setattr(code_runtime, "_MAI_SESSION", object())
     monkeypatch.setattr(code_runtime, "_SDK_WEB", old)
     monkeypatch.setattr(code_runtime, "_EXEC_NAMESPACE", namespace)
@@ -1158,14 +1284,18 @@ def test_reset_web_closes_old_resource_and_refreshes_namespace(monkeypatch):
     async def no_save():
         return None
 
-    async def create(_runtime, _session, visible=False):
-        assert visible is True
+    async def create(_runtime, _session):
         return new
 
     monkeypatch.setattr(code_runtime, "_save_web_state", no_save)
     monkeypatch.setattr(code_runtime, "_create_web_resource", create)
-    assert asyncio.run(code_runtime.reset_web(visible=True)) is new
-    assert old.closed is True and code_runtime._SDK_WEB is new
+
+    async def gone(_web):
+        return False
+
+    monkeypatch.setattr(code_runtime, "_reusable_web", gone)
+    assert asyncio.run(code_runtime.reset_web()) is new
+    assert removed == [("browser:old", 5000)] and code_runtime._SDK_WEB is new
     assert namespace["web"] is new
 
 

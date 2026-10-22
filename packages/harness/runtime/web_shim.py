@@ -23,7 +23,7 @@ Contract preserved (verbatim from MAI_UI_SYSTEM_PROMPT -> "网页浏览器 web")
     await pg.wait_for_load_state()
     await tab.close()
     await web.browser.storage_state()
-    web = await reset_web() / reset_web(visible=True)
+    web = await reset_web()
 
 Two-layer timeouts are preserved: `timeout=` is forwarded to Playwright (internal
 wait), `timeout_ms=` bounds the whole SDK-side operation (deadline).
@@ -39,10 +39,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import itertools
+import json
 import os
 from pathlib import Path
 import signal
 import shutil
+import subprocess
 import tempfile
 import sys
 import time
@@ -95,6 +97,15 @@ _DEFAULT_DEADLINE_MS = 30_000          # normal ops (SDK corrected default)
 _NAV_DEADLINE_MS = 45_000              # navigation ops (SDK playwright layer default)
 _NAV = frozenset({"goto", "new_tab", "go_back", "go_forward", "reload",
                   "wait_for_url", "wait_for_load_state"})
+# Navigation returns once the DOM is parsed, like the SDK worker; waiting for every
+# subresource ("load") on long-polling shops such as Taobao routinely exceeds 30s.
+_NAV_WAIT = frozenset({"goto", "reload", "go_back", "go_forward"})
+_BACKGROUND_PROFILE_PREFIX = "mai-ui-background-chrome-"
+_HIDDEN_RENDERING_FLAGS = ("--disable-backgrounding-occluded-windows",
+                           "--disable-renderer-backgrounding",
+                           "--disable-background-timer-throttling")
+_STALE_TAB_HINT = ("this tab was abandoned; open a new tab with web.browser.new_tab(...). "
+                   "The browser itself is still usable - do not call reset_web()")
 # Hard ceiling for a single call. The harness kills a step at ~300s and resets the whole
 # Python session, so one long wait (e.g. networkidle on a page with long-polling
 # telemetry, which never goes idle) must not be able to consume the entire step budget.
@@ -105,31 +116,112 @@ _NAV = frozenset({"goto", "new_tab", "go_back", "go_forward", "reload",
 _MAX_DEADLINE_MS = int(os.environ.get("MAC_AGENT_WEB_MAX_DEADLINE_MS", "60000"))
 
 
-async def _remove_owned_profile(profile: Path):
+# Teardown below is synchronous on purpose: it runs in `finally` blocks and must still
+# stop Chrome when the surrounding task is being cancelled.
+def _remove_owned_profile(profile: Path):
     for _ in range(21):
         shutil.rmtree(profile, ignore_errors=True)
         if not profile.exists():
             return
-        await asyncio.sleep(0.1)
+        time.sleep(0.1)
     raise RuntimeError(f"background browser profile is still in use: {profile}")
 
 
-async def _stop_owned_profile_processes(profile: Path):
-    """Stop only Chrome processes carrying this launch's unique profile argument."""
-    proc = await asyncio.create_subprocess_exec(
-        "/bin/ps", "-axo", "pid=,command=", stdout=asyncio.subprocess.PIPE)
-    output, _ = await proc.communicate()
+def _profile_pids(profile: Path) -> list[int]:
+    """Chrome processes carrying this launch's unique profile argument."""
+    output = subprocess.run(["/bin/ps", "-axo", "pid=,command="], capture_output=True,
+                            text=True, errors="replace", timeout=5).stdout
     argument = f"--user-data-dir={profile}"
-    for line in output.decode(errors="replace").splitlines():
+    pids = []
+    for line in output.splitlines():
         parts = line.split(None, 1)
-        if len(parts) != 2 or not parts[0].isdigit():
-            continue
-        if argument not in parts[1].split():
-            continue
+        if len(parts) == 2 and parts[0].isdigit() and argument in parts[1].split():
+            pids.append(int(parts[0]))
+    return pids
+
+
+def _stop_owned_profile_processes(profile: Path):
+    """Stop only Chrome processes carrying this launch's unique profile argument."""
+    for pid in _profile_pids(profile):
         try:
-            os.kill(int(parts[0]), signal.SIGTERM)
+            os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+
+
+# Chrome is started through LaunchServices (`open -n`), so it is not in the worker's
+# process group: a worker killed at the 300s step limit cannot close it. Each launch
+# therefore records a lease; a later launch adopts or stops browsers whose owner died.
+def _lease_dir() -> Path:
+    base = os.environ.get("GENERALIST_DATA_DIR")
+    root = Path(base).expanduser() if base else Path.home() / "Library/Application Support/Generalist"
+    return root / "browser-leases"
+
+
+def _write_lease(profile: Path) -> None:
+    directory = _lease_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{profile.name}.json").write_text(
+        json.dumps({"profile": str(profile), "owner_pid": os.getpid()}), encoding="utf-8")
+
+
+def _drop_lease(profile: Path) -> None:
+    (_lease_dir() / f"{profile.name}.json").unlink(missing_ok=True)
+
+
+def _owner_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _orphaned_profiles() -> list[tuple[Path, Path]]:
+    """Leases whose owner process is gone; only our own temp profiles qualify."""
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    orphans = []
+    for lease in sorted(_lease_dir().glob("*.json")):
+        try:
+            record = json.loads(lease.read_text(encoding="utf-8"))
+            profile, owner = Path(record["profile"]), int(record["owner_pid"])
+        except (OSError, ValueError, KeyError, TypeError):
+            lease.unlink(missing_ok=True)
+            continue
+        if owner == os.getpid() or _owner_alive(owner):
+            continue
+        if (not profile.name.startswith(_BACKGROUND_PROFILE_PREFIX)
+                or profile.resolve().parent != temp_root):
+            lease.unlink(missing_ok=True)
+            continue
+        orphans.append((lease, profile))
+    return orphans
+
+
+async def _adopt_orphaned_background_chromium(playwright):
+    """Reuse one automation browser left by a dead worker; stop any others."""
+    adopted = None
+    for lease, profile in _orphaned_profiles():
+        if adopted is None and _profile_pids(profile):
+            try:
+                port = int((profile / "DevToolsActivePort").read_text().splitlines()[0])
+                browser = await asyncio.wait_for(playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{port}", timeout=3000), 5)
+                _write_lease(profile)
+                print("[web-shim] reattached to the automation browser left by the previous worker")
+                adopted = (browser, profile)
+                continue
+            except Exception:  # noqa: BLE001 - an unreachable browser is stopped below
+                pass
+        try:
+            _stop_owned_profile_processes(profile)
+            _remove_owned_profile(profile)
+        except Exception:  # noqa: BLE001 - keep the lease to retry on the next launch
+            continue
+        lease.unlink(missing_ok=True)
+    return adopted
 
 
 async def _launch_background_chromium(playwright, timeout_ms: int):
@@ -139,13 +231,20 @@ async def _launch_background_chromium(playwright, timeout_ms: int):
     if marker not in executable:
         raise RuntimeError("Playwright Chromium is not a macOS app bundle")
     bundled_app = executable.split(marker, 1)[0] + ".app"
-    profile = Path(tempfile.mkdtemp(prefix="mai-ui-background-chrome-"))
+    adopted = await _adopt_orphaned_background_chromium(playwright)
+    if adopted is not None:
+        return adopted
+    profile = Path(tempfile.mkdtemp(prefix=_BACKGROUND_PROFILE_PREFIX))
     try:
         for app in ("Google Chrome", bundled_app):
+            # -j launches the app hidden: when another app (e.g. the driver) gives up the
+            # foreground, macOS hands it to the next *visible* app, so a visible automation
+            # Chrome would jump in front of the user. Hidden windows must not be throttled.
             proc = await asyncio.create_subprocess_exec(
-                "/usr/bin/open", "-g", "-n", "-a", app, "--args",
+                "/usr/bin/open", "-g", "-j", "-n", "-a", app, "--args",
                 "--remote-debugging-port=0", f"--user-data-dir={profile}",
                 "--no-first-run", "--no-default-browser-check", "--no-startup-window",
+                *_HIDDEN_RENDERING_FLAGS,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             if await asyncio.wait_for(proc.wait(), timeout=timeout_ms / 1000) == 0:
                 break
@@ -166,28 +265,36 @@ async def _launch_background_chromium(playwright, timeout_ms: int):
         browser = await playwright.chromium.connect_over_cdp(
             f"http://127.0.0.1:{port}", timeout=max(1, int(
                 (deadline - time.monotonic()) * 1000)))
+        _write_lease(profile)
         return browser, profile
-    except Exception:
+    except BaseException:
         try:
-            await _stop_owned_profile_processes(profile)
+            _stop_owned_profile_processes(profile)
         finally:
-            await _remove_owned_profile(profile)
+            _drop_lease(profile)
+            _remove_owned_profile(profile)
         raise
 
 
-async def _close_owned_background_chromium(browser, profile: Path):
+async def _close_owned_background_chromium(browser, profile: Path, timeout_s: float = 3.0):
+    """Close politely, but always stop this profile's Chrome: a CDP call on a hung
+    browser, or a cancelled teardown, must not leave another window behind."""
     try:
-        session = await browser.new_browser_cdp_session()
-        await session.send("Browser.close")
-    except Exception:  # shutdown normally disconnects the CDP request
-        pass
-    try:
-        await browser.close()
+        try:
+            session = await asyncio.wait_for(browser.new_browser_cdp_session(), timeout_s)
+            await asyncio.wait_for(session.send("Browser.close"), timeout_s)
+        except Exception:  # shutdown normally disconnects the CDP request
+            pass
+        try:
+            await asyncio.wait_for(browser.close(), timeout_s)
+        except Exception:  # noqa: BLE001 - the process is stopped below either way
+            pass
     finally:
         try:
-            await _stop_owned_profile_processes(profile)
+            _stop_owned_profile_processes(profile)
         finally:
-            await _remove_owned_profile(profile)
+            _drop_lease(profile)
+            _remove_owned_profile(profile)
 
 
 async def _isolated_background_context(browser, **options):
@@ -245,6 +352,16 @@ def _deadline(name: str, requested: Optional[int], default_ms: int) -> int:
     return max(1, want)
 
 
+def _inner_timeout(deadline_ms: int) -> int:
+    """Playwright's own wait ends before the SDK deadline, so a slow page fails as a
+    normal TimeoutError and the tab stays usable instead of being cancelled."""
+    return max(1, deadline_ms - min(2000, deadline_ms // 5))
+
+
+def _is_playwright_timeout(exc: BaseException) -> bool:
+    return type(exc).__name__ == "TimeoutError" and type(exc).__module__.startswith("playwright")
+
+
 _seq = itertools.count(1)
 
 
@@ -255,8 +372,26 @@ def _uid() -> str:
 _TIMEOUT_OK: dict[tuple[str, str], bool] = {}
 
 
+_TAKEOVER_HINT = (
+    "Do not foreground the browser: read the link/form URL and open it in the current tab "
+    "(pg.goto) or with web.browser.new_tab(url). If that is impossible, tell the user they can "
+    "open the dedicated browser window themselves to do this step.")
+
+
+async def _probe(locator, kwargs, script):
+    """Pre-action check bounded by the action's own timeout; a missing element sends nothing."""
+    timeout = kwargs.get("timeout")
+    try:
+        return await locator.evaluate(script, timeout=timeout)
+    except Exception as exc:
+        if _is_playwright_timeout(exc):
+            raise MuError("TARGET_NOT_FOUND",
+                          f"Locator matched no element within {timeout or 30000} ms; no input was sent") from None
+        raise
+
+
 async def _press_background_search(locator, press, args, kwargs):
-    needs_foreground = await locator.evaluate("""element => {
+    needs_foreground = await _probe(locator, kwargs, """element => {
       if (!(element instanceof HTMLInputElement)) return false;
       const form = element.form;
       if (!form || form.target.toLowerCase() !== '_blank') return false;
@@ -270,13 +405,13 @@ async def _press_background_search(locator, press, args, kwargs):
     }""")
     if needs_foreground:
         raise MuError("ACTION_REJECTED",
-                      "FOREGROUND_TAKEOVER_REQUIRED: This form opens a new tab and may activate Chrome. Ask the user "
-                      "before foreground takeover, then use a visible browser.")
+                      "FOREGROUND_TAKEOVER_REQUIRED: This form opens a new tab and may bring Chrome to the front. "
+                      + _TAKEOVER_HINT)
     return await press(*args, **kwargs)
 
 
 async def _click_background_link(locator, click, args, kwargs):
-    needs_foreground = await locator.evaluate("""element => {
+    needs_foreground = await _probe(locator, kwargs, """element => {
       const link = element.closest('a');
       if (link?.target.toLowerCase() === '_blank') return true;
       const submitter = element.closest('button, input[type=submit], input[type=image]');
@@ -293,8 +428,8 @@ async def _click_background_link(locator, click, args, kwargs):
     }""")
     if needs_foreground:
         raise MuError("ACTION_REJECTED",
-                      "FOREGROUND_TAKEOVER_REQUIRED: This action opens a new tab and may activate Chrome. Ask the user "
-                      "before foreground takeover, then use a visible browser.")
+                      "FOREGROUND_TAKEOVER_REQUIRED: This click opens a new tab and may bring Chrome to the front. "
+                      + _TAKEOVER_HINT)
     return await click(*args, **kwargs)
 
 
@@ -373,13 +508,16 @@ class _Proxy:
             if tab is not None and tab._stale:
                 raise MuError("STALE_TARGET", tab._stale)
             action_id = kwargs.pop("action_id", None)
-            deadline = kwargs.pop("timeout_ms", None)
-            inject = (deadline is None and "timeout" not in kwargs
+            deadline_ms = _deadline(name, kwargs.pop("timeout_ms", None), default_ms)
+            if (name in _NAV_WAIT and "wait_until" not in kwargs
+                    and type(target).__name__ in ("Page", "Frame")):
+                kwargs["wait_until"] = "domcontentloaded"
+            inject = ("timeout" not in kwargs
                       and _accepts_timeout(attr) and not _first_param_is_timeout(attr, args))
             if inject:
-                # the SDK deadline also caps the Playwright wait, so a slow site fails
-                # with a deadline instead of hanging the worker
-                kwargs["timeout"] = min(default_ms, 45_000)
+                # Playwright's own wait ends just before the SDK deadline, so a slow
+                # site fails as a TimeoutError instead of a cancelled call
+                kwargs["timeout"] = _inner_timeout(deadline_ms)
             try:
                 if (name == "press" and args and args[0] in ("Enter", "NumpadEnter")
                         and tab is not None and tab._browser._background_tabs
@@ -402,9 +540,7 @@ class _Proxy:
                             "get_by_role", "get_by_text", "get_by_label"):
                     return _Proxy(coro, tab)
                 return coro
-            return _run(coro, action_id,
-                        _deadline(name, deadline, default_ms),
-                        is_read, name, tab)
+            return _run(coro, action_id, deadline_ms, is_read, name, tab)
 
         return wrapper
 
@@ -420,9 +556,9 @@ async def _run(coro, action_id: Optional[str], deadline_ms: int, is_read: bool,
     (code_runtime.py: `_drain_code_tasks()`, else `RuntimeError("后台任务未在截止时间内
     结束，必须重置 worker")`). Leaving a timed-out call running therefore freezes the
     worker until the 300s step kill - observed in a live run. So we cancel, wait for the
-    cancellation to settle (nothing may stay pending), and then invalidate the tab and
-    force the CDP connection to be rebuilt on next use, because cancelling an in-flight
-    protocol call can desynchronise the shared connection pipe.
+    cancellation to settle (nothing may stay pending), and abandon only that tab. The
+    browser and its other tabs stay usable; Playwright's own TimeoutError (raised just
+    before this deadline) does not abandon anything.
     """
     started = time.perf_counter()
     aid = action_id or _uid()
@@ -432,8 +568,7 @@ async def _run(coro, action_id: Optional[str], deadline_ms: int, is_read: bool,
         task.cancel()
         await asyncio.wait({task}, timeout=10)      # leave nothing pending for the drain
         err = {"code": "DEADLINE_EXCEEDED",
-               "message": f"{name} exceeded timeout_ms={deadline_ms}; the tab was abandoned "
-                          f"and the browser connection will be rebuilt - open a new tab"}
+               "message": f"{name} exceeded timeout_ms={deadline_ms}; {_STALE_TAB_HINT}"}
         if tab is not None:
             tab._mark_stale(err["message"])
         if is_read:
@@ -445,9 +580,15 @@ async def _run(coro, action_id: Optional[str], deadline_ms: int, is_read: bool,
         if (isinstance(exc, MuError) and getattr(exc, "code", None) == "ACTION_REJECTED"
                 and "FOREGROUND_TAKEOVER_REQUIRED" in str(exc)):
             raise
-        err = {"code": type(exc).__name__.upper(), "message": str(exc)[:400]}
         if is_read:
             raise
+        if _is_playwright_timeout(exc):
+            # The navigation may well have committed; the tab remains usable.
+            return _receipt(aid, started, effect="unknown", error={
+                "code": "DEADLINE_EXCEEDED",
+                "message": f"{name} did not finish waiting within timeout_ms={deadline_ms}; "
+                           "the tab is still usable - read pg.url/title before retrying"})
+        err = {"code": type(exc).__name__.upper(), "message": str(exc)[:400]}
         return _receipt(aid, started, error=err, effect="failed")
     if is_read:
         return value
@@ -497,27 +638,27 @@ class _Browser:
         self._background_context_id = background_context_id
         self._background_tabs = background_tabs
         self._owned_profile = owned_profile
-        self._wedged = False       # a cancelled call desynced the pipe; rebuild on next use
         self.name = name
         self.cookies = _Cookies(ctx)
         self.network = _Unsupported("browser.network")
         self._tabs: dict[str, _Tab] = {}
 
+    def is_alive(self) -> bool:
+        try:
+            return bool(self._browser.is_connected())
+        except Exception:  # noqa: BLE001
+            return False
+
     async def _ensure_alive(self) -> None:
-        """Relaunch/reconnect when the browser died or a cancelled call wedged it.
+        """Relaunch/reconnect only when the browser process really went away.
 
         new_page() on a closed browser does not raise - it hangs, which cost a whole
-        300s step and a session reset. Reconnecting keeps `web` usable across a
-        close/reuse cycle instead of forcing the agent to call reset_web().
+        300s step and a session reset. A slow page or a cancelled call is NOT a reason
+        to replace the browser: that tab is abandoned, everything else keeps working.
         """
-        try:
-            alive = self._browser.is_connected() and not self._wedged
-        except Exception:  # noqa: BLE001
-            alive = False
-        if alive:
+        if self.is_alive():
             return
-        print(f"[web-shim] rebuilding browser connection (wedged={self._wedged})")
-        self._wedged = False
+        print("[web-shim] the automation browser was closed; starting it again")
         from playwright.async_api import async_playwright
         kw = dict(self._launch_kwargs)
         state = kw.pop("storage_state", None)
@@ -586,23 +727,20 @@ class _Browser:
         # new_page() must be bounded too: if the browser is still busy with a call whose
         # deadline we stopped waiting on, an unbounded new_page() hangs and costs the
         # whole 300s step (observed: step timed out with empty stdout).
-        try:
-            create = (_new_background_page(
-                self._ctx, self._background_cdp, self._background_context_id,
-                timeout_ms) if self._background_cdp and self._background_context_id
-                else self._ctx.new_page())
-            page = await _run(create, action_id,
-                              _deadline("new_page", timeout_ms, _NAV_DEADLINE_MS),
-                              True, "new_page", None)
-        except MuError:
-            self._wedged = True        # rebuild the connection on the next attempt
-            raise
+        create = (_new_background_page(
+            self._ctx, self._background_cdp, self._background_context_id,
+            timeout_ms) if self._background_cdp and self._background_context_id
+            else self._ctx.new_page())
+        page = await _run(create, action_id,
+                          _deadline("new_page", timeout_ms, _NAV_DEADLINE_MS),
+                          True, "new_page", None)
         tab = _Tab(self, page, url)
         self._tabs[tab.tab_id] = tab
         if url and url != "about:blank":
-            await _run(page.goto(url, wait_until="domcontentloaded"), action_id,
-                       _deadline("new_tab", timeout_ms, _NAV_DEADLINE_MS),
-                       False, "new_tab", tab)
+            deadline_ms = _deadline("new_tab", timeout_ms, _NAV_DEADLINE_MS)
+            await _run(page.goto(url, wait_until="domcontentloaded",
+                                 timeout=_inner_timeout(deadline_ms)),
+                       action_id, deadline_ms, False, "new_tab", tab)
         return tab
 
     async def list_tabs(self, *, timeout_ms: int = 30000):
@@ -666,14 +804,12 @@ class _Tab:
         self.storage = _Storage(page)
 
     def _mark_stale(self, reason: str) -> None:
-        """Abandon this tab and force the browser connection to be rebuilt.
+        """Abandon only this tab after a call had to be cancelled at its deadline.
 
-        Called when a call had to be cancelled at its deadline: the cancellation can
-        desynchronise the shared CDP pipe, so failing fast on this tab (instead of
-        letting every later call burn another deadline) is what keeps a step alive.
+        Failing fast here (instead of letting every later call on this page burn
+        another deadline) keeps the step alive; the browser is left untouched.
         """
         self._stale = reason
-        self._browser._wedged = True
 
     def _check(self) -> None:
         if self._stale:
@@ -704,27 +840,31 @@ class _Tab:
     async def goto(self, url, *, wait_until="domcontentloaded",
                    timeout_ms: int = _NAV_DEADLINE_MS, action_id=None):
         self._check()
-        return await _run(self._page.goto(url, wait_until=wait_until), action_id,
-                          _deadline("goto", timeout_ms, _NAV_DEADLINE_MS),
-                          False, "goto", self)
+        deadline_ms = _deadline("goto", timeout_ms, _NAV_DEADLINE_MS)
+        return await _run(self._page.goto(url, wait_until=wait_until,
+                                          timeout=_inner_timeout(deadline_ms)),
+                          action_id, deadline_ms, False, "goto", self)
 
     async def go_back(self, *, wait_until="domcontentloaded",
                       timeout_ms: int = _NAV_DEADLINE_MS, action_id=None):
-        return await _run(self._page.go_back(wait_until=wait_until), action_id,
-                          _deadline("go_back", timeout_ms, _NAV_DEADLINE_MS),
-                          False, "go_back", self)
+        deadline_ms = _deadline("go_back", timeout_ms, _NAV_DEADLINE_MS)
+        return await _run(self._page.go_back(wait_until=wait_until,
+                                             timeout=_inner_timeout(deadline_ms)),
+                          action_id, deadline_ms, False, "go_back", self)
 
     async def go_forward(self, *, wait_until="domcontentloaded",
                          timeout_ms: int = _NAV_DEADLINE_MS, action_id=None):
-        return await _run(self._page.go_forward(wait_until=wait_until), action_id,
-                          _deadline("go_forward", timeout_ms, _NAV_DEADLINE_MS),
-                          False, "go_forward", self)
+        deadline_ms = _deadline("go_forward", timeout_ms, _NAV_DEADLINE_MS)
+        return await _run(self._page.go_forward(wait_until=wait_until,
+                                                timeout=_inner_timeout(deadline_ms)),
+                          action_id, deadline_ms, False, "go_forward", self)
 
     async def reload(self, *, wait_until="domcontentloaded",
                      timeout_ms: int = _NAV_DEADLINE_MS, action_id=None):
-        return await _run(self._page.reload(wait_until=wait_until), action_id,
-                          _deadline("reload", timeout_ms, _NAV_DEADLINE_MS),
-                          False, "reload", self)
+        deadline_ms = _deadline("reload", timeout_ms, _NAV_DEADLINE_MS)
+        return await _run(self._page.reload(wait_until=wait_until,
+                                            timeout=_inner_timeout(deadline_ms)),
+                          action_id, deadline_ms, False, "reload", self)
 
     async def close(self, *, timeout_ms: int = 30000, action_id=None):
         # unbounded page.close() was observed to hang when a previous call was still
@@ -785,8 +925,11 @@ class _Web:
         self.name = "web"
         self.resource_id = "browser:web-shim"
 
+    def is_alive(self) -> bool:
+        return self.browser.is_alive()
+
     async def close(self, *, timeout_ms: int = 30000) -> None:
-        await self.browser.close()
+        await self.browser.close(timeout_ms=timeout_ms)
 
 
 async def create_web(*, storage_state: Optional[str] = None,
