@@ -323,6 +323,57 @@ def test_recall_bounded_to_five_entries_and_4000_chars(tmp_path):
     assert sum(len(item["title"]) + len(item["content"]) for item in chosen) <= 4000
 
 
+@pytest.mark.parametrize("revoked_count", [0, 32])
+@pytest.mark.parametrize("previous_revision", [None, 1])
+def test_recall_block_budget_counts_headers_labels_and_revocations(tmp_path, revoked_count, previous_revision):
+    service = MemoryService(tmp_path / "memory")
+    entries = []
+    for index in range(2):
+        created = service.propose({"title": f"钉钉周报流程 {index}",
+                                   "content": f"{index}" + "说明" * 950, "app": "钉钉"})
+        assert service.mutate("approve", created["memory_id"], 1)[0]["ok"]
+        entries.append(MemoryStore(service.root).get(created["memory_id"]))
+    # 排名靠后的短条目仍能利用剩余预算；不截断长正文以免改变用户确认的语义。
+    short = service.propose({"title": "钉钉周报", "content": "先核对附件", "app": "钉钉"})
+    service.mutate("approve", short["memory_id"], 1)
+    shown = {entry["id"]: previous_revision for entry in entries} if previous_revision else {}
+    revoked = [f"m_{index:012x}" for index in range(revoked_count)]
+
+    block = service.recall_block("钉钉 周报 流程", shown, revoked)
+
+    assert len(block) <= memory_store.RECALL_CHARS
+    assert "不构成新的授权" in block and "必须重新观察确认" in block
+    rendered = [entry for entry in entries if f"- [{entry['id']} · r2" in block]
+    assert len(rendered) == 1 and rendered[0]["content"] in block
+    assert short["memory_id"] in shown and "先核对附件" in block
+    assert shown == {rendered[0]["id"]: 2, short["memory_id"]: 2}
+    omitted = next(entry for entry in entries if entry not in rendered)
+    assert (omitted["id"] in revoked) == (previous_revision is not None)
+    assert all(memory_id in block for memory_id in revoked)
+    assert all(entry["id"] not in revoked for entry in rendered)
+
+
+@pytest.mark.parametrize("extra_char", [0, -1])
+def test_recall_block_exact_budget_keeps_whole_entry_or_only_invalidation(tmp_path, monkeypatch, extra_char):
+    import memory_runtime
+
+    service = MemoryService(tmp_path / "memory")
+    created = service.propose({"title": "钉钉周报流程", "content": "先核对附件", "app": "钉钉"})
+    service.mutate("approve", created["memory_id"], 1)
+    full = service.recall_block("钉钉 周报", {}, [])
+    monkeypatch.setattr(memory_runtime, "RECALL_CHARS", len(full) + extra_char)
+    shown, revoked = {created["memory_id"]: 1}, []
+
+    block = service.recall_block("钉钉 周报", shown, revoked)
+
+    assert len(block) <= memory_runtime.RECALL_CHARS
+    if extra_char == 0:
+        assert block == full and shown == {created["memory_id"]: 2} and revoked == []
+    else:
+        assert block.startswith("## 已失效的长期记忆") and "先核对附件" not in block
+        assert created["memory_id"] in block and shown == {} and revoked == [created["memory_id"]]
+
+
 def test_recall_block_is_data_only_and_marks_forgotten_ids_without_content(tmp_path):
     service = MemoryService(tmp_path / "memory")
     created = service.propose({"title": "钉钉周报流程", "content": "先确认收件人列表", "app": "钉钉"})

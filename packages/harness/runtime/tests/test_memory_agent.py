@@ -153,6 +153,31 @@ def test_recall_injects_only_approved_as_data_and_forget_excludes_next_request(t
     assert service.catalog_fields()["approved_count"] == 0
 
 
+def test_request_memory_budget_and_usage_count_include_only_rendered_entries(tmp_path, monkeypatch):
+    from memory_store import RECALL_CHARS
+
+    service = MemoryService(tmp_path / "memory")
+    for index in range(2):
+        created = service.propose({"title": f"钉钉周报流程 {index}",
+                                   "content": f"{index}" + "说明" * 950, "app": "钉钉"})
+        assert service.mutate("approve", created["memory_id"], 1)[0]["ok"]
+    short = service.propose({"title": "钉钉周报", "content": "先核对附件", "app": "钉钉"})
+    service.mutate("approve", short["memory_id"], 1)
+
+    requests, frontend, _ = run_cli(tmp_path, monkeypatch, ["再按流程发一次钉钉周报"],
+                                    task="帮我按流程在钉钉发周报")
+
+    assert len(requests) == 2
+    for request in requests:
+        blocks = memory_messages(request)
+        assert len(blocks) == 1 and len(blocks[0]["content"]) <= RECALL_CHARS
+        assert blocks[0]["content"].count("- [m_") == 2
+        assert "先核对附件" in blocks[0]["content"]
+    # 真 run_agent 的共享状态接线；模型、SDK 和桌面均为离线 fixture，不是 GUI 验收。
+    statuses = [event.payload for event in frontend.events if event.kind == "context_status"]
+    assert len(statuses) == 2 and all(status["memory_count"] == 2 for status in statuses)
+
+
 def test_no_match_and_disabled_memory_change_nothing(tmp_path, monkeypatch):
     seed(tmp_path)
     model_inputs, _, _ = run_cli(tmp_path, monkeypatch, [], task="打开计算器算 1+1")
