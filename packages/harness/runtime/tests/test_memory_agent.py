@@ -178,6 +178,50 @@ def test_request_memory_budget_and_usage_count_include_only_rendered_entries(tmp
     assert len(statuses) == 2 and all(status["memory_count"] == 2 for status in statuses)
 
 
+def test_request_app_scope_does_not_recall_shared_vendor_experience(tmp_path, monkeypatch):
+    service = MemoryService(tmp_path / "memory")
+    created = service.propose({"title": "保存文件", "content": "Chrome 专属经验：保存后核对文件格式",
+                               "app": "Google Chrome"})
+    assert service.mutate("approve", created["memory_id"], 1)[0]["ok"]
+
+    requests, frontend, _ = run_cli(tmp_path, monkeypatch, ["改用 Google Chrome 保存文件"],
+                                    task="在 Google Docs 保存文件")
+
+    assert len(requests) == 2
+    assert memory_messages(requests[0]) == []
+    assert "Chrome 专属经验" not in json.dumps(requests[0], ensure_ascii=False)
+    blocks = memory_messages(requests[1])
+    assert len(blocks) == 1 and "Chrome 专属经验" in blocks[0]["content"]
+    statuses = [event.payload for event in frontend.events if event.kind == "context_status"]
+    assert [status["memory_count"] for status in statuses] == [0, 1]
+
+    # 原生宿主走同一真实 run_agent；桌面和模型仍为离线 fixture。
+    native_requests = []
+    install_fakes(monkeypatch, native_requests)
+
+    async def native_scenario():
+        events = []
+        host = NativeHost(events.append, tmp_path / "native-runs")
+        try:
+            await host.command({"command": "start", "task_id": "scope", "text": "在 Google Docs 保存文件",
+                                "config": {"llm_base_url": "https://offline.invalid/v1",
+                                           "model_name": "fixture", "allow_empty_api_key": True,
+                                           "startup_observation": "none", "countdown": 0}})
+            await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == 0)
+            await host.command({"command": "message", "task_id": "scope", "message_id": "next",
+                                "text": "改用 Google Chrome 保存文件"})
+            await wait_for(events, lambda event: event["event"] == "turn_finished" and event["turn_index"] == 1)
+        finally:
+            await host.close()
+
+    asyncio.run(native_scenario())
+    assert len(native_requests) == 2
+    assert memory_messages(native_requests[0]) == []
+    assert "Chrome 专属经验" not in json.dumps(native_requests[0], ensure_ascii=False)
+    native_blocks = memory_messages(native_requests[1])
+    assert len(native_blocks) == 1 and "Chrome 专属经验" in native_blocks[0]["content"]
+
+
 def test_no_match_and_disabled_memory_change_nothing(tmp_path, monkeypatch):
     seed(tmp_path)
     model_inputs, _, _ = run_cli(tmp_path, monkeypatch, [], task="打开计算器算 1+1")

@@ -128,6 +128,42 @@ def test_global_preferences_and_app_specific_workflows_have_different_scope(tmp_
     assert set(current) == {preference["memory_id"], workflow["memory_id"]}
 
 
+@pytest.mark.parametrize("app,query,matched", [
+    ("Google Chrome", "Google Docs 保存文件", False),
+    ("Microsoft Excel", "Microsoft Word 保存文件", False),
+    ("com.apple.mail", "com.apple.Safari 保存文件", False),
+    ("com.apple.mail", "com.apple.mailhelper 保存文件", False),
+    ("com.apple.mail", "org.example.com.apple.mail 保存文件", False),
+    ("飞书会议", "飞书保存文件", False),
+    ("X", "保存文件", False),
+    ("To Do", "保存文件", False),
+    ("To In", "保存文件", False),
+    ("C++", "保存文件", False),
+    ("Chrome", "Chromebook 保存文件", False),
+    ("Google Chrome", "Chrome 保存文件", False),
+    ("Google Chrome", "Google Chrome.beta 保存文件", False),
+    ("Google Chrome", "在 GOOGLE   chrome 保存文件", True),
+    ("Google Chrome", "保存文件，请使用 Google Chrome.", True),
+    ("To In", "在 to in 保存文件", True),
+    ("C++", "在 C++ 保存文件", True),
+    ("com.apple.mail", "在 COM.APPLE.MAIL 保存文件", True),
+    ("X", "在 X 保存文件", True),
+    ("To Do", "在 to do 保存文件", True),
+    ("飞书会议", "在飞书会议保存文件", True),
+])
+def test_recall_app_scope_requires_complete_name_not_shared_tokens(tmp_path, app, query, matched):
+    store = MemoryStore(tmp_path / "memory")
+    created = propose(store, title="保存文件", content="保存文件后核对结果", app=app)
+    store.approve(created["memory_id"], 1)
+    rows = store.recall(query)
+    assert [row["id"] for row in rows] == ([created["memory_id"]] if matched else [])
+    # 请求未涉及该应用不等于记忆失效；历史版本仍有效，不生成撤销提示。
+    shown, revoked = {created["memory_id"]: 2}, []
+    block = MemoryService(store.directory).recall_block(query, shown, revoked)
+    assert ("保存文件后核对结果" in block) == matched
+    assert shown == {created["memory_id"]: 2} and revoked == []
+
+
 def test_paged_catalog_reaches_approved_items_beyond_first_candidates(tmp_path):
     store = MemoryStore(tmp_path / "memory")
     for index in range(70):

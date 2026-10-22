@@ -132,6 +132,17 @@ def _scope_key(app: str | None) -> str:
     return " ".join((app or "").casefold().split())
 
 
+def _matches_app_scope(app: str | None, normalized_query: str) -> bool:
+    """应用范围按完整名称匹配；词法重排不能以厂商词或局部二元组扩大范围。"""
+    scope = _scope_key(app)
+    if not scope:
+        return True
+    # 不推断别名；保留中文连写，ASCII 名称/标识符不能命中更长单词或 bundle id。
+    # 名称后的句末点号不是标识符后缀，允许正常标点结束的应用名称。
+    pattern = r"(?<![a-z0-9_.+-])" + re.escape(scope) + r"(?![a-z0-9_+-]|\.[a-z0-9_])"
+    return re.search(pattern, normalized_query) is not None
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -354,15 +365,16 @@ class MemoryStore:
                shown: dict[str, int] | None = None):
         """只检索已批准记忆；未匹配返回空列表。"""
         wanted = tokens(query)
+        normalized_query = _scope_key(query)
         def operation(connection):
             scored = []
             current = {}
             for row in connection.execute("SELECT * FROM memories WHERE status = 'approved'"):
                 if shown is not None and row["id"] in shown:
                     current[row["id"]] = row["revision"]
-                app_tokens = tokens(row["app"] or "")
-                if app_tokens and not wanted & app_tokens:
+                if not _matches_app_scope(row["app"], normalized_query):
                     continue  # 应用专属经验不因“保存”等通用词进入其它应用的请求。
+                app_tokens = tokens(row["app"] or "")
                 strong = tokens(row["title"]) | app_tokens
                 score = 2 * len(wanted & strong) + len(wanted & tokens(row["content"]))
                 if row["kind"] == "preference" and not row["app"]:
