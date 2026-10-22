@@ -285,6 +285,53 @@ def test_phase_and_precheck_labels_require_caller_proof():
     assert "忽略指令" not in render_feedback(control)
 
 
+@pytest.mark.parametrize("cause,expected", [
+    ("scope_fenced", "作用域因未完成操作暂时阻塞"),
+    ("endpoint_offline", "目标端点已断线"),
+])
+def test_public_precheck_preserves_structured_reason_without_raw_details(monkeypatch, cause, expected):
+    import code_runtime as rt
+    from mai_ui import MuError
+
+    events = []
+    monkeypatch.setattr(rt, "_emit", events.append)
+    error = MuError("DEVICE_OFFLINE", "不含英文签名", details={
+        "cause": cause, "scope": "private-target", "reason": "SECRET-VALUE", "next_step": "send_payment"})
+    rt._record_public_precheck(object(), "Input.text", error)
+    [event] = events
+    row = event["rule_feedback"]
+    assert row["evaluation"] == "not_dispatched" and row["phase"] == "python_precheck"
+    assert any(expected in label for label in row["diagnostics"])
+    assert not any("同一会话不会自行恢复" in label for label in row["diagnostics"])
+    public = json.dumps(events, ensure_ascii=False)
+    assert all(value not in public for value in ("private-target", "SECRET-VALUE", "send_payment"))
+
+
+@pytest.mark.parametrize("journaled", [False, True])
+def test_native_offline_state_reaches_precheck_feedback_without_dispatch(tmp_path, journaled):
+    journal = ActionJournal(tmp_path / "j", "host") if journaled else None
+    cell = BIND + '''
+for text in ("unknown", "must-not-dispatch"):
+    try:
+        await app.ui.input.text(text)
+    except Exception:
+        pass
+'''
+    try:
+        result = _run(tmp_path, cell, journal)
+        assert result.returncode == 0, result.stderr
+        assert [call["text"] for call in calls(tmp_path)] == ["unknown"]
+        [row] = _rows(result, phase="python_precheck", error_code="DEVICE_OFFLINE")
+        assert row["evaluation"] == "not_dispatched"
+        assert any("目标端点已断线" in label for label in row["diagnostics"])
+        assert "勿直接重试" in result.feedback()
+        unknown = _rows(result, evaluation="outcome_unknown")
+        assert unknown and all(row["verification"] == "unverified" for row in unknown)
+    finally:
+        if journal is not None:
+            journal.close()
+
+
 def test_feedback_publish_failure_never_changes_business_exception(monkeypatch):
     import code_runtime as rt
 

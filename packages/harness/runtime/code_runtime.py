@@ -2543,8 +2543,14 @@ async def _journal_invoke(session, event, invoke, *, memory_replay=False):
                 exc.code = code
             if not memory_replay:
                 # 诊断只进私有日志；公开规则反馈匹配固定原因，不回灌自由文本或输入正文。
-                await _journal_transition(event, stage, receipt=receipt,
-                                          error={"code": code, "message": str(exc)[:1024]})
+                error = {"code": code, "message": str(exc)[:1024]}
+                details = getattr(exc, "details", None)
+                cause = details.get("cause") if isinstance(details, dict) else None
+                if (code == "DEVICE_OFFLINE" and isinstance(cause, str)
+                        and cause in {"scope_fenced", "endpoint_offline"}):
+                    # 有界原因标记进入 journal；不新增保存 provider 自由文本或完整 details。
+                    error["details"] = {"cause": cause}
+                await _journal_transition(event, stage, receipt=receipt, error=error)
             raise
         receipt = await _journal_receipt(session, event["action_id"])
         if not memory_replay:
@@ -2647,7 +2653,7 @@ def _record_public_precheck(session, topic, exc, *, signature=False):
     try:
         code = getattr(exc, "code", None)
         code = code if isinstance(code, str) and code else type(exc).__name__
-        error = {"code": code, "message": str(exc)[:4096]}
+        error = {"code": code, "message": str(exc)[:4096], "details": getattr(exc, "details", None)}
         if signature:
             error["signature_mismatch"] = True
         _record_tool("mai_ui." + topic, {}, error=code, error_code=code,

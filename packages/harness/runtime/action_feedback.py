@@ -63,8 +63,14 @@ _PRECHECKS = (
     ("stdin must be bytes", "stdin 须为 bytes"),
     ("requires a whole-device attachment", "该服务只能在整机 device 上调用，不能在 app/window 句柄上调用"),
 )
+_CONNECTION_HINTS = {
+    "scope_fenced": "SDK 报告目标作用域因未完成操作暂时阻塞；等待原操作结束后重新观察，"
+                    "不代表整个设备断线；勿直接重试有副作用动作",
+    "endpoint_offline": "SDK 报告目标端点已断线；由宿主恢复连接后重新获取句柄并观察，"
+                        "勿直接重试结果未知动作",
+}
 _CODE_HINTS = {
-    "DEVICE_OFFLINE": "SDK 已把该设备连接 fence 为离线（常见于此前结果未知）；同一会话不会自行恢复",
+    "DEVICE_OFFLINE": "SDK 报告连接或作用域不可用；原因未明确，不能据此断言永久断线或动作未执行",
     "STALE_ATTACHMENT": "句柄所属 attachment 已失效；重新获取 app/window",
     "SESSION_CLOSED": "SDK 会话已关闭",
     "UNSUPPORTED_CAPABILITY": "当前绑定目标未声明该能力 ready；用 await win.capabilities() 查看",
@@ -75,7 +81,7 @@ _PHASES = {"python_precheck", "host_gate"}
 _UNKNOWN_CODES = {"ACTION_OUTCOME_UNKNOWN", "SHELL_OUTCOME_UNKNOWN"}
 _NATIVE_LABELS = frozenset(item[1] for item in _DIAGNOSTICS)
 _PRECHECK_LABELS = frozenset(item[1] for item in _PRECHECKS)
-_HINT_LABELS = frozenset((*_CODE_HINTS.values(), _SIGNATURE_HINT))
+_HINT_LABELS = frozenset((*_CODE_HINTS.values(), *_CONNECTION_HINTS.values(), _SIGNATURE_HINT))
 _ALL_LABELS = _NATIVE_LABELS | _PRECHECK_LABELS | _HINT_LABELS
 _CAPABILITY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+\Z")
 _HELP = re.compile(r"[A-Z][A-Za-z]{1,20}\.[a-z_]{1,32}\Z")
@@ -90,6 +96,18 @@ def _token(value):
 
 def _dict(value):
     return value if isinstance(value, dict) else {}
+
+
+def _connection_hint(*errors):
+    # 只认 SDK 错误码和精确 cause；不回显自由文本 scope/reason/next_step，不触发恢复或重试。
+    for error in errors:
+        error = _dict(error)
+        cause = _dict(error.get("details")).get("cause")
+        if error.get("code") == "DEVICE_OFFLINE" and isinstance(cause, str):
+            hint = _CONNECTION_HINTS.get(cause)
+            if hint:
+                return hint
+    return None
 
 
 def _diagnostics(*errors, table=_DIAGNOSTICS):
@@ -154,6 +172,9 @@ def action_feedback(operation, *, action_id=None, sdk_session_id=None, stage=Non
     if evaluation == "not_dispatched" and phase in _PHASES:
         row["phase"] = phase
     diagnostics = _diagnostics(native_error, error)
+    connection_hint = _connection_hint(error, native_error)
+    if connection_hint:
+        diagnostics.append(connection_hint)
     if row.get("phase") == "python_precheck":
         # 只有可证明未进入 SDK session 请求的本地校验异常才匹配 SDK 固定消息与错误码提示。
         diagnostics += [label for label in _diagnostics(error, table=_PRECHECKS) if label not in diagnostics]
@@ -163,7 +184,7 @@ def action_feedback(operation, *, action_id=None, sdk_session_id=None, stage=Non
             row["capability"] = tail
         # UNSUPPORTED_CAPABILITY 也用于 WIP/整机限制等固定原因；只有消息就是能力名时才提示“未声明 ready”。
         hint = (_SIGNATURE_HINT if error.get("signature_mismatch") is True
-                else None if code == "UNSUPPORTED_CAPABILITY" and "capability" not in row
+                else None if connection_hint or (code == "UNSUPPORTED_CAPABILITY" and "capability" not in row)
                 else _CODE_HINTS.get(code))
         if hint and hint not in diagnostics:
             diagnostics.append(hint)
