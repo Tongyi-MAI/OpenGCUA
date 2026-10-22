@@ -35,8 +35,14 @@ def decode_error(error):
     except (ValueError, TypeError):
         return MuError(str(error))
     details = data.get("details")
-    receipt = (ActionReceipt(**details["receipt"])
-               if isinstance(details, dict) and "receipt" in details else None)
+    receipt = None
+    raw_receipt = details.get("receipt") if isinstance(details, dict) else None
+    if isinstance(raw_receipt, dict):
+        try:
+            receipt = ActionReceipt(**raw_receipt)
+        except TypeError:
+            # 不兼容的附加回执不能掩盖原错误；仅保留原始 details，不补造动作事实。
+            pass
     return MuError(data["code"], data.get("message", ""), receipt=receipt, details=details)
 
 

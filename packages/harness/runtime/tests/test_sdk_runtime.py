@@ -51,6 +51,55 @@ def test_sdk_decode_error_preserves_provider_details(details):
     assert error.details == details and error.receipt is None
 
 
+@pytest.mark.parametrize("receipt", [
+    None, [], "provider-receipt", {"action_id": "a:1"},
+    dict(action_id="a:1", sequence=1, session_id="s:1", attachment_id="d:1",
+         resource_id="mac", provider="fixture", execution="rejected",
+         effect="not_applied", future_extension=True),
+], ids=["null", "list", "string", "missing-fields", "future-fields"])
+def test_sdk_decode_error_keeps_diagnostics_with_incompatible_receipt(receipt):
+    import json
+    from mai_ui import MuError
+    from mai_ui.unified.runtime import decode_error
+
+    details = {"receipt": receipt, "cause": "scope_fenced", "scope": "web/tab:1",
+               "next_step": "wait_for_operation", "native_message": "明确拒绝"}
+    error = decode_error(ValueError(json.dumps({
+        "code": "DEVICE_OFFLINE", "message": "网页操作尚未结束", "details": details,
+    })))
+    assert isinstance(error, MuError)
+    assert error.code == "DEVICE_OFFLINE"
+    assert str(error) == "DEVICE_OFFLINE: 网页操作尚未结束"
+    assert error.details == details
+    assert error.receipt is None, "不兼容回执只能保留原始资料，不能补造动作效果"
+
+
+@pytest.mark.parametrize("boundary", ["native", "call"])
+def test_sdk_incompatible_receipt_preserves_original_error_across_boundaries(boundary):
+    import json
+    from mai_ui import MuError
+    from mai_ui.unified.runtime import call, native
+
+    details = {"receipt": {"provider_extension": True}, "native_message": "捕获失败"}
+    wire = json.dumps({"code": "OBSERVATION_FAILED", "message": "捕获失败", "details": details})
+
+    def failed_state():
+        raise ValueError(wire)
+
+    class Core:
+        async def call(self, _wire):
+            raise ValueError(wire)
+
+    with pytest.raises(MuError) as caught:
+        if boundary == "native":
+            native(failed_state)
+        else:
+            asyncio.run(call(Core(), {"op": "observe"}))
+    assert caught.value.code == "OBSERVATION_FAILED"
+    assert caught.value.details == details and caught.value.receipt is None
+    assert isinstance(caught.value.__cause__, ValueError)
+
+
 def test_sdk_decode_error_keeps_receipt_and_nested_native_details():
     import json
     from mai_ui.unified.runtime import decode_error
@@ -211,6 +260,27 @@ def test_sdk_bridge_describe_error_preserves_diagnostics_and_cleans_up(code):
             assert str(caught.value) == code + ": 初始化失败"
             assert adapter.closed == 1 and not runtime._endpoints
             assert [q["op"] for q in adapter.requests] == ["describe"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("receipt", [None, {"provider_extension": True}])
+def test_sdk_bridge_describe_incompatible_receipt_keeps_error_and_cleanup(receipt):
+    from mai_ui import MuError, Runtime
+
+    details = {"receipt": receipt, "native_message": "初始化权限被拒绝"}
+    adapter = _SdkBridgeErrorAdapter({"code": "PERMISSION_DENIED", "message": "权限被拒绝",
+                                     "details": details}, describe_error=True)
+
+    async def scenario():
+        async with Runtime() as runtime:
+            with pytest.raises(MuError) as caught:
+                await runtime.add_adapter(adapter, name="fixture", resource_id="mac:fixture")
+            assert caught.value.code == "PERMISSION_DENIED"
+            assert str(caught.value) == "PERMISSION_DENIED: 权限被拒绝"
+            assert caught.value.details == details and caught.value.receipt is None
+            assert adapter.closed == 1 and not runtime._endpoints
+            assert [q["op"] for q in adapter.requests] == ["describe"], "错误解码不能触发重试"
 
     asyncio.run(scenario())
 
