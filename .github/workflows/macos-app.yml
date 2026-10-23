@@ -49,6 +49,10 @@ jobs:
         run: python3 packages/macos/tests/test_build_download.py
       - name: Test background login-state helper patch
         run: python3 packages/macos/tests/test_browser_storage_patch.py
+      - name: Test app release checks, verified updates and rollback
+        run: |
+          swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/AppUpdateRelease.swift packages/macos/Sources/AppUpdateInstaller.swift packages/macos/Sources/AppUpdater.swift packages/macos/Sources/AppUpdateView.swift packages/macos/tests/AppUpdateContracts.swift -o packages/macos/build/generalist-update-contracts
+          packages/macos/build/generalist-update-contracts
       - name: Test native task lifecycle and SDK integration
         run: |
           sdk_wheel="$(python3 -c 'from pathlib import Path; wheels = list(Path("packages/macos/build/wheels").glob("qwen_intelligence_sdk-*-cp312-*-macosx*.whl")); assert len(wheels) == 1, wheels; print(wheels[0].resolve())')"

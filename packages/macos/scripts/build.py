@@ -113,7 +113,7 @@ def main():
     parser.add_argument("--skip-runtime", action="store_true", help="Recompile UI in an existing local bundle")
     parser.add_argument("--identity", default=os.environ.get("SIGNING_IDENTITY"), help="Certificate name/hash; '-' explicitly selects ad-hoc signing")
     parser.add_argument("--require-stable-signing", action="store_true", help="Fail instead of using an ad-hoc identity")
-    parser.add_argument("--app-version", default="0.1.2", help="Numeric MAJOR.MINOR.PATCH bundle version")
+    parser.add_argument("--app-version", default="0.3.0", help="Numeric MAJOR.MINOR.PATCH bundle version")
     parser.add_argument("--build-number", default="1", help="Numeric bundle build number")
     parser.add_argument("--build-dir", type=Path, default=APP_ROOT / "build", help="Separate output directory; leaves other builds untouched")
     args = parser.parse_args()

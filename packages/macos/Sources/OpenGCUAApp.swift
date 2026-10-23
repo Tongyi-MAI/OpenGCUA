@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate {
     let model = AppModel()
+    let updater = AppUpdater()
     var panel: FloatingPanel?
     var status: NSStatusItem!
     var popover: NSPopover?
@@ -25,6 +26,7 @@ import SwiftUI
     private var setupWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var historyWindow: NSWindow?
+    private var updateAlert: NSAlert?
     private lazy var menuBehavior = MenuPopoverBehavior { [weak self] in self?.dismissMenuPopover() }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -49,6 +51,7 @@ import SwiftUI
         commands.addItem(withTitle: L("打开 OpenGCUA"), action: #selector(showMain), keyEquivalent: "1")
         commands.addItem(withTitle: L("呼出 / 收起 OpenGCUA（⌃⌥Space）"), action: #selector(togglePresentation), keyEquivalent: "")
         commands.addItem(withTitle: L("设置…"), action: #selector(showSettings), keyEquivalent: ",")
+        commands.addItem(withTitle: L("检查更新…"), action: #selector(checkForUpdates), keyEquivalent: "")
         commands.addItem(withTitle: L("对话记录…"), action: #selector(showHistory), keyEquivalent: "")
         commands.addItem(withTitle: L("Mac 控制权限…"), action: #selector(showPermissions), keyEquivalent: "")
         commands.addItem(.separator())
@@ -74,7 +77,7 @@ import SwiftUI
         status.button?.target = self; status.button?.action = #selector(statusClick)
         let popover = NSPopover(); popover.behavior = .transient; popover.delegate = self
         popover.contentSize = mainSize
-        let content = NSHostingController(rootView: MainView(model: model)); content.sizingOptions = []
+        let content = NSHostingController(rootView: MainView(model: model, updater: updater)); content.sizingOptions = []
         popover.contentViewController = content; self.popover = popover
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.clampPanel() }
@@ -88,10 +91,21 @@ import SwiftUI
             status.button?.toolTip = L("OpenGCUA · 全局快捷键未启用，请查看设置")
         }
         if FirstLaunch.needsSetup() { showSetup() } else { showMain() }
+        updater.canInstall = { [weak self] in
+            guard let self else { return false }
+            return !self.quitting && !self.model.phase.active && !self.model.recording
+        }
+        updater.onRelaunch = { NSApp.terminate(nil) }
+        updater.onChange = { [weak self] in
+            guard let self else { return }
+            self.status.button?.title = self.updater.showsPrompt ? "OG •" : "OG"
+            self.presentPendingUpdate()
+        }
+        updater.start()
     }
     func languageChanged() {
         let titles = ["showMain": "打开 OpenGCUA", "togglePresentation": "呼出 / 收起 OpenGCUA（⌃⌥Space）",
-                      "showSettings": "设置…", "showHistory": "对话记录…", "showPermissions": "Mac 控制权限…",
+                      "showSettings": "设置…", "checkForUpdates": "检查更新…", "showHistory": "对话记录…", "showPermissions": "Mac 控制权限…",
                       "hide:": "隐藏主界面，显示进度气泡", "showProgressBubble": "显示进度气泡", "hideProgressBubble": "隐藏进度气泡",
                       "terminate:": "退出 OpenGCUA", "undo:": "撤销", "cut:": "剪切", "copy:": "复制", "paste:": "粘贴", "selectAll:": "全选"]
         func update(_ menu: NSMenu) {
@@ -128,7 +142,7 @@ import SwiftUI
         miniPresentation.allowBubble()
         if NSApp.isHidden { NSApp.unhideWithoutActivation() }
         if mainWindow == nil {
-            let content = NSHostingView(rootView: MainView(model: model))
+            let content = NSHostingView(rootView: MainView(model: model, updater: updater))
             content.sizingOptions = []
             let window = MainWindow(content: content)
             window.delegate = self
@@ -149,8 +163,38 @@ import SwiftUI
             window.title = L("OpenGCUA 设置"); window.isReleasedWhenClosed = false; window.delegate = self
             window.center(); settingsWindow = window
         }
-        settingsWindow?.contentView = NSHostingView(rootView: SettingsView(model: model, onClose: { [weak self] in self?.settingsWindow?.orderOut(nil) }))
+        settingsWindow?.contentView = NSHostingView(rootView: SettingsView(model: model, updater: updater, onClose: { [weak self] in self?.settingsWindow?.orderOut(nil) }))
         settingsWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    @objc func checkForUpdates() { showSettings(); updater.check() }
+    func applicationDidBecomeActive(_ notification: Notification) { presentPendingUpdate() }
+    func windowDidBecomeKey(_ notification: Notification) { presentPendingUpdate() }
+    private func presentPendingUpdate() {
+        guard updateAlert == nil, updater.showsPrompt, !updater.busy,
+              !quitting, !model.phase.active, !model.recording, NSApp.isActive,
+              let release = updater.available, let window = NSApp.keyWindow,
+              window.isVisible, window.attachedSheet == nil,
+              window === mainWindow || window === settingsWindow
+                || window === popover?.contentViewController?.view.window else { return }
+        let alert = AppUpdateDialog.make(release: release, currentVersion: updater.currentVersion,
+                                        ready: updater.state == .ready,
+                                        error: updater.isError ? updater.message : nil, icon: AppBrand.icon)
+        updateAlert = alert
+        alert.beginSheetModal(for: window) { [weak self] response in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.updater.available == release else {
+                    self.updateAlert = nil; self.presentPendingUpdate(); return
+                }
+                // Keep the prompt retained while the updater changes state.
+                switch response {
+                case .alertFirstButtonReturn: self.updater.install()
+                case .alertThirdButtonReturn: self.updater.skipVersion()
+                default: self.updater.remindLater()
+                }
+                self.updateAlert = nil
+            }
+        }
     }
     func showSetup() {
         dismissMenuPopover()
@@ -265,6 +309,7 @@ import SwiftUI
         panel?.orderOut(nil)
     }
     func refreshCompact() {
+        presentPendingUpdate()
         let description = "OpenGCUA · \(model.phase.label)"
         switch model.phase {
         case .waiting:
@@ -358,6 +403,7 @@ import SwiftUI
     }
     func runtimeExited() { if quitting { NSApp.reply(toApplicationShouldTerminate: true) } }
     func applicationWillTerminate(_ notification: Notification) {
+        updater.stop()
         globalShortcut.unregister()
         menuBehavior.detach()
         model.stopSpeech(); model.bridge.shutdown()
@@ -369,7 +415,10 @@ import SwiftUI
 }
 
 @main enum OpenGCUAApp {
-    @MainActor static func main() {
+    @MainActor static func main() async {
+        if CommandLine.arguments.dropFirst().first == "--install-update" {
+            exit(await AppUpdateInstaller.runHelper(CommandLine.arguments))
+        }
         let app = NSApplication.shared, delegate = AppDelegate()
         app.delegate = delegate
         withExtendedLifetime(delegate) { app.run() }

@@ -28,6 +28,15 @@ Applications after quitting the old version. A local ad-hoc build is not notariz
 fresh macOS permissions. Grant Accessibility and Screen Recording to OpenGCUA itself; no global
 Gatekeeper/TCC changes are required. Build instructions are in [macOS README](packages/macos/README.md).
 
+The app checks GitHub Releases at launch and periodically (every six hours). A newer stable release
+with a ready macOS installer is offered in a native macOS dialog with **Install Update**, **Later**,
+and **Skip This Version**. The prompt waits until the app is active and the current task has ended.
+You can also use **Check for Updates…** in the app menu or Settings;
+automatic checks can be disabled in Settings. Updates download only after approval, verify the
+download and app signature, and install after the current task and recording have ended. The app
+relaunches automatically and keeps your settings and chat history. It must be in a writable folder,
+such as your Applications folder; an app running from a DMG cannot update itself.
+
 The main panel offers session resume, one Skill, session-only foreground access, an independent
 ask_user switch, FIFO queue controls, turn interruption, manual compaction and optional
 reasoning/code with API status. Foreground access is reset on session switch/reconnect/restart;

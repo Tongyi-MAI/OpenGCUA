@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "qwen-intelligence-sdk"
-version = "0.1.2"
+version = "0.3.0"
 description = "Qwen-Intelligence SDK: one programming vocabulary across computer, browser and mobile (preview)."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"

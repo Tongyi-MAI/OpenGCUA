@@ -22,6 +22,7 @@ struct SymbolButton: View {
 }
 struct MainView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var updater: AppUpdater
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
@@ -49,6 +50,7 @@ struct MainView: View {
             ScrollViewReader { scroll in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
+                        AppUpdateStatus(updater: updater, taskActive: model.phase.active || model.recording)
                         SessionControlPanel(model: model)
                         ForEach(model.controls.approvals) { approval in
                             ApprovalCard(model: model, approval: approval).id(approval.id)
@@ -108,6 +110,7 @@ struct MainView: View {
                     SymbolButton(symbol: "rectangle.bottomthird.inset.filled", title: L("打开小窗")) { model.delegate?.collapse() }
                     Menu {
                         Button(L("设置…")) { model.delegate?.showSettings() }
+                        Button(L("检查更新…")) { model.delegate?.checkForUpdates() }
                         Button(L("显示进度气泡")) { model.delegate?.showProgressBubble() }
                         Button(L("隐藏进度气泡")) { model.delegate?.hideProgressBubble() }
                         Button(L("Mac 控制权限…")) { MacPermissions.showGuide(model: model) }

@@ -4,12 +4,13 @@ import SwiftUI
 
 @MainActor struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var updater: AppUpdater
     @StateObject private var editor: SettingsEditor
     var onClose: () -> Void
     private let permissionRefresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
-    init(model: AppModel, onClose: @escaping () -> Void = {}) {
-        self.model = model; self.onClose = onClose
+    init(model: AppModel, updater: AppUpdater, onClose: @escaping () -> Void = {}) {
+        self.model = model; self.updater = updater; self.onClose = onClose
         _editor = StateObject(wrappedValue: SettingsEditor(model: model))
     }
     var body: some View {
@@ -64,6 +65,16 @@ import SwiftUI
                 Toggle(L("显示推理"), isOn: $editor.draft.showReasoning)
                 Toggle(L("显示代码"), isOn: $editor.draft.showCode)
                 Text(L("仅控制界面显示，不改变模型请求或执行。")).font(.caption).foregroundStyle(.secondary)
+            }
+            Section(L("软件更新")) {
+                LabeledContent(L("版本"), value: updater.currentVersion)
+                Toggle(L("自动检查更新"), isOn: $updater.automaticChecks)
+                Button(L("检查更新…")) { updater.check() }.disabled(updater.busy)
+                if !updater.message.isEmpty && !updater.showsPrompt {
+                    Text(updater.message).font(.caption).foregroundStyle(updater.isError ? .orange : .secondary)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+                AppUpdateStatus(updater: updater, taskActive: model.phase.active || model.recording)
             }
             Section("OpenGCUA") {
                 Button(L("打开设置助理…")) { onClose(); model.delegate?.showSetup() }
