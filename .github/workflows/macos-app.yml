@@ -45,6 +45,8 @@ jobs:
           uv run --no-project --python 3.12 python packages/macos/scripts/build.py "${args[@]}"
       - name: Test signing identity selection
         run: python3 packages/macos/tests/test_signing.py
+      - name: Test resumable driver archive download
+        run: python3 packages/macos/tests/test_build_download.py
       - name: Test background login-state helper patch
         run: python3 packages/macos/tests/test_browser_storage_patch.py
       - name: Test native task lifecycle and SDK integration

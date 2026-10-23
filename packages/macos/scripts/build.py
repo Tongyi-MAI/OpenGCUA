@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build a relocatable native .app with Python, SDK and the pinned signed driver."""
 import argparse
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -22,6 +24,76 @@ BUILD = APP_ROOT / "build"
 
 def run(*args, **kwargs):
     subprocess.run([str(x) for x in args], check=True, **kwargs)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download_archive(url: str, archive: Path, expected: str, *,
+                     chunk_size: int = 4 * 1024 * 1024, workers: int = 4) -> None:
+    """分段下载锁定依赖；只在完整 SHA256 验证通过后把残片提升为缓存。"""
+    if archive.is_file() and file_sha256(archive) == expected:
+        return
+    if chunk_size < 1 or not 1 <= workers <= 4:
+        raise ValueError("Invalid archive download bounds")
+    partial = archive.with_name(archive.name + ".part")
+    if archive.exists() and not partial.exists():
+        # 旧 urlretrieve 可能留下截断文件，沿用连续前缀但不把它当完整缓存。
+        archive.replace(partial)
+    request = urllib.request.Request(url, headers={"Range": "bytes=0-0", "Accept-Encoding": "identity"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        match = re.fullmatch(r"bytes 0-0/(\d+)", response.headers.get("Content-Range", ""))
+        if response.status != 206 or not match:
+            raise RuntimeError("Archive server did not honor Content-Range; partial cache was not used")
+        total = int(match[1])
+        if not 0 < total <= 512 * 1024 * 1024:
+            raise RuntimeError("Archive size is outside download bounds")
+    offset = partial.stat().st_size if partial.exists() else 0
+    if offset > total:
+        raise RuntimeError("Partial archive exceeds remote size; remove the stale .part before retrying")
+
+    def segment(start: int, end: int) -> bytes:
+        for attempt in range(3):
+            try:
+                request = urllib.request.Request(url, headers={
+                    "Range": f"bytes={start}-{end}", "Accept-Encoding": "identity"})
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    actual = response.headers.get("Content-Range", "")
+                    if response.status != 206 or actual != f"bytes {start}-{end}/{total}":
+                        raise RuntimeError(f"Unexpected Content-Range for archive segment {start}-{end}: {actual}")
+                    data = response.read(end - start + 2)
+                    if len(data) != end - start + 1:
+                        raise RuntimeError(f"Incomplete archive segment {start}-{end}: got {len(data)} bytes")
+                    return data
+            except OSError:
+                if attempt == 2:
+                    raise
+        raise RuntimeError("Archive segment retry budget exhausted")
+
+    positions = iter(range(offset, total, chunk_size))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = deque()
+        def submit_next() -> None:
+            start = next(positions, None)
+            if start is not None:
+                pending.append(pool.submit(segment, start, min(start + chunk_size - 1, total - 1)))
+        for _ in range(workers):
+            submit_next()
+        with partial.open("ab") as handle:
+            while pending:
+                # 按位置落盘，断开后仅留下连续前缀；待处理数据最多四个分段。
+                handle.write(pending.popleft().result())
+                handle.flush()
+                print(f"Driver download: {handle.tell()}/{total} bytes", flush=True)
+                submit_next()
+    if file_sha256(partial) != expected:
+        raise RuntimeError("CuaDriver archive checksum mismatch; partial download was not promoted")
+    partial.replace(archive)
 
 
 def copy_bundled_skills(source: Path, destination: Path) -> None:
@@ -146,12 +218,9 @@ def main():
         archive = cache / f"cua-driver-{lock['version']}.tar.gz"
         if not archive.exists():
             shared_archive = APP_ROOT / "build/cache" / archive.name
-            if shared_archive.is_file() and hashlib.sha256(shared_archive.read_bytes()).hexdigest() == lock["archive"]["sha256"]:
+            if shared_archive.is_file() and file_sha256(shared_archive) == lock["archive"]["sha256"]:
                 shutil.copy2(shared_archive, archive)
-            else:
-                urllib.request.urlretrieve(lock["archive"]["url"], archive)
-        if hashlib.sha256(archive.read_bytes()).hexdigest() != lock["archive"]["sha256"]:
-            raise SystemExit("CuaDriver archive checksum mismatch")
+        download_archive(lock["archive"]["url"], archive, lock["archive"]["sha256"])
         # Extract to a fresh staging directory: never modify a previously registered
         # signed companion in place (macOS protects its CodeResources).
         stage = tempfile.TemporaryDirectory(prefix="driver-", dir=cache)
