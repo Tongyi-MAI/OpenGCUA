@@ -22,3 +22,28 @@ node_modules/
 /packages/sdk/adapters/android/out/
 HANDOFF.md
 docs/*
+
+# 本地凭证；保留无密钥的示例
+.env.*
+!.env.example
+!.env.*.example
+.api_key
+
+# 私有记忆、登录态和执行记录
+memory.sqlite3*
+web_storage_state.json*
+actions.jsonl
+/memory/
+/browser/
+/browser-leases/
+**/runs/
+
+# 测试与检查缓存
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# 编辑器临时文件
+*.swp
+*.swo
