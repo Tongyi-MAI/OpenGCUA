@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 *.mp4
+!site/src/demos/quiet-work.mp4
 .env
 *.log
 .venv/
@@ -22,6 +23,9 @@ node_modules/
 /packages/sdk/adapters/android/out/
 HANDOFF.md
 docs/*
+.superpowers
+.qoder
+runs/*
 
 # 本地凭证；保留无密钥的示例
 .env.*
