@@ -83,16 +83,16 @@ studies.
 
 ## 🎬 Demos
 
-Click a screenshot to watch the video.
+Play the video below, or click a screenshot to watch the other demos.
 
 **Do your thing. I'll keep working.** Keep watching videos and reading on your Mac while OpenGCUA
 researches travel essentials and fills your shopping cart. See it report completion, then watch the user
 open the browser to inspect the cart and request a PowerPoint as a follow-up. This silent edit of a real
 26-minute session shows both deliveries, with source timestamps and playback speeds.
 
-[![Do your thing. I'll keep working. OpenGCUA runs in the background while you keep using your Mac.](site/assets/readme/demo-quiet-work.jpg)](site/src/demos/quiet-work.mp4)
+https://github.com/user-attachments/assets/b8ac8f0e-5e96-4225-a2df-d45aded005c3
 
-[▶ Watch background work · 1:08](site/src/demos/quiet-work.mp4)
+[▶ Open background-work video · 1:08](https://tongyi-mai.github.io/OpenGCUA/demos/quiet-work.mp4)
 
 **One visa form, four workflows.** OpenGCUA, OpenGCUA (prefer GUI), GUI + batch, and Codex work on the
 same visa application on a real Mac. Playback speeds vary; use the in-video clocks for elapsed task time.
