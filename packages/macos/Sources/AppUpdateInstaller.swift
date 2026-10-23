@@ -73,7 +73,9 @@ enum AppUpdateInstaller {
         guard binary.resolvingSymlinksInPath().path.hasPrefix(candidate.resolvingSymlinksInPath().path + "/Contents/") else {
             throw AppUpdateError.invalidApp
         }
-        _ = try command("/usr/bin/lipo", ["-verify_arch", "arm64", binary.path], timeout: 20)
+        // Older Xcode lipo consumes every argument after -verify_arch as an
+        // architecture name, so the input file must precede the operation.
+        _ = try command("/usr/bin/lipo", [binary.path, "-verify_arch", "arm64"], timeout: 20)
         do { _ = try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", candidate.path], timeout: 120) }
         catch { throw AppUpdateError.signature }
         // Developer ID builds must keep the same publisher. Development builds are
