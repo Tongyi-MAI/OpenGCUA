@@ -21,4 +21,4 @@ from .adapters import Adapter, register_adapter
 
 from .unified import Runtime
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "mu-adapter"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "libc",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "mu-adapter-android"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "mu-protocol",
  "serde_json",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "mu-adapter-macos"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "libc",
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "mu-bindings-python"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "mu-adapter",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "mu-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "mu-adapter",
  "mu-adapter-macos",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "mu-client"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "mu-adapter",
  "mu-protocol",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "mu-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "mu-host"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "mu-adapter",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "mu-protocol"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "mu-runtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "mu-adapter",
