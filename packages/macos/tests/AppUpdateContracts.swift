@@ -148,6 +148,16 @@ final class ReleaseProtocol: URLProtocol {
         _ = try AppUpdateInstaller.command("/usr/bin/codesign", ["--force", "--sign", "-", url.path], timeout: 30)
     }
 
+    static func commandFailureContracts() throws {
+        do {
+            _ = try AppUpdateInstaller.command("/bin/sh", ["-c", "printf 'fixture diagnostic\\n' >&2; exit 7"], timeout: 5)
+            preconditionFailure("A failed installer command was accepted")
+        } catch let failure as AppUpdateCommandFailure {
+            precondition(failure.status == 7 && failure.output.contains("fixture diagnostic"))
+            precondition(failure.diagnosticDescription.contains("/bin/sh"))
+        }
+    }
+
     @MainActor static func dialogContracts() throws {
         NSApplication.shared.setActivationPolicy(.prohibited)
         guard case let .available(update) = try parse(release()) else { preconditionFailure() }
@@ -169,8 +179,10 @@ final class ReleaseProtocol: URLProtocol {
         let installed = directory.appendingPathComponent("Installed app with spaces.app")
         let payload = directory.appendingPathComponent("payload")
         let source = payload.appendingPathComponent("OpenGCUA.app")
+        print("Creating and signing fixture apps…"); fflush(stdout)
         try fixtureApp(installed, version: "0.1.2")
         try fixtureApp(source, version: "0.1.10")
+        print("Validating signed fixtures…"); fflush(stdout)
         try AppUpdateInstaller.validate(source, installed: installed, version: "0.1.10")
         fails { try AppUpdateInstaller.validate(source, installed: installed, version: "0.1.11") }
         fails { try AppUpdateInstaller.validate(installed, installed: installed, version: "0.1.2") }
@@ -178,10 +190,12 @@ final class ReleaseProtocol: URLProtocol {
         try fm.createSymbolicLink(at: alias, withDestinationURL: source)
         fails { try AppUpdateInstaller.validate(alias, installed: installed, version: "0.1.10") }
         let dmg = directory.appendingPathComponent("fixture.dmg")
-        _ = try AppUpdateInstaller.command("/usr/bin/hdiutil", ["create", "-srcfolder", payload.path, "-volname", "OpenGCUAUpdateFixture", "-format", "UDZO", dmg.path], timeout: 120)
+        print("Creating the fixture DMG…"); fflush(stdout)
+        _ = try AppUpdateInstaller.command("/usr/bin/hdiutil", ["create", "-srcfolder", payload.path, "-volname", "OpenGCUAUpdateFixture", "-fs", "HFS+", "-format", "UDZO", dmg.path], timeout: 120)
         let work = fm.temporaryDirectory.appendingPathComponent("OpenGCUA-update-" + UUID().uuidString)
         try fm.createDirectory(at: work, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? fm.removeItem(at: work) }
+        print("Mounting and staging the fixture DMG…"); fflush(stdout)
         let staged = try await Task.detached {
             try AppUpdateInstaller.prepare(dmg: dmg, installed: installed, version: "0.1.10", directory: work)
         }.value
@@ -219,8 +233,16 @@ final class ReleaseProtocol: URLProtocol {
         let info = try PropertyListSerialization.propertyList(from: Data(contentsOf: app.appendingPathComponent("Contents/Info.plist")), format: nil) as! [String: Any]
         return info["CFBundleShortVersionString"] as! String
     }
-    @MainActor static func main() async throws {
+    @MainActor static func main() async {
         if CommandLine.arguments.dropFirst().first == "--install-update" { exit(await AppUpdateInstaller.runHelper(CommandLine.arguments)) }
+        do { try await runContracts() }
+        catch {
+            let diagnostic = (error as? AppUpdateCommandFailure)?.diagnosticDescription ?? String(describing: error)
+            FileHandle.standardError.write(Data(("Updater contracts failed: " + diagnostic + "\n").utf8))
+            exit(1)
+        }
+    }
+    @MainActor static func runContracts() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("OpenGCUA-contracts-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -229,6 +251,7 @@ final class ReleaseProtocol: URLProtocol {
         print("Checking update scheduling and HTTP failures…"); fflush(stdout)
         try await checkerContracts()
         try dialogContracts()
+        try commandFailureContracts()
         print("Checking signed DMG installation and helper handoff…"); fflush(stdout)
         try await installerContracts(directory)
         print("App update contracts passed: release selection, trusted assets, checksums, throttling, manual checks, task guard, signed DMG staging, helper handoff, atomic install and rollback.")

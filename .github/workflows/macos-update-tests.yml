@@ -1,0 +1,26 @@
+name: macOS updater tests
+
+on:
+  push:
+    branches: [main]
+    paths: ["packages/macos/Sources/AppUpdate*.swift", "packages/macos/Sources/Localization.swift", "packages/macos/tests/AppUpdateContracts.swift", ".github/workflows/macos-update-tests.yml"]
+  pull_request:
+    paths: ["packages/macos/Sources/AppUpdate*.swift", "packages/macos/Sources/Localization.swift", "packages/macos/tests/AppUpdateContracts.swift", ".github/workflows/macos-update-tests.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  updater:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Test native update checks, installation and rollback
+        run: |
+          mkdir -p "$RUNNER_TEMP/updater-tests"
+          swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 packages/macos/Sources/Localization.swift packages/macos/Sources/AppUpdateRelease.swift packages/macos/Sources/AppUpdateInstaller.swift packages/macos/Sources/AppUpdater.swift packages/macos/Sources/AppUpdateView.swift packages/macos/tests/AppUpdateContracts.swift -o "$RUNNER_TEMP/updater-tests/contracts"
+          "$RUNNER_TEMP/updater-tests/contracts"

@@ -3,6 +3,14 @@ import Foundation
 import Security
 import Darwin
 
+struct AppUpdateCommandFailure: LocalizedError {
+    let executable: String
+    let status: Int32
+    let output: String
+    var errorDescription: String? { AppUpdateError.installation.errorDescription }
+    var diagnosticDescription: String { "\(executable) exited with status \(status):\n\(output)" }
+}
+
 enum AppUpdateInstaller {
     static let bundleID = "app.generalist.mac"
 
@@ -192,7 +200,7 @@ enum AppUpdateInstaller {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
+        process.standardError = output
         try process.run()
         let timer = DispatchSource.makeTimerSource(queue: .global())
         timer.schedule(deadline: .now() + timeout)
@@ -201,7 +209,10 @@ enum AppUpdateInstaller {
         defer { timer.cancel() }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw AppUpdateError.installation }
+        guard process.terminationStatus == 0 else {
+            throw AppUpdateCommandFailure(executable: executable, status: process.terminationStatus,
+                                          output: String(decoding: data.suffix(8192), as: UTF8.self))
+        }
         return data
     }
 }
