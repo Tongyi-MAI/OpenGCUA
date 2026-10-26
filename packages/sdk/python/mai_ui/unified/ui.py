@@ -80,9 +80,8 @@ class ActionBase:
         """Click a node with no reliable AX action by mapping its screen bounds into
         the captured window image (host does the origin/scale math, not the model)."""
         h = self._handle
-        if node._ref._owner is not h:
-            raise MuError("INVALID_ARGUMENT", "node belongs to a different UI scope")
-        bounds = node.bounds
+        ref = self._node(node)
+        bounds = ref.node.bounds
         if bounds is None:
             raise MuError("INVALID_ARGUMENT", "node has no bounds; click via image.point()")
         image = self._resolve_image(image)
