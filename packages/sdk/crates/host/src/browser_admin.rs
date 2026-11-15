@@ -15,6 +15,8 @@ fn cache() -> Result<PathBuf, Error> {
 }
 async fn run(program: &str, args: &[String], cwd: &std::path::Path) -> Result<String, Error> {
     let mut command = Command::new(program);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     command
         .args(args)
         .current_dir(cwd)
@@ -28,7 +30,12 @@ async fn run(program: &str, args: &[String], cwd: &std::path::Path) -> Result<St
                 "Browser setup command exceeded 120 seconds",
             )
         })?
-        .map_err(|e| Error::new("UNSUPPORTED_CAPABILITY", e.to_string()))?;
+        .map_err(|e| {
+            Error::new(
+                "SETUP_REQUIRED",
+                format!("Cannot start {program}: {e}. Browser setup requires Node.js 22+ with npm; MAI_UI_NODE can select its executable"),
+            )
+        })?;
     if !output.status.success() {
         return Err(Error::new(
             "SETUP_FAILED",
@@ -37,6 +44,70 @@ async fn run(program: &str, args: &[String], cwd: &std::path::Path) -> Result<St
         .with_details(json!({"stdout":String::from_utf8_lossy(&output.stdout)})));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(windows)]
+fn npm_cli(
+    node: &str,
+    explicit: Option<std::ffi::OsString>,
+    search_path: Option<std::ffi::OsString>,
+) -> Result<PathBuf, Error> {
+    if let Some(explicit) = explicit {
+        let path = PathBuf::from(explicit);
+        if !path.is_absolute() || !path.is_file() {
+            return Err(Error::new(
+                "SETUP_REQUIRED",
+                "MAI_UI_NPM_CLI must name an existing absolute npm-cli.js file",
+            ));
+        }
+        return Ok(path);
+    }
+    // The official Windows Node distribution keeps npm beside node.exe. Also
+    // support a separately installed npm on PATH, without invoking a batch file
+    // or placing user-controlled paths inside cmd.exe source.
+    let mut directories = Vec::new();
+    if let Some(parent) = std::path::Path::new(node)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        directories.push(parent.to_path_buf());
+    }
+    if let Some(search_path) = search_path {
+        directories.extend(std::env::split_paths(&search_path));
+    }
+    for directory in directories {
+        let candidate = directory.join("node_modules/npm/bin/npm-cli.js");
+        if candidate.is_file() {
+            return std::fs::canonicalize(candidate)
+                .map_err(|e| Error::new("SETUP_REQUIRED", e.to_string()));
+        }
+    }
+    Err(Error::new(
+        "SETUP_REQUIRED",
+        "npm was not found. Install Node.js 22+ including npm, or set MAI_UI_NPM_CLI to its absolute npm-cli.js path",
+    ))
+}
+
+async fn install_dependencies(node: &str, cache: &std::path::Path) -> Result<(), Error> {
+    let args = vec!["ci".into(), "--omit=dev".into(), "--ignore-scripts".into()];
+    #[cfg(windows)]
+    let (program, args) = {
+        let cli = npm_cli(
+            node,
+            std::env::var_os("MAI_UI_NPM_CLI"),
+            std::env::var_os("PATH"),
+        )?;
+        let mut with_cli = vec![cli.to_string_lossy().into_owned()];
+        with_cli.extend(args);
+        (node, with_cli)
+    };
+    #[cfg(not(windows))]
+    let (program, args) = {
+        let _ = node;
+        ("npm", args)
+    };
+    run(program, &args, cache).await?;
+    Ok(())
 }
 fn write_embedded_worker_files(cache: &std::path::Path) -> Result<(), Error> {
     std::fs::create_dir_all(cache.join("dist"))
@@ -93,13 +164,7 @@ pub async fn admin(operation: &str, engine: &str) -> Result<Value, Error> {
     let node = std::env::var("MAI_UI_NODE").unwrap_or("node".into());
     if operation == "setup" {
         write_embedded_worker_files(&cache)?;
-        let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-        run(
-            npm,
-            &["ci".into(), "--omit=dev".into(), "--ignore-scripts".into()],
-            &cache,
-        )
-        .await?;
+        install_dependencies(&node, &cache).await?;
         let mut args = vec!["node_modules/playwright/cli.js".into(), "install".into()];
         args.extend(if engine == "all" {
             vec!["chromium".into(), "firefox".into(), "webkit".into()]
@@ -141,5 +206,48 @@ mod tests {
         super::write_embedded_worker_files(cache.path()).unwrap();
         assert!(cache.path().join("dist/worker.js").is_file());
         assert!(cache.path().join("dist/background.js").is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_setup_finds_npm_without_a_batch_shell() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("Node tools & data");
+        let cli = directory.join("node_modules/npm/bin/npm-cli.js");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, "// fixture").unwrap();
+        let expected = std::fs::canonicalize(&cli).unwrap();
+        assert_eq!(
+            super::npm_cli(&directory.join("node.exe").to_string_lossy(), None, None).unwrap(),
+            expected,
+        );
+        assert_eq!(
+            super::npm_cli(
+                "node",
+                None,
+                Some(std::env::join_paths([directory]).unwrap())
+            )
+            .unwrap(),
+            expected,
+        );
+        assert_eq!(
+            super::npm_cli("node", Some(cli.clone().into_os_string()), None).unwrap(),
+            cli,
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_setup_requires_explicit_valid_npm_installation() {
+        assert_eq!(
+            super::npm_cli("node", None, None).unwrap_err().code,
+            "SETUP_REQUIRED"
+        );
+        assert_eq!(
+            super::npm_cli("node", Some("relative/npm-cli.js".into()), None)
+                .unwrap_err()
+                .code,
+            "SETUP_REQUIRED",
+        );
     }
 }

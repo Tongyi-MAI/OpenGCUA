@@ -14,6 +14,7 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Operating System :: MacOS :: MacOS X",
   "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -33,6 +34,7 @@ locked = true
 # Keep the linker output intact; stripping can invalidate Mach-O LINKEDIT alignment.
 strip = false
 include = [
+  { path = "adapters/windows/mai_ui_windows/*.py", format = "sdist" },
   { path = "adapters/linux/mai_ui_linux/*.py", format = "sdist" },
   { path = "adapters/linux/requirements.lock", format = "sdist" },
   { path = "api/contract/*.json", format = "sdist" },

@@ -266,7 +266,7 @@ raise SystemExit(rt.main(sys.argv))
 def executor(tmp_path, journal=None, real_public=False, source=None, **options):
     worker = tmp_path / "fake_worker.py"
     source = source or (REAL_PUBLIC_WORKER if real_public else FAKE_WORKER)
-    worker.write_text("import sys\nsys.path.insert(0, " + repr(str(Path(__file__).parents[1])) + ")\n" + source)
+    worker.write_text("import sys\nsys.path.insert(0, " + repr(str(Path(__file__).parents[1])) + ")\n" + source, encoding="utf-8")
     instance = CodeExecutor(runtime_path=worker, work_dir=tmp_path,
                             rpc_socket=tmp_path / "unused.sock", timeout=5, rpc_timeout=1,
                             coordinate_range=1000, pyautogui_pause=0, enable_bash=False,

@@ -18,7 +18,7 @@ class ActionBase:
         # Native macOS delivery can include activation and focus restoration.
         # Preview exceeds the ordinary three-second budget, including scrolling.
         if timeout_ms is None:
-            return 15000 if self._handle.platform == "macos" else default
+            return 15000 if self._handle.platform in ("macos", "windows") else default
         return timeout_ms
 
     def _node(self, target):
@@ -124,7 +124,7 @@ class ActionBase:
         h._require(capability)
         if delivery not in ("auto", "background", "foreground"):
             raise MuError("INVALID_ARGUMENT", "unknown delivery policy")
-        if h.platform in ("macos", "browser"):
+        if h.platform in ("macos", "browser", "windows"):
             args["delivery"] = "background" if delivery == "auto" else delivery
         elif delivery == "background":
             raise MuError("UNSUPPORTED_CAPABILITY", "background input is unavailable")
@@ -153,7 +153,7 @@ class ActionBase:
 class AX(ActionBase):
     async def observe(self, *, timeout_ms=None, max_nodes=None, max_depth=None):
         timeout_ms = (
-            (20000 if self._handle.platform == "macos" else 1500)
+            (20000 if self._handle.platform in ("macos", "windows") else 1500)
             if timeout_ms is None
             else timeout_ms
         )

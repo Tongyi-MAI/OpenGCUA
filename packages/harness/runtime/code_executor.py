@@ -10,6 +10,7 @@ import os
 import re
 import signal
 import socket
+import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from action_feedback import action_feedback, remember_feedback, render_feedback
+from host_platform import IS_WINDOWS, WindowsJob
 
 
 CTRL_PREFIX = "__MAC_AGENT_CTRL__ "
@@ -909,6 +911,18 @@ def parse_control_stdout(stdout: str) -> tuple[str, dict[str, Any]]:
 
 
 def _kill_group(process: asyncio.subprocess.Process) -> None:
+    if IS_WINDOWS:
+        job = getattr(process, "_windows_job", None)
+        if job is not None:
+            job.close()
+        elif process.returncode is None:
+            # Startup may have failed before job assignment. No model code has
+            # run yet: the worker is still waiting for its shared socket.
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        return
     # 即使组长已经退出，也要清理仍持有句柄的子进程。
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -1182,19 +1196,32 @@ class CodeExecutor:
         parent, child = socket.socketpair()
         parent.setblocking(False)
         try:
+            args = ("--worker-shared",) if IS_WINDOWS else ("--worker", str(child.fileno()))
+            options = (
+                {"creationflags": subprocess.CREATE_NO_WINDOW}
+                if IS_WINDOWS else {"pass_fds": (child.fileno(),), "start_new_session": True}
+            )
             spawning = asyncio.create_task(asyncio.create_subprocess_exec(
-                sys.executable, "-B", "-u", str(self.runtime_path), "--worker", str(child.fileno()),
-                stdin=asyncio.subprocess.DEVNULL,
+                sys.executable, "-B", "-u", str(self.runtime_path), *args,
+                stdin=asyncio.subprocess.PIPE if IS_WINDOWS else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
-                pass_fds=(child.fileno(),),
-                start_new_session=True,
+                **options,
             ))
             try:
                 self._process = await asyncio.shield(spawning)
             except asyncio.CancelledError:
                 self._process = await _finish_cancelled_cleanup(spawning)
                 raise
+            if IS_WINDOWS:
+                # The worker cannot execute a cell before this private handoff.
+                # Job assignment happens first, so all later descendants belong
+                # to the same lifetime even if the worker exits unexpectedly.
+                self._process._windows_job = WindowsJob(self._process.pid)
+                shared = child.share(self._process.pid)
+                self._process.stdin.write(base64.b64encode(shared) + b"\n")
+                await self._process.stdin.drain()
+                self._process.stdin.close()
             self._reader, self._writer = await asyncio.open_connection(
                 sock=parent, limit=MAX_FRAME_BYTES
             )
@@ -1209,6 +1236,11 @@ class CodeExecutor:
             child.close()
 
     def _stop_child_groups(self) -> None:
+        if IS_WINDOWS:
+            # All descendants are owned by the worker job. Never taskkill a PID
+            # reported earlier: it could already belong to an unrelated process.
+            self._child_groups.clear()
+            return
         for pid in self._child_groups:
             try:
                 os.killpg(pid, signal.SIGKILL)

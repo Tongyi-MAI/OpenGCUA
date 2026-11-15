@@ -15,6 +15,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from host_platform import IS_WINDOWS
 
 
 @dataclass
@@ -82,6 +83,25 @@ class SdkDesktop:
         auditable startup/recovery frame, so it uses macOS ``screencapture`` and never
         performs UI actions or creates competing SDK endpoints.
         """
+        if IS_WINDOWS:
+            # This optional lifecycle frame carries no SDK action authority.
+            # Native app observations still belong to the persistent worker.
+            def capture():
+                from PIL import ImageGrab
+                frame = ImageGrab.grab(all_screens=True)
+                try:
+                    output = io.BytesIO()
+                    frame.save(output, format="PNG")
+                    return Observation(
+                        image_bytes=output.getvalue(), mime_type="image/png",
+                        width=frame.width, height=frame.height,
+                        structured={"lifecycle_capture": True},
+                        visual_ref=f"desktop-lifecycle-{self._generation}",
+                        target={"kind": "desktop", "display": "all"},
+                    )
+                finally:
+                    frame.close()
+            return await asyncio.to_thread(capture)
         command = shutil.which("screencapture") or "/usr/sbin/screencapture"
         fd, name = tempfile.mkstemp(prefix="mac_agent_desktop_", suffix=".png")
         os.close(fd)

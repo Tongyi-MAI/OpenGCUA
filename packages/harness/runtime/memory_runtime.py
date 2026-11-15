@@ -10,6 +10,7 @@ import os
 import threading
 from pathlib import Path
 from typing import Any
+from host_platform import user_data_directory
 
 from memory_store import (
     CATALOG_LIMIT, KINDS, MAX_APPROVED, MAX_REQUEST_BYTES, POLICY, RECALL_CHARS, RECALL_LIMIT,
@@ -41,8 +42,7 @@ def resolve_memory_root(explicit: str | os.PathLike | None = None) -> Path:
     """CLI 与 App 默认共用 GENERALIST_DATA_DIR（或 Application Support）下的 memory。"""
     if explicit:
         return Path(explicit).expanduser().absolute()
-    base = os.environ.get("GENERALIST_DATA_DIR")
-    root = Path(base).expanduser() if base else Path.home() / "Library/Application Support/Generalist"
+    root = user_data_directory()
     return (root / "memory").absolute()
 
 

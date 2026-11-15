@@ -89,13 +89,17 @@ impl ProcessClient {
         args: &[String],
         env: &BTreeMap<String, String>,
     ) -> Result<Arc<Self>, Error> {
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW: providers never take the desktop.
+        let mut child = command
             .spawn()
             .map_err(|error| spawn_error(program, error))?;
         let label = format!(
@@ -360,6 +364,34 @@ impl Provider for ProcessClient {
 mod tests {
     use super::*;
 
+    fn shell(unix: &str, windows: &str) -> (&'static str, Vec<String>) {
+        if cfg!(windows) {
+            (
+                "powershell.exe",
+                [
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    windows,
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            )
+        } else {
+            ("/bin/sh", vec!["-c".into(), unix.into()])
+        }
+    }
+
+    fn exit_status(code: i32) -> String {
+        if cfg!(windows) {
+            format!("exit code: {code}")
+        } else {
+            format!("exit status: {code}")
+        }
+    }
+
     #[tokio::test]
     async fn missing_node_executable_reports_setup_required() {
         let result = ProcessClient::spawn(
@@ -379,46 +411,59 @@ mod tests {
 
     #[tokio::test]
     async fn exited_provider_reports_status_and_stderr() {
-        let client = ProcessClient::spawn(
-            "/bin/sh",
-            &["-c".into(), "echo chrome-crashed >&2; exit 3".into()],
-            &BTreeMap::new(),
-        )
-        .unwrap();
+        let (program, args) = shell(
+            "echo chrome-crashed >&2; exit 3",
+            "[Console]::Error.WriteLine('chrome-crashed'); exit 3",
+        );
+        let client = ProcessClient::spawn(program, &args, &BTreeMap::new()).unwrap();
         client.wait().await;
         let request: Request =
             serde_json::from_value(serde_json::json!({"op":"describe","timeout_ms":1000})).unwrap();
         let error = client.send(request).await.unwrap_err();
         assert_eq!(error.code, "DEVICE_OFFLINE");
-        assert!(error.message.contains("exit status: 3"), "{}", error.message);
-        assert!(error.message.contains("chrome-crashed"), "{}", error.message);
-        assert_eq!(client.exit_reason().as_deref(), Some(error.message.as_str()));
+        assert!(error.message.contains(&exit_status(3)), "{}", error.message);
+        assert!(
+            error.message.contains("chrome-crashed"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            client.exit_reason().as_deref(),
+            Some(error.message.as_str())
+        );
     }
 
     #[tokio::test]
     async fn host_shutdown_records_real_exit_status() {
-        let client = ProcessClient::spawn(
-            "/bin/sh",
-            &["-c".into(), "read line; echo clean-stop >&2; exit 0".into()],
-            &BTreeMap::new(),
-        ).unwrap();
-        tokio::time::timeout(Duration::from_secs(3), client.shutdown()).await.unwrap().unwrap();
+        let (program, args) = shell(
+            "read line; echo clean-stop >&2; exit 0",
+            "[Console]::In.ReadLine() | Out-Null; [Console]::Error.WriteLine('clean-stop'); exit 0",
+        );
+        let client = ProcessClient::spawn(program, &args, &BTreeMap::new()).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), client.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
         let reason = client.exit_reason().unwrap();
-        assert!(reason.contains("exit status: 0"), "{reason}");
+        assert!(reason.contains(&exit_status(0)), "{reason}");
         assert!(reason.contains("clean-stop"), "{reason}");
     }
 
     #[tokio::test]
     async fn malformed_reply_is_protocol_error_not_device_offline() {
-        let client = ProcessClient::spawn(
-            "/bin/sh",
-            &["-c".into(), "read line; printf 'not-json\\n'; exit 0".into()],
-            &BTreeMap::new(),
-        ).unwrap();
+        let (program, args) = shell(
+            "read line; printf 'not-json\\n'; exit 0",
+            "[Console]::In.ReadLine() | Out-Null; [Console]::Out.WriteLine('not-json'); exit 0",
+        );
+        let client = ProcessClient::spawn(program, &args, &BTreeMap::new()).unwrap();
         let request: Request =
             serde_json::from_value(serde_json::json!({"op":"describe","timeout_ms":1000})).unwrap();
         let error = client.send(request).await.unwrap_err();
         assert_eq!(error.code, "PROTOCOL_MISMATCH");
-        assert!(error.message.contains("invalid provider reply"), "{}", error.message);
+        assert!(
+            error.message.contains("invalid provider reply"),
+            "{}",
+            error.message
+        );
     }
 }

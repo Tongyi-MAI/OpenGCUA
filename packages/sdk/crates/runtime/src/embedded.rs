@@ -324,11 +324,26 @@ impl Embedded {
         )
     }
     pub fn provider_event(&self, endpoint: &str, value: Value) {
-        let sessions: HashSet<String> = self
-            .core
-            .lock()
-            .unwrap()
-            .authority
+        self.provider_event_scoped(endpoint, None, value);
+    }
+    /// Deliver an owned worker's event only while its original endpoint is registered.
+    /// Reusing a resource ID after removal does not transfer the old worker's authority.
+    pub fn provider_event_from(&self, endpoint: &Arc<Endpoint>, value: Value) {
+        if let Some(id) = endpoint.info["id"].as_str() {
+            self.provider_event_scoped(id, Some(endpoint), value);
+        }
+    }
+    fn provider_event_scoped(&self, endpoint: &str, expected: Option<&Arc<Endpoint>>, value: Value) {
+        // Keep the same lock order as remove(): authority before endpoint catalog.
+        // This makes generation validation and the recipient snapshot one operation.
+        let core = self.core.lock().unwrap();
+        if let Some(expected) = expected {
+            let endpoints = self.endpoints.lock().unwrap();
+            if !endpoints.get(endpoint).is_some_and(|current| Arc::ptr_eq(current, expected)) {
+                return;
+            }
+        }
+        let sessions: HashSet<String> = core.authority
             .attachments
             .values()
             .filter(|a| {
@@ -339,6 +354,7 @@ impl Embedded {
             })
             .map(|a| a.session.clone())
             .collect();
+        drop(core);
         for s in sessions {
             self.event(&s, value.clone());
         }
@@ -490,7 +506,7 @@ impl Embedded {
         save(&record);
         let scheduler = self.core.lock().unwrap().scheduler.clone();
         let browser = e.info["platform"] == "browser";
-        let cancellable = browser || e.info["platform"] == "linux";
+        let cancellable = browser || matches!(e.info["platform"].as_str(), Some("linux" | "windows"));
         let tab = wire["tab_id"].as_str().map(str::to_string);
         let domain = if browser {
             tab.as_ref()
@@ -903,6 +919,74 @@ mod tests {
             .unwrap();
         (runtime, bridge)
     }
+    #[tokio::test]
+    async fn removed_worker_cannot_notify_replacement_with_same_resource_id() {
+        let (runtime, _) = fixture();
+        let old = runtime.endpoint("web").unwrap();
+        runtime.remove("web").await.unwrap();
+        runtime.add(old.info.clone(), old.description.lock().unwrap().clone(), Bridge::new()).unwrap();
+        let current = runtime.endpoint("web").unwrap();
+        runtime.attach(Attachment {
+            id: "replacement".into(), session: "s".into(), resource: "web".into(),
+            conflict_domain: "web".into(), name: "replacement".into(), access: "control".into(),
+        }).unwrap();
+        let before = runtime.events("s", 0).unwrap()["events"].as_array().unwrap().len();
+
+        old.mark_offline("delayed worker exit");
+        runtime.provider_event_from(&old, json!({"type":"resource_offline","resource_id":"web"}));
+        assert!(!current.offline.load(Ordering::SeqCst));
+        assert!(runtime.events("s", before).unwrap()["events"].as_array().unwrap().is_empty());
+
+        runtime.provider_event_from(&current, json!({"type":"current_worker","resource_id":"web"}));
+        let events = runtime.events("s", before).unwrap();
+        assert_eq!(events["events"].as_array().unwrap().len(), 1);
+        assert_eq!(events["events"][0]["type"], "current_worker");
+    }
+
+    #[tokio::test]
+    async fn windows_cancellation_reaches_worker_and_keeps_unknown_action_fenced() {
+        let runtime = Embedded::new();
+        let bridge = Bridge::new();
+        runtime.session("s").unwrap();
+        runtime.add(
+            json!({"id":"win","name":"win","platform":"windows","provider":"fixture"}),
+            json!({"protocol_major":1,"platform":"windows","capabilities":{"ui.input_text":{"state":"ready"}}}),
+            bridge.clone(),
+        ).unwrap();
+        runtime.attach(Attachment {
+            id: "a".into(), session: "s".into(), resource: "win".into(),
+            conflict_domain: "win".into(), name: "win".into(), access: "control".into(),
+        }).unwrap();
+        let running = runtime.clone();
+        let operation = tokio::spawn(async move {
+            running.request("a", "win", json!({
+                "op":"action", "action":"input_text", "text":"test",
+                "action_id":"write", "timeout_ms":5000,
+            })).await
+        });
+        let request = tokio::time::timeout(Duration::from_secs(2), bridge.next()).await.unwrap().unwrap();
+        assert_eq!(request["_operation_id"], "write");
+        runtime.cancel("s", "write").unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), operation).await.unwrap().unwrap().unwrap_err();
+        assert_eq!(error.code, "ACTION_OUTCOME_UNKNOWN");
+        assert_eq!(error.details.unwrap()["receipt"]["execution"], "unknown");
+        let cancellation = tokio::time::timeout(Duration::from_secs(2), bridge.next()).await.unwrap().unwrap();
+        assert_eq!(cancellation["op"], "cancel");
+        assert_eq!(cancellation["operation_id"], "write");
+        assert!(runtime.endpoint("win").unwrap().fenced.lock().unwrap().contains("win"));
+        bridge.reply(json!({"_request_id":cancellation["_request_id"],"result":{"cancelled":true}})).unwrap();
+        // The original reply, rather than the cancel acknowledgement, drains dispatch.
+        assert!(runtime.endpoint("win").unwrap().fenced.lock().unwrap().contains("win"));
+        bridge.reply(json!({"_request_id":request["_request_id"],"error":{
+            "code":"ACTION_OUTCOME_UNKNOWN","message":"driver cancelled after dispatch",
+        }})).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runtime.endpoint("win").unwrap().fenced.lock().unwrap().contains("win") {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+    }
+
     #[tokio::test]
     async fn independent_tabs_context_conflicts_and_queued_cancellation() {
         let (r, b) = fixture();

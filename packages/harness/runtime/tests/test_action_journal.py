@@ -43,7 +43,8 @@ def test_three_crash_points_and_continued_sequence(tmp_path, stage, expected):
         assert not reopened.transition(event("dispatching"), CONTEXT)["allowed"]
         assert not reopened.transition(event(), CONTEXT)["allowed"]
     assert reopened.transition(event(action_id="b"), CONTEXT)["record_sequence"] == count + 1
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
     reopened.close()
     assert path.exists()
 

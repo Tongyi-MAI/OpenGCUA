@@ -9,6 +9,7 @@ import pytest
 
 import mac_agent
 from code_executor import CodeExecutor
+from host_platform import IS_WINDOWS
 
 
 def test_with_abort_cancels_planning_and_returns_to_caller():
@@ -86,12 +87,16 @@ def test_interrupt_active_worker_kills_its_process_group_before_followup(tmp_pat
                     break
                 await asyncio.sleep(0.01)
             assert executor._process is not None
-            old_pid = executor._process.pid
+            old_process = executor._process
+            old_pid = old_process.pid
             executor.interrupt_active()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(running, 3)
-            with pytest.raises(ProcessLookupError):
-                os.kill(old_pid, 0)
+            if IS_WINDOWS:
+                assert old_process.returncode is not None
+            else:
+                with pytest.raises(ProcessLookupError):
+                    os.kill(old_pid, 0)
         finally:
             await executor.close()
 
@@ -124,10 +129,14 @@ def test_closing_the_executor_lets_the_worker_run_its_shutdown_cleanup(tmp_path)
         )
         result = await executor.run("import sys\nprint(sys.dont_write_bytecode)", [])
         assert result.stdout.strip() == "True", "worker 不得向已签名 App 写入 pyc"
-        pid = executor._process.pid
+        process = executor._process
+        pid = process.pid
         await executor.close()
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        if IS_WINDOWS:
+            assert process.returncode is not None
+        else:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
 
     asyncio.run(scenario())
     assert marker.read_text() == "True"
@@ -157,9 +166,13 @@ def test_executor_close_has_a_deadline_when_shutdown_cleanup_hangs(tmp_path, mon
             pyautogui_pause=0, enable_bash=False, ui_api="legacy-cua",
         )
         await executor.run("x = 1", [])
-        pid = executor._process.pid
+        process = executor._process
+        pid = process.pid
         await asyncio.wait_for(executor.close(), 3)
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        if IS_WINDOWS:
+            assert process.returncode is not None
+        else:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
 
     asyncio.run(scenario())

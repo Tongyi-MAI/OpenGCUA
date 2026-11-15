@@ -46,12 +46,33 @@ from event_protocol import EventClock, ACTION_LABELS
 from action_journal import ActionJournal
 from context_risk import ActionRiskIndex
 from memory_runtime import MemoryService, resolve_memory_root
+from host_platform import IS_WINDOWS, open_private_file
 
 
 DEFAULT_MODEL_NAME = llm_entry.DEFAULT_MODEL_NAME
 DEFAULT_LLM_BASE_URL = llm_entry.DEFAULT_LLM_BASE_URL
 DEFAULT_API_KEY = None  # set DASHSCOPE_API_KEY / API_KEY in env, or pass --api-key (never commit a key)
 DEFAULT_MAX_STEPS = 0  # 0 means unlimited; stall detection bounds the run
+
+WINDOWS_PLATFORM_NOTE = r"""
+## Windows host
+This session runs on Windows. `device` is the local Windows endpoint, registered
+as `windows`; the SDK API, observation references, receipts and consent rules are
+unchanged. Mac bundle IDs, CGWindowID parsing, AppleScript, Spaces and /bin/bash in
+the examples do not apply. Discover actual application/window IDs from this
+device. After a reset, list and bind current Windows windows again; do not use
+the macOS-only rebind_window helper or derive raw HWNDs from SDK identifiers.
+Use powershell(cmd, timeout=120, echo=False, cwd=None) for native shell work.
+It is synchronous and returns stdout/stderr/returncode/ok/timed_out like bash;
+each call has its own shell state. bash() is unavailable on Windows. Prefer
+Python's standard library for portable file operations. Shell execution is not
+an isolation boundary or an alternative route around GUI authorization.
+Default isolated background browsing uses headless Chromium on Windows. A
+visible/demo browser is a separate explicit mode. Background native actions
+must leave foreground focus and the physical mouse unchanged. Capability or
+delivery errors are real limits: never silently substitute foreground input,
+ignore a target, automate UAC/secure desktop, or control elevated applications.
+"""
 
 
 @dataclass(frozen=True)
@@ -1033,6 +1054,8 @@ class ContextManager:
             prompt += BACKGROUND_MODE_NOTE
         if os.environ.get("GENERALIST_ANDROID_SERIAL") and ui_api == "mai-ui":
             prompt += MOBILE_DEMO_NOTE
+        if IS_WINDOWS and ui_api == "mai-ui":
+            prompt += WINDOWS_PLATFORM_NOTE
         self.screenshot_coordinate_note = (
             MAI_UI_SCREENSHOT_COORDINATE_NOTE if ui_api == "mai-ui" else SCREENSHOT_COORDINATE_NOTE
         )
@@ -1631,6 +1654,8 @@ class TrajectoryWriter:
             self.screenshot_dir.mkdir(parents=True, exist_ok=True)
             self.steps_dir.mkdir(parents=True, exist_ok=True)
             self.work_dir.mkdir(parents=True, exist_ok=True)
+            if IS_WINDOWS:
+                os.close(open_private_file(self.run_dir, create=False, directory=True))
             self.data.setdefault("tasks", [])
             self.data.setdefault("steps", [])
             self.data["status"] = "running"
@@ -1653,6 +1678,8 @@ class TrajectoryWriter:
         self.screenshot_dir.mkdir(parents=True, exist_ok=False)
         self.steps_dir.mkdir()
         self.work_dir.mkdir()
+        if IS_WINDOWS:
+            os.close(open_private_file(self.run_dir, create=False, directory=True))
         self.path = self.run_dir / "traj.json"
         self.image_count = 0
         self.data: dict[str, Any] = {
@@ -2972,7 +2999,8 @@ async def run_agent(
             run_id = uuid.uuid4().hex
             if record_model_requests:
                 enabled = client.configure_recording(writer.run_dir, metadata={
-                    "run_id": run_id, "session_id": session_id, "platform": "macos", "provider": "cua",
+                    "run_id": run_id, "session_id": session_id,
+                    "platform": "windows" if IS_WINDOWS else "macos", "provider": "cua",
                     "ui_api": ui_api, "ui_api_version": UI_API_MARKERS[ui_api],
                 })
                 present(
@@ -4373,7 +4401,8 @@ def _default_config_path(explicit: str | None) -> str | None:
     if explicit:
         return explicit
     base = Path(__file__).resolve().parents[1] / "configs"
-    for cand in (os.environ.get("MAC_AGENT_CONFIG"), base / "local.json", base / "macos_demo.json"):
+    example = "windows_example.json" if IS_WINDOWS else "macos_demo.json"
+    for cand in (os.environ.get("MAC_AGENT_CONFIG"), base / "local.json", base / example):
         if cand and Path(cand).is_file():
             return str(cand)
     return None
@@ -4390,6 +4419,14 @@ def main() -> int:
             known = {a.dest for a in parser._actions}
             parser.set_defaults(**{k: v for k, v in cfg.items() if k in known})
         args = parser.parse_args()
+        if IS_WINDOWS and (
+            str(args.model_name).startswith("YOUR_")
+            or "your-provider.example" in str(args.llm_base_url)
+        ):
+            raise SystemExit(
+                "Configure your model and provider endpoint in local.json or pass "
+                "--model-name and --llm-base-url; windows_example.json contains placeholders."
+            )
         configure_runtime_mode(args)
         if not args.api_key and cfg_path:  # config 里的 api_key 作为兜底（local.json 已 gitignore）
             cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))

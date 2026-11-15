@@ -37,6 +37,10 @@ from typing import Any
 from action_feedback import action_feedback, observation_feedback
 from skill_registry import SkillRegistry, default_skill_roots
 from skill_runtime import SkillRuntime
+from host_platform import (
+    IS_WINDOWS, WindowsJob, open_private_file, user_data_directory,
+    windows_pipe_available, windows_standard_handle,
+)
 
 
 CTRL_PREFIX = "__MAC_AGENT_CTRL__ "
@@ -78,7 +82,8 @@ _WEB_UNAVAILABLE: str | None = None
 # App 下写入数据根，不写进已签名的 .app；本地 checkout 仍用 configs/。
 _WEB_STATE = (Path(os.environ["GENERALIST_DATA_DIR"]).expanduser() / "browser" / "web_storage_state.json"
               if os.environ.get("GENERALIST_DATA_DIR")
-              else Path(__file__).resolve().parents[1] / "configs" / "web_storage_state.json")
+              else (user_data_directory() / "browser/web_storage_state.json" if IS_WINDOWS
+                    else Path(__file__).resolve().parents[1] / "configs" / "web_storage_state.json"))
 _WEB_CREATE_TIMEOUT_MS = 30000  # The SDK host rejects browser_create budgets above 120000 ms.
 # 专用浏览器的持久 profile（codex 同款逻辑）：登录一次跨会话保留，绝不碰用户 Chrome。
 _WEB_PROFILE_DIR = Path.home() / ".cache" / "mai-ui-web-profile"
@@ -1929,6 +1934,8 @@ def bash(
     echo: bool = False,
     cwd: str | None = None,
 ) -> BashResult:
+    if IS_WINDOWS:
+        raise NotImplementedError("bash() requires a Unix host; use powershell() on Windows")
     global _BASH_CALL_COUNT
     _check_active_request()
     if not _CONFIG.get("enable_bash", True):
@@ -2011,6 +2018,82 @@ def bash(
         print("stdout:\n" + (stdout.rstrip() if stdout else "(empty)"))
         print("stderr:\n" + (stderr.rstrip() if stderr else "(empty)"))
         print(f"[/Bash result #{_BASH_CALL_COUNT}]")
+    return result
+
+
+def powershell(
+    cmd: str,
+    timeout: float | None = 120,
+    echo: bool = False,
+    cwd: str | None = None,
+) -> BashResult:
+    """Run native Windows PowerShell, with UTF-8 output and an owned process tree.
+
+    Shares the existing shell-execution permission with bash(). Nonterminating
+    PowerShell errors are made terminating, and a native program's last nonzero
+    exit code is returned. Commands are passed as UTF-16LE encoded source.
+    """
+    _check_active_request()
+    if not IS_WINDOWS:
+        raise NotImplementedError("powershell() requires a Windows host; use bash() on Unix")
+    if not _CONFIG.get("enable_bash", True):
+        raise PermissionError("Shell execution is disabled for this run")
+    if not isinstance(cmd, str):
+        raise TypeError("powershell() expects a command string")
+    work_dir = Path(str(_CONFIG.get("work_dir") or tempfile.gettempdir()))
+    work_dir.mkdir(parents=True, exist_ok=True)
+    token = f"{os.getpid()}_{time.time_ns()}"
+    out_path, err_path = work_dir / f"bash_{token}.out", work_dir / f"bash_{token}.err"
+    executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    script = (
+        # Block before user code until the job has been attached successfully.
+        "if ([Console]::ReadLine() -ne 'run') { exit 125 }; "
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$OutputEncoding = [Console]::OutputEncoding; $ErrorActionPreference = 'Stop'; "
+        "$global:LASTEXITCODE = 0; & {\n" + cmd + "\n}; "
+        "if (-not $?) { exit 1 }; exit $LASTEXITCODE"
+    )
+    timed_out = False
+    process = job = None
+    try:
+        with out_path.open("wb", buffering=0) as stdout_file, err_path.open("wb", buffering=0) as stderr_file:
+            process = subprocess.Popen(
+                [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                 base64.b64encode(script.encode("utf-16le")).decode("ascii")],
+                stdin=subprocess.PIPE, stdout=stdout_file, stderr=stderr_file,
+                cwd=cwd, creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            try:
+                job = WindowsJob(process.pid)
+                process.stdin.write(b"run\n")
+                process.stdin.close()
+                returncode = process.wait(timeout=None if timeout is None else float(timeout))
+            except subprocess.TimeoutExpired:
+                timed_out, returncode = True, 124
+            finally:
+                if job is not None:
+                    job.close()
+                elif process.poll() is None:
+                    process.kill()
+                process.wait()
+                if process.stdin is not None:
+                    process.stdin.close()
+        stdout, stderr = _read_limited(out_path), _read_limited(err_path)
+    finally:
+        out_path.unlink(missing_ok=True)
+        err_path.unlink(missing_ok=True)
+    if timed_out:
+        stderr = stderr.rstrip() + f"\n[powershell timed out after {timeout}s; process tree killed]\n"
+    result = BashResult(stdout, stderr, returncode, timed_out)
+    _record_tool(
+        "powershell", {"cmd": cmd, "timeout": timeout, "cwd": cwd},
+        {"stdout": stdout, "stderr": stderr, "returncode": returncode,
+         "ok": result.ok, "timed_out": timed_out}, include_tree=False,
+    )
+    if echo:
+        print(f"[PowerShell result: returncode={returncode}; timed_out={timed_out}]")
+        print("stdout:\n" + (stdout.rstrip() if stdout else "(empty)"))
+        print("stderr:\n" + (stderr.rstrip() if stderr else "(empty)"))
     return result
 
 
@@ -2132,11 +2215,14 @@ class _RequestOutput:
                 saved = os.dup(fd)
                 self.saved.append((fd, saved))
                 read_fd, write_fd = os.pipe()
-                os.set_blocking(read_fd, False)
+                if not IS_WINDOWS:
+                    os.set_blocking(read_fd, False)
                 limit = int(_CONFIG.get(f"max_{name}_bytes", default))
                 self.selector.register(read_fd, selectors.EVENT_READ, (name, limit))
                 try:
                     os.dup2(write_fd, fd)
+                    if IS_WINDOWS:
+                        windows_standard_handle(fd)
                     target = os.fdopen(os.dup(write_fd), "w", encoding="utf-8", errors="replace", buffering=1)
                 finally:
                     os.close(write_fd)
@@ -2164,7 +2250,13 @@ class _RequestOutput:
 
     def _read(self, key: Any) -> bool:
         try:
-            chunk = os.read(key.fd, 16384)
+            size = 16384
+            if IS_WINDOWS:
+                available = windows_pipe_available(key.fd)
+                if available == 0:
+                    return False
+                size = min(size, available) if available is not None else 0
+            chunk = os.read(key.fd, size) if size else b""
         except BlockingIOError:
             return False
         if not chunk:
@@ -2178,8 +2270,15 @@ class _RequestOutput:
     def _drain(self) -> None:
         try:
             while not self.stop.is_set():
-                for key, _ in self.selector.select(0.02):
-                    self._read(key)
+                if IS_WINDOWS:
+                    # Windows select() accepts sockets only. Peek before each
+                    # bounded read; never wait on inherited child pipe handles.
+                    for key in list(self.selector.get_map().values()):
+                        self._read(key)
+                    self.stop.wait(0.02)
+                else:
+                    for key, _ in self.selector.select(0.02):
+                        self._read(key)
             # 不等待继承输出描述符的后台进程退出，也不让持续写入阻塞 done。
             for key in list(self.selector.get_map().values()):
                 for _ in range(64):
@@ -2196,6 +2295,8 @@ class _RequestOutput:
                 pass
         for fd, saved in self.saved:
             os.dup2(saved, fd)
+            if IS_WINDOWS:
+                windows_standard_handle(fd)
             os.close(saved)
         self.saved.clear()
         for target in self.targets:
@@ -2588,7 +2689,7 @@ def _install_journal_direct_calls(session):
         return
     mutations = {"apps_launch", "browser_create", "copy_files", "upload_files", "unregister",
                  "compose", "close_session", "remove", "close", "add_macos", "add_android",
-                 "add_linux", "add_browser"}
+                 "add_linux", "add_windows", "add_browser"}
 
     async def journal_call(core, request):
         probe = _PUBLIC_ACTION_PROBE.get()
@@ -2997,7 +3098,7 @@ def _playwright_driver_node() -> Path | None:
         import playwright
     except ImportError:
         return None
-    node = Path(playwright.__file__).resolve().parent / "driver" / "node"
+    node = Path(playwright.__file__).resolve().parent / "driver" / ("node.exe" if IS_WINDOWS else "node")
     return node if node.is_file() and os.access(node, os.X_OK) else None
 
 
@@ -3026,7 +3127,8 @@ async def _add_web_factory(runtime: Any) -> str:
 
     async def register(**options: Any) -> None:
         try:
-            await runtime.add_browser_factory(name, engine="chromium", headless=False, **options)
+            headless = IS_WINDOWS and background and profile == "isolated"
+            await runtime.add_browser_factory(name, engine="chromium", headless=headless, **options)
         except Exception as exc:  # noqa: BLE001 - an existing registration is the one to reuse
             if getattr(exc, "code", None) != "ALREADY_REGISTERED":
                 raise
@@ -3040,10 +3142,13 @@ async def _add_web_factory(runtime: Any) -> str:
         # 独占借用：以用户真实 profile 启动（用户需先退出自己的 Chrome）。
         await register(channel="chrome", user_data_dir=os.environ.get(
             "MAC_AGENT_WEB_PROFILE_DIR",
-            str(Path.home() / "Library/Application Support/Google/Chrome")))
+            str(Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "Google/Chrome/User Data"
+                if IS_WINDOWS else Path.home() / "Library/Application Support/Google/Chrome")))
     else:
-        # isolated：有界面任务专属 profile；DOM 操作无需前台焦点。
-        await register(channel="chrome", background_launch=background)
+        # Windows setup installs Playwright's Chromium, not system Chrome.
+        # Preserve the Mac background-launch path and explicit Chrome profiles.
+        options = {} if IS_WINDOWS else {"channel": "chrome"}
+        await register(background_launch=background and not IS_WINDOWS, **options)
     registered.add(name)
     return name
 
@@ -3054,7 +3159,7 @@ def _web_log(message: str) -> None:
     if path is None:
         return
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        descriptor = open_private_file(path)
         with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [host] {message}\n")
     except OSError:
@@ -3071,7 +3176,7 @@ def _web_shim_allowed() -> bool:
     flag = os.environ.get("MAC_AGENT_WEB_SHIM")
     if flag in ("0", "1"):
         return flag == "1"
-    return ".app/Contents/" not in str(Path(__file__).resolve())
+    return ".app/Contents/" not in Path(__file__).resolve().as_posix()
 
 
 async def _create_web_resource(runtime: Any, session: Any) -> Any:
@@ -3144,14 +3249,20 @@ async def _open_sdk_session() -> tuple[Any, Any, Any, Any]:
         options = {}
         # Set only by an embedding host. SDK still verifies the pinned companion
         # signature/version and requires an explicit private socket.
-        if os.environ.get("GENERALIST_DRIVER_APP"):
+        if not IS_WINDOWS and os.environ.get("GENERALIST_DRIVER_APP"):
             options = {"app_path": os.environ["GENERALIST_DRIVER_APP"],
                        "socket": os.environ["GENERALIST_DRIVER_SOCKET"]}
-        resource = await runtime.add_macos(name="local-mac", **options)
+        if IS_WINDOWS:
+            options = {}
+            if os.environ.get("GENERALIST_WINDOWS_DRIVER"):
+                options["driver_path"] = os.environ["GENERALIST_WINDOWS_DRIVER"]
+            resource = await runtime.add_windows(name="local-windows", **options)
+        else:
+            resource = await runtime.add_macos(name="local-mac", **options)
         session = runtime.session(output=_sdk_output)
         await session.__aenter__()
         session.auto_reconnect = True
-        device = await session.register(resource, name="mac")
+        device = await session.register(resource, name="windows" if IS_WINDOWS else "mac")
         session.coordinate_space = "normalized_1000"
         serial = os.environ.get("GENERALIST_ANDROID_SERIAL")
         if serial:
@@ -3200,8 +3311,9 @@ def _write_web_state(state: Any, *, indent: int | None = None) -> None:
     # cookies are credentials: owner-only file, replaced atomically
     _WEB_STATE.parent.mkdir(parents=True, exist_ok=True)
     temporary = _WEB_STATE.with_name(_WEB_STATE.name + ".tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    descriptor = open_private_file(temporary)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.truncate(0)
         json.dump(state, handle, ensure_ascii=False, indent=indent)
     os.replace(temporary, _WEB_STATE)
 
@@ -3213,6 +3325,10 @@ def _is_shim_web(web: Any) -> bool:
 def _start_keepalive(loop: asyncio.AbstractEventLoop | None = None, *, interval: float = 90) -> None:
     """Keep the native lease alive without a visible inventory/cursor action."""
     global _SDK_KEEPALIVE
+    if IS_WINDOWS:
+        # The Windows adapter owns a direct stdio driver process; unlike the
+        # macOS daemon it has no expiring lease or keepalive operation.
+        return
     if _SDK_KEEPALIVE is not None:
         _SDK_KEEPALIVE.cancel()
 
@@ -3299,7 +3415,7 @@ async def _reset_sdk_session() -> tuple[Any, Any]:
     session = _SDK_RUNTIME.session(output=_sdk_output)
     await session.__aenter__()
     session.auto_reconnect = True
-    device = await session.register(_SDK_RESOURCE, name="mac")
+    device = await session.register(_SDK_RESOURCE, name="windows" if IS_WINDOWS else "mac")
     if _SDK_PHONE_RESOURCE is not None:
         try:
             _SDK_PHONE_RESOURCE = await _SDK_RUNTIME.reconnect(_SDK_PHONE_RESOURCE.id, force=True)
@@ -3344,6 +3460,10 @@ async def rebind_window(
     an explicit app, search the device inventory: the window may belong to any
     native application, not just Chrome.
     """
+    if IS_WINDOWS:
+        raise NotImplementedError(
+            "rebind_window's CGWindowID mapping is macOS-only; list and bind current Windows windows"
+        )
     device = _SDK_DEVICE
     if device is None:
         raise RuntimeError("rebind_window requires an active SDK device")
@@ -3541,6 +3661,7 @@ def _bootstrap(loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
         "shlex": shlex,
         "Path": Path,
         "bash": bash,
+        "powershell": powershell,
         "rebind_window": rebind_window,
         "request_foreground_permission": request_foreground_permission,
         "reset_web": reset_web,
@@ -3733,9 +3854,9 @@ def _execute(source: str | list[str], namespace: dict[str, Any], *, loop=None) -
     }
 
 
-def _worker(control_fd: int) -> int:
+def _worker(control_fd: int | socket.socket) -> int:
     global _CONTROL_SOCKET, _CONFIG
-    _CONTROL_SOCKET = socket.socket(fileno=control_fd)
+    _CONTROL_SOCKET = control_fd if isinstance(control_fd, socket.socket) else socket.socket(fileno=control_fd)
     _CONTROL_SOCKET.set_inheritable(False)
     namespace: dict[str, Any] | None = None
     loop = asyncio.new_event_loop()
@@ -3852,6 +3973,14 @@ def _worker_requests(loop, namespace) -> int:
 
 def main(argv: list[str]) -> int:
     global _CONFIG
+    if len(argv) == 2 and argv[1] == "--worker-shared" and IS_WINDOWS:
+        # WSADuplicateSocket is scoped to this process. Only the parent-owned
+        # stdin pipe carries its data; neither argv nor the environment does.
+        encoded = sys.stdin.buffer.readline(16385)
+        if len(encoded) > 16384 or not encoded.endswith(b"\n"):
+            raise ValueError("Invalid worker socket handoff")
+        shared = base64.b64decode(encoded.strip(), validate=True)
+        return _worker(socket.fromshare(shared))
     if len(argv) == 3 and argv[1] == "--worker":
         return _worker(int(argv[2]))
     if len(argv) != 3:

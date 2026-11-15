@@ -55,6 +55,53 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  windows-wheel:
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source-ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - name: Install build tools
+        run: python -m pip install "maturin>=1.8,<2" uv
+      - name: Test native runtime and build the Windows wheel
+        working-directory: packages/sdk
+        run: |
+          $env:PYO3_PYTHON = (Get-Command python).Source
+          cargo test --workspace --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m maturin build --release --locked --interpreter $env:PYO3_PYTHON --out ../../dist
+      - name: Install and smoke-test the wheel in isolation
+        run: |
+          $testEnv = Join-Path $env:RUNNER_TEMP 'sdk-smoke'
+          uv venv --python ${{ matrix.python }} $testEnv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $testPython = Join-Path $testEnv 'Scripts/python.exe'
+          $wheel = @(Get-ChildItem -LiteralPath dist -Filter '*.whl')
+          if ($wheel.Count -ne 1) { throw 'Expected exactly one Windows wheel' }
+          uv pip install --python $testPython $wheel[0].FullName pytest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $testPython -I packages/sdk/tests/smoke_install.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $testPython -m pytest packages/sdk/tests -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-windows-2022-py${{ matrix.python }}
+          path: dist/*.whl
+          if-no-files-found: error
+
   sdist:
     runs-on: ubuntu-22.04
     timeout-minutes: 45

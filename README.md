@@ -210,6 +210,11 @@ absolute directories can be listed in `skills_dirs` in `local.json`. See the
 
 ## Native macOS app
 
+For native Windows development, see the [Windows preview guide](WINDOWS.md).
+It covers the SDK provider, persistent agent, verified setup and current limits;
+the macOS application below is a separate interface.
+
+
 [OpenGCUA for macOS](packages/macos/README.md) implements the menu bar assistant:
 enter a task, collapse into a floating control panel, reply to questions, and
 review saved results. SwiftUI + AppKit, with Python, the SDK and signed CuaDriver

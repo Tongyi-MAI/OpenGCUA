@@ -144,13 +144,14 @@ class Device:
 
             self.browser = Browser(self) if not tab_id else UnsupportedNamespace("tab.browser")
             self.playwright = PlaywrightPage(self) if tab_id else PlaywrightContext(self)
-        if self.platform == "macos":
+        if self.platform in ("macos", "windows"):
             self.windows = (
                 Windows(self)
                 if not (display_id or window_id)
                 else UnsupportedNamespace("scope.windows")
             )
-            self.macos = Macos(self)
+            if self.platform == "macos":
+                self.macos = Macos(self)
             self.clipboard = Clipboard(self)
 
     async def destroy(self, *, timeout_ms=5000, action_id=None):

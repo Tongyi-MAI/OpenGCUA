@@ -38,7 +38,7 @@ async def main():
         await session.close()
     finally:
         await runtime.close()
-    cli = Path(sys.executable).parent / "mu"
+    cli = Path(sys.executable).parent / ("mu.exe" if sys.platform == "win32" else "mu")
     info = json.loads(subprocess.check_output([str(cli), "info"], text=True))
     assert info["runtime"] == "embedded", info
     print(f"qwen-intelligence-sdk {dist.version}: wheel, native runtime, resources and CLI OK")
