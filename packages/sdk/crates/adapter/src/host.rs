@@ -5,9 +5,10 @@ use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::Stdio,
-    time::Instant,
 };
+#[cfg(unix)]
+use std::{process::Stdio, time::Instant};
+#[cfg(unix)]
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
@@ -27,7 +28,7 @@ fn io_error(e: std::io::Error) -> Error {
 fn path(q: &Value, key: &str) -> Result<PathBuf, Error> {
     let p = q[key]
         .as_str()
-        .filter(|p| p.starts_with('/') && !p.contains('\0'))
+        .filter(|p| Path::new(p).is_absolute() && !p.contains('\0'))
         .ok_or_else(|| Error::new("INVALID_ARGUMENT", "use an absolute host path"))?;
     Ok(PathBuf::from(p))
 }
@@ -73,7 +74,10 @@ pub fn file(q: &Value) -> Result<Value, Error> {
             if data.len() > 1048576 {
                 return Err(Error::new("FILE_TOO_LARGE", "write limit is 1 MiB"));
             }
-            let mut tmp = tempfile::NamedTempFile::new_in(p.parent().unwrap()).map_err(io_error)?;
+            let parent = p
+                .parent()
+                .ok_or_else(|| Error::new("INVALID_ARGUMENT", "cannot write a filesystem root"))?;
+            let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
             tmp.write_all(&data).map_err(io_error)?;
             tmp.as_file().sync_all().map_err(io_error)?;
             if q["overwrite"] == true {
@@ -139,6 +143,7 @@ fn rename_exclusive(_: &Path, _: &Path) -> Result<(), Error> {
         "exclusive host rename unsupported on this platform",
     ))
 }
+#[cfg(unix)]
 async fn drain(
     mut stream: impl AsyncRead + Unpin,
     cap: usize,
@@ -157,6 +162,7 @@ async fn drain(
     }
     Ok((result, truncated))
 }
+#[cfg(unix)]
 pub async fn shell(q: &Value) -> Result<Value, Error> {
     let start = Instant::now();
     let budget = q["timeout_ms"].as_u64().unwrap_or(30000).clamp(1, 120000);
@@ -258,7 +264,17 @@ pub async fn shell(q: &Value) -> Result<Value, Error> {
     )
 }
 
+#[cfg(not(unix))]
+pub async fn shell(_q: &Value) -> Result<Value, Error> {
+    Err(Error::new(
+        "UNSUPPORTED_CAPABILITY",
+        "the shared POSIX shell service is unavailable on this host",
+    ))
+}
+
+#[cfg(unix)]
 struct ProcessGroup(u32);
+#[cfg(unix)]
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
         #[cfg(unix)]
@@ -295,6 +311,7 @@ mod tests {
             "FILE_TOO_LARGE"
         );
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn process_output_drains_beyond_limit_and_timeout_kills_group() {
         let q = json!({"argv":["/bin/sh","-c","printf 123456789; printf error >&2"],"max_output_bytes":3,"timeout_ms":2000});
@@ -311,5 +328,46 @@ mod tests {
             .unwrap();
         assert_eq!(r["state"], "timed_out");
         assert_eq!(r["cleanup"], "complete");
+    }
+
+    #[test]
+    fn relative_host_paths_are_rejected() {
+        for value in ["relative.txt", "../outside.txt", ""] {
+            assert_eq!(
+                file(&json!({"operation":"stat", "path":value}))
+                    .unwrap_err()
+                    .code,
+                "INVALID_ARGUMENT"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_must_include_a_root_and_drive_or_server() {
+        for value in [r"C:relative.txt", r"\relative.txt"] {
+            assert_eq!(
+                path(&json!({"path":value}), "path").unwrap_err().code,
+                "INVALID_ARGUMENT"
+            );
+        }
+        for value in [r"C:\absolute.txt", r"\\server\share\absolute.txt"] {
+            assert_eq!(
+                path(&json!({"path":value}), "path").unwrap(),
+                PathBuf::from(value)
+            );
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn posix_shell_is_rejected_before_starting_a_process() {
+        assert_eq!(
+            shell(&json!({"argv":["unexpected-program"]}))
+                .await
+                .unwrap_err()
+                .code,
+            "UNSUPPORTED_CAPABILITY"
+        );
     }
 }

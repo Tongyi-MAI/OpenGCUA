@@ -1,0 +1,21 @@
+{
+  "_comment": "Copy to local.json and set your model and endpoint. Supply credentials through OPENAI_API_KEY, ANTHROPIC_API_KEY, DASHSCOPE_API_KEY or API_KEY. Use openai for Chat Completions, openai-thinking for Responses, or anthropic for Messages. No API request is made with these placeholders.",
+  "model_name": "YOUR_MODEL_NAME",
+  "llm_base_url": "https://your-provider.example/v1",
+  "llm_protocol": "openai",
+  "reasoning_effort": "medium",
+  "max_steps": 30,
+  "max_tokens": 8192,
+  "api_timeout": 120.0,
+  "api_retries": 2,
+  "parse_retries": 2,
+  "driver_timeout": 30.0,
+  "code_timeout": 120.0,
+  "background_mode": true,
+  "web_profile": "isolated",
+  "startup_observation": "none",
+  "llm_compaction": true,
+  "compaction_trigger_tokens": 100000,
+  "compaction_max_tokens": 8000,
+  "skills_dirs": []
+}

@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from host_platform import IS_WINDOWS, open_private_file
+
 import hashlib
 import os
 import re
@@ -187,13 +189,33 @@ class MemoryStore:
             os.mkdir(self.directory, 0o700)
             info = os.lstat(self.directory)
         if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
-                or info.st_uid != os.getuid()):
+                or (not IS_WINDOWS and info.st_uid != os.getuid())):
             raise MemoryStoreError("MEMORY_UNSAFE_PATH")
+        if IS_WINDOWS:
+            try:
+                fd = open_private_file(self.directory, create=False, directory=True)
+                os.close(fd)
+            except OSError as exc:
+                raise MemoryStoreError("MEMORY_UNSAFE_PATH") from exc
+            return True
         if stat.S_IMODE(info.st_mode) != 0o700:
             os.chmod(self.directory, 0o700, follow_symlinks=False)
         return True
 
     def _check_file(self, *, create: bool) -> bool:
+        if IS_WINDOWS:
+            try:
+                fd = open_private_file(self.path, create=create)
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise MemoryStoreError("MEMORY_UNSAFE_PATH") from exc
+            try:
+                if os.fstat(fd).st_nlink != 1:
+                    raise MemoryStoreError("MEMORY_UNSAFE_PATH")
+            finally:
+                os.close(fd)
+            return True
         flags = os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0) | (os.O_CREAT if create else 0)
         try:
             fd = os.open(self.path, flags, 0o600)

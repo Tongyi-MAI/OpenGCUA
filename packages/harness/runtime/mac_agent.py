@@ -46,12 +46,44 @@ from event_protocol import EventClock, ACTION_LABELS
 from action_journal import ActionJournal
 from context_risk import ActionRiskIndex
 from memory_runtime import MemoryService, resolve_memory_root
+from host_platform import IS_WINDOWS, open_private_file
 
 
 DEFAULT_MODEL_NAME = llm_entry.DEFAULT_MODEL_NAME
 DEFAULT_LLM_BASE_URL = llm_entry.DEFAULT_LLM_BASE_URL
 DEFAULT_API_KEY = None  # set DASHSCOPE_API_KEY / API_KEY in env, or pass --api-key (never commit a key)
 DEFAULT_MAX_STEPS = 0  # 0 means unlimited; stall detection bounds the run
+
+WINDOWS_PLATFORM_NOTE = r"""
+## Windows host
+This session runs on Windows. `device` is the local Windows endpoint, registered
+as `windows`; the SDK API, observation references, receipts and consent rules are
+unchanged. Mac bundle IDs, CGWindowID parsing, AppleScript, Spaces and /bin/bash in
+the examples do not apply. Discover actual application/window IDs from this
+device. After a reset, list and bind current Windows windows again; do not use
+the macOS-only rebind_window helper or derive raw HWNDs from SDK identifiers.
+Use powershell(cmd, timeout=120, echo=False, cwd=None) for native shell work.
+It is synchronous and returns stdout/stderr/returncode/ok/timed_out like bash;
+each call has its own shell state. bash() is unavailable on Windows. Prefer
+Python's standard library for portable file operations. Shell execution is not
+an isolation boundary or an alternative route around GUI authorization.
+Default isolated background browsing uses headless Chromium on Windows. A
+visible/demo browser is a separate explicit mode. Background native actions
+must leave foreground focus and the physical mouse unchanged. Capability or
+delivery errors are real limits: never silently substitute foreground input,
+ignore a target, automate UAC/secure desktop, or control elevated applications.
+Native input.text inserts characters into the current editing context; it is
+not clipboard paste or a spreadsheet-table operation. Never send TSV through
+it to populate cells. Select and verify one cell at a time, send one value,
+then use separate press_key calls for Enter/Tab. An accessibility click can
+invoke a cell's editor instead of selecting the cell, so Delete may erase one
+character rather than clear the cell. If selection is ambiguous, use an
+explicit background click grounded in a fresh exact-window image and verify
+the editing state before inserting or clearing text. An Edit/Document role
+does not establish writable ValuePattern support; do not assume set_text works
+on an Office formula bar or document body. Images require a restored target
+window; a minimized window is not a valid image-action target.
+"""
 
 
 @dataclass(frozen=True)
@@ -1033,6 +1065,8 @@ class ContextManager:
             prompt += BACKGROUND_MODE_NOTE
         if os.environ.get("GENERALIST_ANDROID_SERIAL") and ui_api == "mai-ui":
             prompt += MOBILE_DEMO_NOTE
+        if IS_WINDOWS and ui_api == "mai-ui":
+            prompt += WINDOWS_PLATFORM_NOTE
         self.screenshot_coordinate_note = (
             MAI_UI_SCREENSHOT_COORDINATE_NOTE if ui_api == "mai-ui" else SCREENSHOT_COORDINATE_NOTE
         )
@@ -1631,6 +1665,8 @@ class TrajectoryWriter:
             self.screenshot_dir.mkdir(parents=True, exist_ok=True)
             self.steps_dir.mkdir(parents=True, exist_ok=True)
             self.work_dir.mkdir(parents=True, exist_ok=True)
+            if IS_WINDOWS:
+                os.close(open_private_file(self.run_dir, create=False, directory=True))
             self.data.setdefault("tasks", [])
             self.data.setdefault("steps", [])
             self.data["status"] = "running"
@@ -1653,6 +1689,8 @@ class TrajectoryWriter:
         self.screenshot_dir.mkdir(parents=True, exist_ok=False)
         self.steps_dir.mkdir()
         self.work_dir.mkdir()
+        if IS_WINDOWS:
+            os.close(open_private_file(self.run_dir, create=False, directory=True))
         self.path = self.run_dir / "traj.json"
         self.image_count = 0
         self.data: dict[str, Any] = {
@@ -1695,12 +1733,31 @@ class TrajectoryWriter:
         self.data["tasks"][-1]["answer"] = answer
         self.flush()
 
+    @staticmethod
+    def _replace_json(temporary: Path, destination: Path) -> None:
+        """Bound Windows sharing retries; retain the old file and temp on failure."""
+        delays = iter((0.02, 0.04, 0.08, 0.16, 0.32))
+        while True:
+            try:
+                os.replace(temporary, destination)
+                return
+            except OSError as exc:
+                if not IS_WINDOWS or getattr(exc, "winerror", None) not in {5, 32, 33}:
+                    raise
+                delay = next(delays, None)
+                if delay is None:
+                    raise
+                # Readers without FILE_SHARE_DELETE can briefly block replace.
+                # Access denied can also be permanent: never suppress exhaustion
+                # or fall back to truncating/deleting the last successful file.
+                time.sleep(delay)
+
     def flush(self) -> None:
         temporary = self.path.with_suffix(".json.tmp")
         temporary.write_text(
             json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        os.replace(temporary, self.path)
+        self._replace_json(temporary, self.path)
         if self.data.get("steps"):
             self._sync_step_metadata(self.data["steps"][-1])
 
@@ -1737,7 +1794,7 @@ class TrajectoryWriter:
             payload["reply"] = reply
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, path)
+        self._replace_json(temporary, path)
 
     def checkpoint_step(self, step: int, task_index: int, metrics: dict[str, Any]) -> None:
         record = next((item for item in self.data["steps"] if item["step"] == step), None)
@@ -1772,7 +1829,7 @@ class TrajectoryWriter:
         base.update(updates)
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(base, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, path)
+        self._replace_json(temporary, path)
         return base
 
     def save_step_record(
@@ -2122,8 +2179,38 @@ def collect_emitted_images(
     return tuple(paths), notices
 
 
+def console_is_interactive(stream: Any) -> bool:
+    """Distinguish a Windows console from character devices such as NUL."""
+    try:
+        if not stream.isatty():
+            return False
+        if not IS_WINDOWS:
+            return True
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetConsoleMode.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel.GetConsoleMode.restype = wintypes.BOOL
+        mode = wintypes.DWORD()
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        return bool(kernel.GetConsoleMode(handle, ctypes.byref(mode)))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 async def console_input(prompt: str) -> str:
-    """终端等待输入时保持事件循环可运行；取消不遗留阻塞 input 的线程。"""
+    """Read console input without blocking the loop or leaving a blocked reader."""
+    if IS_WINDOWS:
+        if console_is_interactive(sys.stdin):
+            # Proactor cannot register console fds with add_reader. The existing
+            # terminal library detaches its Windows input watcher on cancellation.
+            from prompt_toolkit import PromptSession
+
+            return await PromptSession().prompt_async(prompt)
+        # Preserve line-oriented input from pipes and embedded callers.
+        return await asyncio.to_thread(input, prompt)
     try:
         fd = sys.stdin.fileno() if sys.stdin.isatty() else None
     except (AttributeError, OSError, ValueError):
@@ -2182,7 +2269,7 @@ async def run_agent(
     configure_runtime_mode(args)
     frontend = frontend or PlainFrontend(
         console_input,
-        interactive=sys.stdin.isatty(),
+        interactive=console_is_interactive(sys.stdin),
         stdout=sys.stdout,
         stderr=sys.stderr,
         hub_events=os.environ.get("MAC_AGENT_HUB_EVENTS") == "1",
@@ -2972,7 +3059,8 @@ async def run_agent(
             run_id = uuid.uuid4().hex
             if record_model_requests:
                 enabled = client.configure_recording(writer.run_dir, metadata={
-                    "run_id": run_id, "session_id": session_id, "platform": "macos", "provider": "cua",
+                    "run_id": run_id, "session_id": session_id,
+                    "platform": "windows" if IS_WINDOWS else "macos", "provider": "cua",
                     "ui_api": ui_api, "ui_api_version": UI_API_MARKERS[ui_api],
                 })
                 present(
@@ -3461,6 +3549,9 @@ async def run_agent(
                                     ),
                                     empty_exits=True,
                                 ))
+                            except (EOFError, OSError, NotImplementedError) as input_error:
+                                logger.warning("model retry input is unavailable: %s", input_error)
+                                raise exc from input_error
                             finally:
                                 step_metrics["user_wait_time_seconds"] += time.monotonic() - wait_started
                             if choice is None and _abort_event().is_set():
@@ -4373,7 +4464,8 @@ def _default_config_path(explicit: str | None) -> str | None:
     if explicit:
         return explicit
     base = Path(__file__).resolve().parents[1] / "configs"
-    for cand in (os.environ.get("MAC_AGENT_CONFIG"), base / "local.json", base / "macos_demo.json"):
+    example = "windows_example.json" if IS_WINDOWS else "macos_demo.json"
+    for cand in (os.environ.get("MAC_AGENT_CONFIG"), base / "local.json", base / example):
         if cand and Path(cand).is_file():
             return str(cand)
     return None
@@ -4390,6 +4482,14 @@ def main() -> int:
             known = {a.dest for a in parser._actions}
             parser.set_defaults(**{k: v for k, v in cfg.items() if k in known})
         args = parser.parse_args()
+        if IS_WINDOWS and (
+            str(args.model_name).startswith("YOUR_")
+            or "your-provider.example" in str(args.llm_base_url)
+        ):
+            raise SystemExit(
+                "Configure your model and provider endpoint in local.json or pass "
+                "--model-name and --llm-base-url; windows_example.json contains placeholders."
+            )
         configure_runtime_mode(args)
         if not args.api_key and cfg_path:  # config 里的 api_key 作为兜底（local.json 已 gitignore）
             cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
@@ -4397,8 +4497,8 @@ def main() -> int:
                 args.api_key = cfg["api_key"]
         from terminal_tui import build_rich_frontend, resolve_ui_mode
 
-        stdin_tty = sys.stdin.isatty()
-        stdout_tty = sys.stdout.isatty()
+        stdin_tty = console_is_interactive(sys.stdin)
+        stdout_tty = console_is_interactive(sys.stdout)
         resolved_ui = resolve_ui_mode(
             args.ui,
             stdin_tty=stdin_tty,

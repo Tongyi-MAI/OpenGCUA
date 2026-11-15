@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from pathlib import Path
+import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -221,6 +223,32 @@ class Runtime:
         return self._cache_endpoint(
             await call(self._core, dict(op="add_macos", **options)),
             rebuild=("native", "add_macos", options),
+        )
+
+    async def add_windows(self, *, name: str, driver_path: str | None = None) -> ResourceInfo:
+        """Own a Windows CUA Driver process without attaching to a global service.
+
+        Install the pinned driver with ``mu setup windows`` or supply an absolute
+        executable path. Existing SDK scopes, receipts and permissions apply.
+        """
+        from ..windows_setup import resolve_driver
+
+        if sys.platform != "win32":
+            raise MuError("UNSUPPORTED_CAPABILITY", "The Windows adapter requires Windows")
+        if not isinstance(name, str) or not name.strip():
+            raise MuError("INVALID_ARGUMENT", "name must be a nonempty string")
+        if driver_path is not None and (not isinstance(driver_path, str) or not driver_path):
+            raise MuError("INVALID_ARGUMENT", "driver_path must be an absolute executable path")
+        try:
+            driver = resolve_driver(driver_path)
+        except ValueError as error:
+            raise MuError("INVALID_ARGUMENT", str(error)) from error
+        except OSError as error:
+            raise MuError("SETUP_REQUIRED", str(error)) from error
+        options = dict(name=name, driver_path=str(driver), python=str(Path(sys.executable).resolve()))
+        return self._cache_endpoint(
+            await call(self._core, dict(op="add_windows", **options)),
+            rebuild=("native", "add_windows", options),
         )
 
     async def add_linux(

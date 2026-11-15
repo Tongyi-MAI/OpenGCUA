@@ -799,7 +799,18 @@ def test_ctrl_c_during_agent_question_returns_to_same_task(tmp_path, monkeypatch
     assert "问题已中止，请按原任务继续" in json.dumps(inputs[1], ensure_ascii=False)
 
 
-def test_interactive_wrapper_starts_and_stops_ui_even_on_error(monkeypatch):
+@pytest.fixture
+def headless_terminal():
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import DummyInput
+    from prompt_toolkit.output import DummyOutput
+
+    # These tests exercise wrapper lifecycle, not the host's terminal renderer.
+    with create_app_session(input=DummyInput(), output=DummyOutput()):
+        yield
+
+
+def test_interactive_wrapper_starts_and_stops_ui_even_on_error(monkeypatch, headless_terminal):
     import mac_agent
 
     class Frontend:
@@ -826,7 +837,7 @@ def test_interactive_wrapper_starts_and_stops_ui_even_on_error(monkeypatch):
     assert frontend.events == ["start", "run", "stop", "close"]
 
 
-def test_interactive_wrapper_reports_terminal_failure(monkeypatch):
+def test_interactive_wrapper_reports_terminal_failure(monkeypatch, headless_terminal):
     import mac_agent
 
     class Frontend:

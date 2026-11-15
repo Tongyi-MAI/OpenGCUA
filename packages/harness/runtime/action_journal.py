@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from action_feedback import action_feedback
+from host_platform import open_private_file, sync_parent_directory
 
 
 _STAGES = {
@@ -67,22 +68,16 @@ class ActionJournal:
         self.record_sequence = 0
         self._chain = ""
         # 不截断任何既有文件，包括未完成尾行；损坏时选择停止并报告 CORRUPT。
-        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         created = not self.path.exists()
         try:
-            self._fd = os.open(self.path, flags, 0o600)
+            self._fd = open_private_file(self.path)
             if not stat.S_ISREG(os.fstat(self._fd).st_mode):
                 raise ActionJournalError("CORRUPT")
-            os.fchmod(self._fd, 0o600)
             self._load()
             self._restored_ids.update(self._actions)
             os.fsync(self._fd)
             if created:
-                directory = os.open(self.path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+                sync_parent_directory(self.path.parent)
         except BaseException:
             if self._fd is not None:
                 os.close(self._fd)

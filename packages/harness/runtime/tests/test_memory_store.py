@@ -5,12 +5,14 @@ import os
 import sqlite3
 import stat
 import threading
+from pathlib import Path
 
 import pytest
 
 import memory_store
 from memory_runtime import MemoryService, resolve_memory_root
 from memory_store import MemoryStore, MemoryStoreError
+from host_platform import IS_WINDOWS
 
 
 def propose(store, title="钉钉周报流程", content="发送周报前先让用户确认收件人列表", kind="workflow", app="钉钉", **kw):
@@ -28,8 +30,10 @@ def test_default_root_shared_by_cli_and_app_and_explicit_override(tmp_path, monk
     assert resolve_memory_root() == tmp_path / "data" / "memory"
     assert resolve_memory_root(tmp_path / "custom") == tmp_path / "custom"
     monkeypatch.delenv("GENERALIST_DATA_DIR")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    assert resolve_memory_root() == tmp_path / "home/Library/Application Support/Generalist/memory"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    expected = "local/Generalist/memory" if IS_WINDOWS else "home/Library/Application Support/Generalist/memory"
+    assert resolve_memory_root() == tmp_path / expected
 
 
 def test_lazy_reads_never_create_directory_or_database(tmp_path):
@@ -186,12 +190,18 @@ def test_permissions_and_symlink_roots_fail_closed(tmp_path):
     root = tmp_path / "data" / "memory"
     service = MemoryService(root)
     assert service.propose({"title": "钉钉周报流程", "content": "先确认收件人"})["ok"]
-    assert stat.S_IMODE(os.lstat(root).st_mode) == 0o700
-    assert stat.S_IMODE(os.lstat(root / memory_store.DB_NAME).st_mode) == 0o600
+    if not IS_WINDOWS:
+        assert stat.S_IMODE(os.lstat(root).st_mode) == 0o700
+        assert stat.S_IMODE(os.lstat(root / memory_store.DB_NAME).st_mode) == 0o600
 
     real = tmp_path / "real"
     real.mkdir(mode=0o700)
-    (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+    try:
+        (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+    except OSError as exc:
+        if IS_WINDOWS and exc.winerror == 1314:
+            pytest.skip("Windows symlink creation privilege is unavailable")
+        raise
     linked = MemoryService(tmp_path / "linked")
     result = linked.propose({"title": "钉钉周报流程", "content": "先确认收件人"})
     assert result["status"] == "not_available" and result["error_code"] == "MEMORY_UNSAFE_PATH"
@@ -218,7 +228,8 @@ def test_permissions_and_symlink_roots_fail_closed(tmp_path):
     loose = tmp_path / "loose"
     loose.mkdir(mode=0o755)
     propose(MemoryStore(loose))
-    assert stat.S_IMODE(os.lstat(loose).st_mode) == 0o700
+    if not IS_WINDOWS:
+        assert stat.S_IMODE(os.lstat(loose).st_mode) == 0o700
 
 
 @pytest.mark.parametrize("title,content,code", [
@@ -637,6 +648,8 @@ def test_locked_recall_retains_tracking_and_detects_forget_after_recovery(tmp_pa
 @pytest.mark.parametrize("failure_point", ["lstat", "chmod"])
 @pytest.mark.parametrize("error_type", [PermissionError, OSError])
 def test_initial_directory_failure_is_bounded_and_recoverable(tmp_path, monkeypatch, failure_point, error_type):
+    if IS_WINDOWS and failure_point == "chmod":
+        pytest.skip("POSIX chmod branch; Windows ACL failure has separate coverage")
     root = tmp_path / "memory"
     seeded = MemoryService(root)
     created = seeded.propose({"title": "钉钉周报流程", "content": "先核对附件", "app": "钉钉"})

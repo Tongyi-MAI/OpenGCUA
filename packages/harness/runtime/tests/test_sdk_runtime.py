@@ -14,6 +14,16 @@ import llm_entry
 import mac_agent
 import model_stream
 from sdk_backend import SdkDesktop, SdkRpcServer
+import sdk_backend
+
+
+@pytest.fixture(autouse=True)
+def macos_runtime_contract(monkeypatch):
+    # These existing SDK fixtures model macOS IDs and add_macos(). Keep testing
+    # that contract on Windows; native host coverage lives in test_windows_host.
+    monkeypatch.setattr(code_runtime, "IS_WINDOWS", False)
+    monkeypatch.setattr(mac_agent, "IS_WINDOWS", False)
+    monkeypatch.setattr(sdk_backend, "IS_WINDOWS", False)
 
 
 def test_checked_subprocess_failure_sets_cell_status_and_shows_child_stderr(capsys):
@@ -828,7 +838,8 @@ def test_browser_worker_log_goes_to_the_run_directory(monkeypatch, tmp_path):
     asyncio.run(code_runtime._create_web_resource(object(), types.SimpleNamespace(browsers=Browsers())))
     assert code_runtime.os.environ["MAI_UI_PROVIDER_LOG"] == str(tmp_path / "browser.log")
     assert "[host] SDK browser created" in (tmp_path / "browser.log").read_text()
-    assert (tmp_path / "browser.log").stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert (tmp_path / "browser.log").stat().st_mode & 0o777 == 0o600
     monkeypatch.delenv("MAI_UI_PROVIDER_LOG")
 
 

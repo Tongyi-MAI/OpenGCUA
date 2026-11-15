@@ -19,6 +19,7 @@ build/
 target/
 *.so
 *.pyd
+*.pdb
 node_modules/
 /packages/sdk/adapters/android/out/
 HANDOFF.md

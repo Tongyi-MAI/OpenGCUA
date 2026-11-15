@@ -47,6 +47,11 @@ pub fn describe(
         if platform == "android" && app && public.starts_with("ui.vision") {
             state = "unsupported";
         }
+        if platform == "windows" && !app && public.starts_with("ui.") {
+            // Windows observations/actions require an explicitly bound native
+            // app or window; the provider never substitutes the whole desktop.
+            state = "unsupported";
+        }
         if platform == "macos"
             && ((!app && public.starts_with("ui.ax"))
                 || matches!(public.as_str(), "ui.vision.swipe" | "ui.vision.long_press")
@@ -135,4 +140,25 @@ pub fn describe(
         }
     }
     Value::Object(result)
+}
+
+#[cfg(test)]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn windows_desktop_does_not_advertise_unbound_control() {
+        let offered = json!({"ui.observe.tree":{"state":"ready"},
+            "ui.observe.screenshot":{"state":"ready"},"ui.click.primary":{"state":"ready"}});
+        let desktop = describe(&offered, "windows", "windows.cua", &json!({}), "control");
+        assert_eq!(desktop["ui.ax.observe"]["state"], "unsupported");
+        assert_eq!(desktop["ui.vision.observe"]["state"], "unsupported");
+        let bound = describe(&offered, "windows", "windows.cua",
+            &json!({"app_id":"app:observed","window_id":"window:observed"}), "control");
+        assert_eq!(bound["ui.ax.observe"]["state"], "ready");
+        assert_eq!(bound["ui.ax.click"]["state"], "ready");
+        let read = describe(&offered, "windows", "windows.cua",
+            &json!({"app_id":"app:observed"}), "read");
+        assert_eq!(read["ui.ax.click"]["state"], "denied");
+    }
 }

@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 mai-ui-macos-agent = "mac_agent:main"
+mai-ui-windows-agent = "mac_agent:main"
 mai-ui-gui-agent = "gui_agent:main"
 mai-ui-macos-demo-hub = "demo_hub:main"
 
@@ -38,6 +39,7 @@ py-modules = [
   "rollout_data",
   "code_executor",
   "code_runtime",
+  "host_platform",
   "agent_events",
   "event_protocol",
   "action_journal",

@@ -387,6 +387,7 @@ impl Host {
         match s(&q, "op")? {
             "linux_admin" => linux::admin(&q).await,
             "add_linux" => self.add_linux(&q).await,
+            "add_windows" => self.add_windows(&q).await,
             "browser_admin" => browser_admin::admin(s(&q, "operation")?, s(&q, "engine")?).await,
             "request" => {
                 self.runtime
@@ -803,3 +804,5 @@ pub mod shell;
 mod composition;
 
 pub mod linux;
+
+mod windows;

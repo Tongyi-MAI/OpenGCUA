@@ -22,8 +22,10 @@ Source installs require **CPython 3.11–3.14, Rust/Cargo 1.89+ and a C toolchai
 (Xcode Command Line Tools on macOS, a C compiler/linker on Linux). `uv` installs
 Maturin automatically and builds the native extension. Use `uv pip install -e
 ./packages/sdk` for an editable development install; native edits still require rebuilding.
-Windows host builds are not supported yet because the native provider code uses
-Unix APIs. Device support and SDK host compatibility are separate: controlling
+Native Windows host builds and a background CUA provider are available as a
+development preview; see [Windows setup and limits](../../WINDOWS.md).
+Windows source builds need the Visual Studio C++ build tools. Device support
+and SDK host compatibility are separate: controlling
 macOS still requires macOS 14+ and its driver/permissions.
 
 For the fastest install, pass a downloaded wheel or a hosted wheel URL directly
@@ -114,7 +116,7 @@ Make native macOS changes in that directory.
 | Android adapter | 🟡 preview |
 | Browser adapter | 🟡 preview |
 | Linux adapter | 🟡 preview |
-| Windows adapter | ⚪ planned (v1.0) |
+| Windows adapter | 🟡 development preview; [setup and limits](../../WINDOWS.md) |
 
 ## Layout
 

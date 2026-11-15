@@ -10,6 +10,11 @@ serde_json.workspace = true
 
 base64 = "0.22"
 
-tokio.workspace = true
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+tokio.workspace = true
 libc = "0.2"
+
+[dev-dependencies]
+tokio.workspace = true

@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from event_protocol import EventClock, EventProjection, terminal_state, terminal_status, validate_event
 from memory_runtime import MemoryService, error_text
+from host_platform import user_data_directory
 
 PROTOCOL = 1
 
@@ -850,8 +851,7 @@ async def serve():
     # Detailed execution evidence is already stored in the private run directory.
     quiet = open(os.devnull, "w")
     sys.stdout = sys.stderr = quiet
-    root = Path(os.environ.get("GENERALIST_DATA_DIR") or
-                Path.home() / "Library/Application Support/Generalist")
+    root = user_data_directory()
     runs = root / "runs"
     runs.mkdir(parents=True, exist_ok=True, mode=0o700)
 

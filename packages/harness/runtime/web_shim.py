@@ -49,6 +49,7 @@ import tempfile
 import sys
 import time
 from typing import Any, Optional
+from host_platform import user_data_directory
 
 try:  # reuse the SDK's own receipt type so field names cannot drift
     from mai_ui.unified.runtime import ActionReceipt
@@ -153,9 +154,7 @@ def _stop_owned_profile_processes(profile: Path):
 # process group: a worker killed at the 300s step limit cannot close it. Each launch
 # therefore records a lease; a later launch adopts or stops browsers whose owner died.
 def _lease_dir() -> Path:
-    base = os.environ.get("GENERALIST_DATA_DIR")
-    root = Path(base).expanduser() if base else Path.home() / "Library/Application Support/Generalist"
-    return root / "browser-leases"
+    return user_data_directory() / "browser-leases"
 
 
 def _write_lease(profile: Path) -> None:
@@ -946,7 +945,7 @@ async def create_web(*, storage_state: Optional[str] = None,
     background_tabs = (os.environ.get("MAC_AGENT_BACKGROUND") == "1"
                        and not visible and sys.platform == "darwin")
     if headless is None:
-        headless = False
+        headless = sys.platform == "win32" and os.environ.get("MAC_AGENT_BACKGROUND") == "1"
     if visible:
         headless = False
     if (not cdp and not headless and sys.platform.startswith("linux")

@@ -10,7 +10,7 @@ from . import _native
 def main():
     parser = argparse.ArgumentParser(prog="mu")
     parser.add_argument("command", choices=("info", "setup", "doctor"))
-    parser.add_argument("platform", nargs="?", choices=("macos", "browser", "linux"))
+    parser.add_argument("platform", nargs="?", choices=("macos", "browser", "linux", "windows"))
     parser.add_argument("--replace", action="store_true")
     parser.add_argument("--archive")
     parser.add_argument("--app", help="doctor: signed app path for isolated host validation")
@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--display")
     parser.add_argument("--xauthority")
     parser.add_argument("--python", help="Linux adapter interpreter")
+    parser.add_argument("--driver", help="Windows doctor: absolute CUA Driver executable path")
     args = parser.parse_args()
     if args.command == "info":
         print(
@@ -26,11 +27,26 @@ def main():
                 dict(
                     sdk_api_version="0.3",
                     runtime="embedded",
-                    adapters=["android", "macos", "browser", "linux"],
+                    adapters=["android", "macos", "browser", "linux", "windows"],
                     bindings=["python", "javascript"],
                 )
             )
         )
+        return
+    if args.platform == "windows":
+        from .windows_setup import doctor, setup
+
+        if args.command == "doctor" and (args.archive or args.replace):
+            parser.error("--archive and --replace apply only to setup")
+        if args.command == "setup" and args.driver:
+            parser.error("--driver applies to doctor; use MAI_UI_WINDOWS_HOME for the installation directory")
+        try:
+            result = setup(archive=args.archive, replace=args.replace) if args.command == "setup" else doctor(args.driver)
+        except (OSError, ValueError) as error:
+            result = dict(state="needs_setup", error=str(error))
+        print(json.dumps(result))
+        if result.get("state") != "ready":
+            raise SystemExit(1)
         return
     if args.platform == "linux":
         from .unified.runtime import call

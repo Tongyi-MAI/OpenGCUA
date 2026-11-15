@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import re
+from host_platform import IS_WINDOWS, user_data_directory
 
 
 MAX_SKILLS = 64
@@ -22,7 +23,8 @@ _MARKER = re.compile(r"(?<![\w$])\$([a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?![\w-])")
 def default_skill_roots(runtime_file: Path | str) -> tuple[Path, Path]:
     """Resolve bundled Skills from source checkout or app Resources/runtime."""
     return (Path(runtime_file).resolve().parents[1] / "skills",
-            Path.home() / "Library/Application Support/Generalist/skills")
+            (user_data_directory() / "skills" if IS_WINDOWS
+             else Path.home() / "Library/Application Support/Generalist/skills"))
 
 
 @dataclass(frozen=True, slots=True)
