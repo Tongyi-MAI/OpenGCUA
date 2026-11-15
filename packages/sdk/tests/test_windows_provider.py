@@ -245,6 +245,58 @@ def test_screenshot_only_does_not_invalidate_ax_node(bound):
     assert driver.calls[-1][0] == "set_value"
 
 
+@pytest.mark.parametrize("tree", [False, True])
+def test_minimized_screenshot_is_rejected_before_capture_or_ax_invalidation(bound, tree):
+    p, driver, _, scope = bound
+    node = observe(p, scope)["nodes"][0]
+    driver.rows[0]["minimized"] = True
+    before = len(driver.calls)
+    with pytest.raises(Error) as exc:
+        observe(p, scope, tree=tree, screenshot=True)
+    assert exc.value.code == "CAPTURE_UNAVAILABLE"
+    assert "minimized" in str(exc.value)
+    assert "Restore the target window manually" in str(exc.value)
+    assert exc.value.details == {"window_id": scope["window_id"], "reason": "window_minimized"}
+    assert all(
+        name == "list_windows" and not mutation for name, _, mutation in driver.calls[before:]
+    )
+    assert p.nodes[node["id"]] == node
+    assert p.snapshots[scope["window_id"]] == node["target"]["snapshot_id"]
+
+
+def test_minimized_window_allows_accessibility_only_observation(bound):
+    p, driver, _, scope = bound
+    driver.rows[0]["minimized"] = True
+    result = observe(p, scope)
+    assert result["nodes"]
+    assert not result["images"]
+    name, args, mutation = driver.calls[-1]
+    assert name == "get_window_state"
+    assert args["include_accessibility_tree"] is True
+    assert args["include_screenshot"] is False
+    assert not mutation
+
+
+def test_app_screenshot_checks_all_included_windows_before_capture(bound):
+    p, driver, native, scope = bound
+    driver.rows[1].update(pid=44, minimized=True)
+    native.owners[202] = (44, 8)
+    before = len(driver.calls)
+    with pytest.raises(Error) as exc:
+        observe(p, {"app_id": scope["app_id"]}, screenshot=True)
+    assert exc.value.code == "CAPTURE_UNAVAILABLE"
+    assert all(
+        name == "list_windows" and not mutation for name, _, mutation in driver.calls[before:]
+    )
+
+
+@pytest.mark.parametrize("minimized", [False, None])
+def test_only_known_minimized_state_prevents_screenshot(bound, minimized):
+    p, driver, _, scope = bound
+    driver.rows[0]["minimized"] = minimized
+    assert observe(p, scope, screenshot=True)["images"]
+
+
 def test_cross_window_node_cannot_escape_bound_scope(bound):
     p, driver, _, scope = bound
     node = observe(p, scope)["nodes"][0]

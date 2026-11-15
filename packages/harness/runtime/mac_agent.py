@@ -72,6 +72,17 @@ visible/demo browser is a separate explicit mode. Background native actions
 must leave foreground focus and the physical mouse unchanged. Capability or
 delivery errors are real limits: never silently substitute foreground input,
 ignore a target, automate UAC/secure desktop, or control elevated applications.
+Native input.text inserts characters into the current editing context; it is
+not clipboard paste or a spreadsheet-table operation. Never send TSV through
+it to populate cells. Select and verify one cell at a time, send one value,
+then use separate press_key calls for Enter/Tab. An accessibility click can
+invoke a cell's editor instead of selecting the cell, so Delete may erase one
+character rather than clear the cell. If selection is ambiguous, use an
+explicit background click grounded in a fresh exact-window image and verify
+the editing state before inserting or clearing text. An Edit/Document role
+does not establish writable ValuePattern support; do not assume set_text works
+on an Office formula bar or document body. Images require a restored target
+window; a minimized window is not a valid image-action target.
 """
 
 
@@ -1722,12 +1733,31 @@ class TrajectoryWriter:
         self.data["tasks"][-1]["answer"] = answer
         self.flush()
 
+    @staticmethod
+    def _replace_json(temporary: Path, destination: Path) -> None:
+        """Bound Windows sharing retries; retain the old file and temp on failure."""
+        delays = iter((0.02, 0.04, 0.08, 0.16, 0.32))
+        while True:
+            try:
+                os.replace(temporary, destination)
+                return
+            except OSError as exc:
+                if not IS_WINDOWS or getattr(exc, "winerror", None) not in {5, 32, 33}:
+                    raise
+                delay = next(delays, None)
+                if delay is None:
+                    raise
+                # Readers without FILE_SHARE_DELETE can briefly block replace.
+                # Access denied can also be permanent: never suppress exhaustion
+                # or fall back to truncating/deleting the last successful file.
+                time.sleep(delay)
+
     def flush(self) -> None:
         temporary = self.path.with_suffix(".json.tmp")
         temporary.write_text(
             json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        os.replace(temporary, self.path)
+        self._replace_json(temporary, self.path)
         if self.data.get("steps"):
             self._sync_step_metadata(self.data["steps"][-1])
 
@@ -1764,7 +1794,7 @@ class TrajectoryWriter:
             payload["reply"] = reply
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, path)
+        self._replace_json(temporary, path)
 
     def checkpoint_step(self, step: int, task_index: int, metrics: dict[str, Any]) -> None:
         record = next((item for item in self.data["steps"] if item["step"] == step), None)
@@ -1799,7 +1829,7 @@ class TrajectoryWriter:
         base.update(updates)
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(base, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, path)
+        self._replace_json(temporary, path)
         return base
 
     def save_step_record(
@@ -2149,8 +2179,38 @@ def collect_emitted_images(
     return tuple(paths), notices
 
 
+def console_is_interactive(stream: Any) -> bool:
+    """Distinguish a Windows console from character devices such as NUL."""
+    try:
+        if not stream.isatty():
+            return False
+        if not IS_WINDOWS:
+            return True
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetConsoleMode.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel.GetConsoleMode.restype = wintypes.BOOL
+        mode = wintypes.DWORD()
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        return bool(kernel.GetConsoleMode(handle, ctypes.byref(mode)))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 async def console_input(prompt: str) -> str:
-    """终端等待输入时保持事件循环可运行；取消不遗留阻塞 input 的线程。"""
+    """Read console input without blocking the loop or leaving a blocked reader."""
+    if IS_WINDOWS:
+        if console_is_interactive(sys.stdin):
+            # Proactor cannot register console fds with add_reader. The existing
+            # terminal library detaches its Windows input watcher on cancellation.
+            from prompt_toolkit import PromptSession
+
+            return await PromptSession().prompt_async(prompt)
+        # Preserve line-oriented input from pipes and embedded callers.
+        return await asyncio.to_thread(input, prompt)
     try:
         fd = sys.stdin.fileno() if sys.stdin.isatty() else None
     except (AttributeError, OSError, ValueError):
@@ -2209,7 +2269,7 @@ async def run_agent(
     configure_runtime_mode(args)
     frontend = frontend or PlainFrontend(
         console_input,
-        interactive=sys.stdin.isatty(),
+        interactive=console_is_interactive(sys.stdin),
         stdout=sys.stdout,
         stderr=sys.stderr,
         hub_events=os.environ.get("MAC_AGENT_HUB_EVENTS") == "1",
@@ -3489,6 +3549,9 @@ async def run_agent(
                                     ),
                                     empty_exits=True,
                                 ))
+                            except (EOFError, OSError, NotImplementedError) as input_error:
+                                logger.warning("model retry input is unavailable: %s", input_error)
+                                raise exc from input_error
                             finally:
                                 step_metrics["user_wait_time_seconds"] += time.monotonic() - wait_started
                             if choice is None and _abort_event().is_set():
@@ -4434,8 +4497,8 @@ def main() -> int:
                 args.api_key = cfg["api_key"]
         from terminal_tui import build_rich_frontend, resolve_ui_mode
 
-        stdin_tty = sys.stdin.isatty()
-        stdout_tty = sys.stdout.isatty()
+        stdin_tty = console_is_interactive(sys.stdin)
+        stdout_tty = console_is_interactive(sys.stdout)
         resolved_ui = resolve_ui_mode(
             args.ui,
             stdin_tty=stdin_tty,

@@ -306,6 +306,8 @@ class PlainFrontend:
     async def read(self, prompt: AgentPrompt) -> str | None:
         self._turn_active = False
         self._abort_requested = False
+        if prompt.kind == "retry" and not self.interactive:
+            return None
         if prompt.kind in {"question", "approval"}:
             label = f"Agent> {prompt.text}\n你> " if self.interactive else "你> "
         elif prompt.kind == "retry":

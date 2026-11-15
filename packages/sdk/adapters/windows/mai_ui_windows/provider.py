@@ -316,6 +316,16 @@ class Provider:
             raise Error(
                 "UNSUPPORTED_CAPABILITY", "Windows observations require a bound app or window"
             )
+        if screenshot:
+            for window in windows[:MAX_WINDOWS]:
+                if window.get("minimized") is True:
+                    raise Error(
+                        "CAPTURE_UNAVAILABLE",
+                        f"Window {window['title']!r} is minimized. Restore the target window "
+                        "manually before requesting a screenshot; accessibility-only "
+                        "observation remains available.",
+                        {"window_id": window["id"], "reason": "window_minimized"},
+                    )
         result = {
             "nodes": [],
             "images": [],
